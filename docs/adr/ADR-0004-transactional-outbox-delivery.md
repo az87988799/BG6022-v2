@@ -1,76 +1,93 @@
 # ADR-0004: Recoverable transactional outbox delivery
 
 - Status: Accepted
-- Date: 2026-09-04
-- Scope: V2-P2 outbox, P2.8.2/P2.9 hardening
+- Date: 2026-09-05
+- Scope: V2-P2 outbox, P2 hardening repair
 
 ## Context
 
 Reducer transitions may describe work that must happen after the database
-transaction commits. Calling an external handler inside the transaction would
-make rollback ambiguous, while writing the run state first could lose the
-effect on a process crash.
+transaction commits. Calling a handler inside the transaction makes rollback
+ambiguous, while writing the run state first can lose the effect on a process
+crash. The earlier P2 implementation also allowed a cancellation or a stale
+worker to race with dispatch, and it could leave a terminal receipt without a
+matching audit Event.
 
 ## Decision
 
 P2 registers immutable effect specifications in the `outbox` table in the
-same transaction as the source event and run snapshot. An effect ID is a
-deterministic UUID5 derived from the source event ID and zero-based effect
-index. `(source_event_id, effect_index)` is unique, and replaying a transition
-is therefore a no-op for an already registered effect. The V2 hardening
-migration adds a complete `spec_hash` over the effect identity, run and source
-event ownership, routing class/type, versions, payload, and payload hash. The
-outbox and interrupt source-event foreign keys are composite `(run_id, event_id)`
-references, so a valid ID from another run cannot be attached to this run.
+same transaction as the source Event and Run snapshot. An effect ID is a
+deterministic UUID5 derived from the source Event ID and zero-based effect
+index. `(source_event_id, effect_index)` is unique. The v2 and v3 migration
+identities and callbacks are frozen; migration v4 adds dispatch permits,
+command receipts, and the stronger constraints without rewriting v1-v3
+checksums.
 
-An explicit one-shot worker claims due effects with a durable lease. The
-verified worker path uses `BEGIN IMMEDIATE`, replays the candidate run, checks
-all interrupt and outbox projections, and verifies the complete effect
-specification immediately before invoking the handler. It claims and dispatches
-one effect at a time, so a stale preclaimed batch cannot cross a handler call.
-Terminal or corrupt runs fail closed without invoking a handler.
+The v4 outbox records the complete effect specification hash, including the
+effect identity, Run and source Event ownership, routing type/class, versions,
+payload, and payload hash. Composite `(run_id, event_id)` foreign keys bind
+source and audit Events to the same Run. SQLite immutability triggers protect
+effect identity/specification, terminal metadata, dispatch permit metadata,
+and command receipts. A Run has at most one `dispatching` effect.
 
-Lease generations fence every renew, success, retry, and dead-letter write.
-The SQL predicates include effect ID, owner, generation, and live expiry.
-Terminal completion records `completed_by_worker_id` and
-`terminal_generation`; a repeated completion is idempotent only for that same
-worker and generation with the same receipt, so a stale worker cannot report
-success after its lease was reclaimed. Retry delays are deterministic (1, 2,
-4, 8, and 16 seconds, capped at 60 seconds) with a maximum of five attempts.
-Handler returns must be the typed `HandlerResult`; all other returns fail
-closed. Persisted error text is reduced to bounded, fixed safe summaries and
-never contains tracebacks, tokens, or other diagnostic secrets.
+There are three durable linearization points:
 
-Migration v3 adds event envelope hashes and a previous-event hash chain,
-terminal outbox receipts, cancellation, composite run/source-event ownership,
-and append-only/monotonic outbox triggers. Successful summaries are persisted
-and hash-bound before an audit event is appended. An effect audit command binds
-at most one matching event; retries return the authoritative stored result and
-conflicting summaries or errors are typed conflicts. A terminal run cancels
-pending and leased sibling effects before its snapshot CAS completes.
+1. `leased -> dispatching` authorizes a handler. The update is guarded by
+   owner, generation, live lease, replay-verified Run state, and the exact
+   registry policy version.
+2. `RUN_CANCELLED` Event, queued/leased sibling cancellation, and Run CAS
+   commit together. Cancellation never converts a `dispatching` effect.
+3. A terminal completion appends its audit Event, binds the terminal outbox
+   receipt, applies interrupt projections and sibling cancellation, updates the
+   Run snapshot, and appends the command receipt in one transaction.
 
-Before each state-changing command, the repository verifies the event count,
-sequence and revision chain, last event, event result/envelope hashes, state
-hash, and the event-derived interrupt/outbox projections. Corrupt IDs,
-versions, numeric fields, and locked writes surface as typed storage errors.
+Claim and authorization use the same exact, fail-closed effect registry.
+Unknown types and class/type mismatches are blocked. External effects are
+blocked while a Run waits for input; only explicitly registered safe internal
+effects may continue. A permit is rechecked immediately before completion, so
+an expired or reclaimed generation cannot report a late success. Only the
+worker and generation recorded in a terminal receipt may repeat that exact
+terminal completion idempotently.
 
-P2 promises at-least-once delivery only. If a handler succeeds and the success
-record fails to commit, the same effect ID can be delivered again after lease
-expiry. Exactly-once physical side effects require the idempotency contract of
-the later Gateway/adapter package and are not claimed here.
+Worker handlers must return the typed `HandlerResult`. Invalid or non-typed
+returns become a fixed `invalid_handler_result`; handler exceptions and other
+failures use a closed `HandlerErrorCode` set with fixed public messages.
+Successful effects persist only the bounded versioned
+`effect-success/v1` receipt. Free-form error text, paths, tokens, tracebacks,
+and arbitrary success JSON are not part of the completion contract.
+
+Command receipts are append-only. The authoritative event receipt is created
+for every Event. A new Effect audit command ID creates an alias receipt for
+the existing authoritative audit Event without creating another Event or
+revision. Conflicting command ID/hash/type/Run bindings are typed conflicts;
+damaged bindings are state-integrity errors.
+
+Before every state-changing command and worker dispatch, the repositories
+verify the event count, sequence and revision chain, last Event, Event result
+and envelope hash chain, snapshot hash, and event-derived interrupt/outbox
+projections. Waiting Runs must have exactly one matching pending interrupt.
+Corrupt IDs, versions, numeric fields, projection links, and locked writes
+surface typed storage errors.
+
+P2 promises at-least-once delivery only. If a handler succeeds and the
+completion transaction fails before commit, the same effect ID may be
+delivered again after lease expiry. Exactly-once physical side effects require
+the idempotency contract of the later Gateway/adapter package and are not
+claimed here.
 
 ## Consequences
 
-- A committed event cannot lose its registered effect.
-- Lease expiry makes abandoned work recoverable by another worker.
-- Two workers cannot hold the same live lease, but a handler may see a stable
-  effect ID more than once.
-- A run cancellation fences any queued or leased sibling before the terminal
-  snapshot is committed; an already-running handler remains subject to the
-  at-least-once adapter boundary.
+- A committed Event cannot lose its registered effect or command receipt.
+- Cancel/dispatch races have one durable winner and cannot create a permit
+  after an accepted cancellation.
+- A protocol-4 terminal effect cannot commit without its matching audit Event.
+- Lease expiry makes abandoned work recoverable by another worker, while
+  generation and owner fencing reject late completion.
+- Two workers cannot hold the same live lease or dispatch two effects for one
+  Run, but a handler may see a stable effect ID more than once.
 - Event and projection tampering is detected before worker routing or the next
   state-changing command.
-- Existing v1/v2 migration checksums remain unchanged; v3 upgrades legacy
-  terminal rows without inventing an audit event that did not exist.
-- P2 workers receive only injected test handlers; no ORCA, LLM, PubChem, RDKit,
-  network, or real filesystem side effect is connected.
+- Legacy protocol-3 terminal rows remain readable during v4 migration without
+  inventing an audit Event that did not exist.
+- P2 workers receive only injected test handlers; no ORCA, LLM, PubChem,
+  RDKit, network, or real scientific/filesystem side effect is connected.
