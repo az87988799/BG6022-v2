@@ -11,7 +11,8 @@ from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import EventType, KernelEvent
 from orca_agent.orchestration.reducer import reduce_event
 from orca_agent.orchestration.replay import replay, state_hash, verify_snapshot
-from orca_agent.orchestration.state import RunStatus
+from orca_agent.orchestration.result_contract import expected_application_result
+from orca_agent.orchestration.state import KernelState, RunStatus
 
 BASE_TIME = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
 
@@ -26,6 +27,7 @@ def _event(
     occurred_at: datetime = BASE_TIME,
     expected_revision: int | None = None,
     previous_event_hash: str = GENESIS_EVENT_HASH,
+    prior_state: KernelState | None = None,
 ) -> KernelEvent:
     event_id = new_id(EventId)
     status = {
@@ -45,7 +47,7 @@ def _event(
         status=status,
         event_id=event_id,
     )
-    return KernelEvent.create(
+    event = KernelEvent.create(
         event_id=event_id,
         command_id=new_id(CommandId),
         command_type=command_type,
@@ -58,6 +60,30 @@ def _event(
         occurred_at_utc=occurred_at,
         command_hash="0" * 64,
         previous_event_hash=previous_event_hash,
+    )
+    if prior_state is None:
+        return event
+    transition = reduce_event(prior_state, event)
+    return KernelEvent.create(
+        event_id=event.event_id,
+        command_id=event.command_id,
+        command_type=event.command_type,
+        run_id=event.run_id,
+        sequence_no=event.sequence_no,
+        expected_revision=event.expected_revision,
+        event_type=event.event_type,
+        payload=event.payload,
+        result=expected_application_result(
+            prior_state=prior_state,
+            event=event,
+            transition=transition,
+        ),
+        occurred_at_utc=event.occurred_at_utc,
+        recorded_at_utc=event.recorded_at_utc,
+        engine_version=event.engine_version,
+        schema_version=event.schema_version,
+        command_hash=event.command_hash,
+        previous_event_hash=event.previous_event_hash,
     )
 
 
@@ -74,6 +100,7 @@ def test_reducer_transition_table_and_replay() -> None:
     run_id = new_id(RunId)
     interrupt_id = new_id(InterruptId)
     created = _created(run_id)
+    first = reduce_event(None, created).next_state
     requested = _event(
         run_id=run_id,
         sequence=2,
@@ -87,7 +114,9 @@ def test_reducer_transition_table_and_replay() -> None:
             "effects": [],
         },
         previous_event_hash=created.event_hash,
+        prior_state=first,
     )
+    waiting = reduce_event(first, requested).next_state
     resolved = _event(
         run_id=run_id,
         sequence=3,
@@ -95,11 +124,10 @@ def test_reducer_transition_table_and_replay() -> None:
         command_type=CommandType.RESOLVE_INTERRUPT,
         payload={"interrupt_id": str(interrupt_id), "response": {"approved": True}, "effects": []},
         previous_event_hash=requested.event_hash,
+        prior_state=waiting,
     )
     events = (created, requested, resolved)
 
-    first = reduce_event(None, events[0]).next_state
-    waiting = reduce_event(first, events[1]).next_state
     ready = reduce_event(waiting, events[2]).next_state
 
     assert first.status is RunStatus.CREATED
@@ -158,6 +186,7 @@ def test_expiry_uses_inclusive_deadline_and_cancel_projects_pending() -> None:
             "expires_at_utc": "2026-09-04T12:05:00.000000Z",
         },
         previous_event_hash=created_event.event_hash,
+        prior_state=created,
     )
     waiting = reduce_event(created, waiting_event).next_state
     expired = _event(
@@ -171,6 +200,7 @@ def test_expiry_uses_inclusive_deadline_and_cancel_projects_pending() -> None:
             "expires_at_utc": "2026-09-04T12:05:00.000000Z",
         },
         previous_event_hash=waiting_event.event_hash,
+        prior_state=waiting,
     )
     assert reduce_event(waiting, expired).next_state.status is RunStatus.READY
 

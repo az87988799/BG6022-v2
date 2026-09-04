@@ -71,13 +71,13 @@ def test_two_application_commands_race_on_two_connections(tmp_path) -> None:
         CancelRun.create(
             run_id=created.run_id,
             expected_revision=1,
-            reason_code="first_cancel",
+            reason_code="user_cancelled",
             requested_at_utc=clock.now_utc(),
         ),
         CancelRun.create(
             run_id=created.run_id,
             expected_revision=1,
-            reason_code="second_cancel",
+            reason_code="operator_cancelled",
             requested_at_utc=clock.now_utc(),
         ),
     )

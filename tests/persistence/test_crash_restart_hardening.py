@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from orca_agent.application.effect_completion import EffectCompletionService
 from orca_agent.application.service import KernelApplicationService
 from orca_agent.domain.ids import EffectId, WorkerId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
@@ -36,6 +37,31 @@ class _FailNextCommitFactory:
 
     def connect(self):
         return _FailNextCommitConnection(self._factory.connect())
+
+
+class _FailNthCommitConnection:
+    def __init__(self, connection, fail_on: int) -> None:
+        self._connection = connection
+        self._fail_on = fail_on
+        self._commit_count = 0
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self) -> None:
+        self._commit_count += 1
+        if self._commit_count == self._fail_on:
+            raise RuntimeError("simulated crash before commit")
+        self._connection.commit()
+
+
+class _FailNthCommitFactory:
+    def __init__(self, database_path, fail_on: int) -> None:
+        self._factory = SQLiteConnectionFactory(database_path)
+        self._fail_on = fail_on
+
+    def connect(self):
+        return _FailNthCommitConnection(self._factory.connect(), self._fail_on)
 
 
 def _effect() -> EffectSpec:
@@ -127,8 +153,7 @@ def test_handler_failure_retry_commit_then_restart_can_deliver_again(tmp_path) -
         database_path,
         lambda _effect: HandlerResult(
             success=False,
-            error_code="controlled_failure",
-            error_message="retry me",
+            error_code=None,
         ),
         clock=clock,
     )
@@ -157,19 +182,23 @@ def test_handler_failure_retry_write_before_commit_rolls_back_and_reclaims(tmp_p
             limit=1,
         )[0]
 
-    factory = _FailNextCommitFactory(database_path)
-    with SQLiteUnitOfWork(database_path, clock=clock, connection_factory=factory) as uow:
-        uow.connection.fail_next_commit = True
-        with pytest.raises(RuntimeError):
-            uow.outbox.mark_failed(
-                effect_id=claimed.effect_id,
-                worker_id=first_worker,
-                expected_generation=claimed.attempt_count,
-                now=clock.now_utc(),
-                error_code="handler_failed",
-                error_message="retry me",
-                max_attempts=5,
-            )
+    with SQLiteUnitOfWork(database_path, clock=clock) as uow:
+        permit = uow.outbox.authorize_dispatch(
+            runs=uow.runs,
+            events=uow.events,
+            interrupts=uow.interrupts,
+            effect_id=claimed.effect_id,
+            worker_id=first_worker,
+            expected_generation=claimed.attempt_count,
+            now=clock.now_utc(),
+        )
+    assert permit is not None
+    with pytest.raises(RuntimeError):
+        EffectCompletionService(
+            database_path,
+            clock=clock,
+            connection_factory=_FailNthCommitFactory(database_path, fail_on=2),
+        ).complete(permit, HandlerResult(success=False))
 
     clock.advance(timedelta(seconds=5))
     with SQLiteUnitOfWork(database_path, clock=clock) as uow:
@@ -195,17 +224,23 @@ def test_success_write_before_commit_rolls_back_and_redelivers(tmp_path) -> None
             limit=1,
         )[0]
 
-    factory = _FailNextCommitFactory(database_path)
-    with SQLiteUnitOfWork(database_path, clock=clock, connection_factory=factory) as uow:
-        uow.connection.fail_next_commit = True
-        with pytest.raises(RuntimeError):
-            uow.outbox.mark_succeeded(
-                effect_id=claimed.effect_id,
-                worker_id=first_worker,
-                expected_generation=claimed.attempt_count,
-                now=clock.now_utc(),
-                result_summary={},
-            )
+    with SQLiteUnitOfWork(database_path, clock=clock) as uow:
+        permit = uow.outbox.authorize_dispatch(
+            runs=uow.runs,
+            events=uow.events,
+            interrupts=uow.interrupts,
+            effect_id=claimed.effect_id,
+            worker_id=first_worker,
+            expected_generation=claimed.attempt_count,
+            now=clock.now_utc(),
+        )
+    assert permit is not None
+    with pytest.raises(RuntimeError):
+        EffectCompletionService(
+            database_path,
+            clock=clock,
+            connection_factory=_FailNthCommitFactory(database_path, fail_on=2),
+        ).complete(permit, HandlerResult(success=True))
 
     clock.advance(timedelta(seconds=5))
     with SQLiteUnitOfWork(database_path, clock=clock) as uow:

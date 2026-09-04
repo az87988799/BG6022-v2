@@ -5,6 +5,7 @@ from orca_agent.domain.ids import EffectId, WorkerId
 from orca_agent.infrastructure.clock import FrozenClock
 from orca_agent.infrastructure.outbox import OutboxStatus
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+from orca_agent.infrastructure.worker import HandlerResult, OutboxWorker
 from orca_agent.orchestration.commands import (
     CreateRun,
     RecordEffectFailed,
@@ -24,6 +25,14 @@ def _effect() -> EffectSpec:
     )
 
 
+def _receipt() -> dict[str, object]:
+    return {
+        "receipt_schema": "effect-success/v1",
+        "outcome_code": "completed",
+        "artifact_ids": [],
+    }
+
+
 def _external_effect(index: int) -> EffectSpec:
     return EffectSpec(
         effect_index=index,
@@ -41,35 +50,18 @@ def _complete_effect(
     terminal: str,
 ) -> EffectId:
     worker_id = WorkerId("worker_00000000000000000000000000000000")
-    with SQLiteUnitOfWork(path, clock=clock) as uow:
-        effect = uow.outbox.get(effect_id)
-        assert effect is not None
-        claimed = uow.outbox.claim_due(
-            worker_id=worker_id,
-            now=clock.now_utc(),
-            lease_duration=timedelta(seconds=30),
-            limit=1,
-        )[0]
-        assert claimed.effect_id == effect_id
-        if terminal == "succeeded":
-            uow.outbox.mark_succeeded(
-                effect_id=effect_id,
-                worker_id=worker_id,
-                expected_generation=claimed.attempt_count,
-                now=clock.now_utc(),
-                result_summary={"accepted": True},
-            )
-        else:
-            uow.outbox.mark_failed(
-                effect_id=effect_id,
-                worker_id=worker_id,
-                expected_generation=claimed.attempt_count,
-                now=clock.now_utc(),
-                error_code="terminal_failure",
-                error_message="controlled failure",
-                max_attempts=1,
-            )
-        return effect_id
+    result = HandlerResult(success=terminal == "succeeded")
+    worker = OutboxWorker(
+        path,
+        lambda _permit: result,
+        clock=clock,
+        worker_id=worker_id,
+        max_attempts=1,
+    )
+    report = worker.run_once(limit=1)
+    assert report and report[0].effect_id == effect_id
+    assert report[0].outcome in {"succeeded", "dead_letter"}
+    return effect_id
 
 
 def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> None:
@@ -85,7 +77,7 @@ def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> 
             run_id=created.run_id,
             expected_revision=1,
             effect_id=stored_effect_id,
-            result_summary={"accepted": True},
+            result_summary=_receipt(),
         )
     )
     assert pending.accepted is False
@@ -96,8 +88,7 @@ def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> 
             run_id=created.run_id,
             expected_revision=1,
             effect_id=EffectId("effect_00000000000000000000000000000000"),
-            error_code="terminal_failure",
-            error_message="controlled failure",
+            error_code="handler_failed",
         )
     )
     assert unknown.accepted is False
@@ -109,7 +100,7 @@ def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> 
             run_id=other.run_id,
             expected_revision=1,
             effect_id=stored_effect_id,
-            result_summary={"accepted": True},
+            result_summary=_receipt(),
         )
     )
     assert wrong_run.accepted is False
@@ -126,7 +117,7 @@ def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> 
             run_id=created.run_id,
             expected_revision=1,
             effect_id=stored_effect_id,
-            result_summary={"accepted": True},
+            result_summary=_receipt(),
         )
     )
     assert succeeded.accepted
@@ -147,8 +138,7 @@ def test_effect_audit_commands_validate_outbox_identity_and_status(tmp_path) -> 
             run_id=failed_run.run_id,
             expected_revision=1,
             effect_id=failed_effect_id,
-            error_code="terminal_failure",
-            error_message="controlled failure",
+            error_code="handler_failed",
         )
     )
 
@@ -207,7 +197,7 @@ def test_effect_success_preserves_pending_interrupt_state(tmp_path) -> None:
             run_id=created.run_id,
             expected_revision=2,
             effect_id=effect_id,
-            result_summary={"accepted": True},
+            result_summary=_receipt(),
         )
     )
 

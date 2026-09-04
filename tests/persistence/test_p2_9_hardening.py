@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from orca_agent.application.effect_completion import EffectCompletionService
 from orca_agent.application.errors import (
     EffectAuditConflictError,
     LeaseLostError,
@@ -70,8 +71,8 @@ def test_worker_validates_terminal_run_before_handler(tmp_path) -> None:
     assert cancelled.accepted
     seen: list[EffectId] = []
 
-    def handler(effect):
-        seen.append(effect.effect_id)
+    def handler(permit):
+        seen.append(permit.effect.effect_id)
         raise AssertionError("terminal-run effect must not be dispatched")
 
     worker = OutboxWorker(database_path, handler, clock=clock)
@@ -111,7 +112,7 @@ def test_terminal_transition_cancels_preclaimed_sibling(tmp_path) -> None:
     seen: list[EffectId] = []
     worker = OutboxWorker(
         database_path,
-        lambda effect: (seen.append(effect.effect_id), HandlerResult(success=True))[1],
+        lambda permit: (seen.append(permit.effect.effect_id), HandlerResult(success=True))[1],
         clock=clock,
     )
     assert worker.run_once(limit=2) == ()
@@ -128,7 +129,7 @@ def test_worker_fails_closed_before_handler_on_corrupt_history(tmp_path) -> None
     seen: list[EffectId] = []
     worker = OutboxWorker(
         database_path,
-        lambda effect: (seen.append(effect.effect_id), HandlerResult(success=True))[1],
+        lambda permit: (seen.append(permit.effect.effect_id), HandlerResult(success=True))[1],
         clock=clock,
     )
     with pytest.raises(StateIntegrityError):
@@ -145,7 +146,7 @@ def test_worker_fails_closed_when_a_sibling_outbox_row_is_missing(tmp_path) -> N
     seen: list[EffectId] = []
     worker = OutboxWorker(
         database_path,
-        lambda effect: (seen.append(effect.effect_id), HandlerResult(success=True))[1],
+        lambda permit: (seen.append(permit.effect.effect_id), HandlerResult(success=True))[1],
         clock=clock,
     )
     with pytest.raises(StateIntegrityError):
@@ -158,42 +159,50 @@ def test_same_worker_old_generation_cannot_complete_after_reclaim(tmp_path) -> N
     clock, database_path, _, _, _ = _seed(tmp_path)
     worker_id = new_id(WorkerId)
     with SQLiteUnitOfWork(database_path, clock=clock) as uow:
-        first = uow.outbox.claim_due(
+        first_claimed = uow.outbox.claim_due(
             worker_id=worker_id,
             now=clock.now_utc(),
             lease_duration=timedelta(seconds=5),
             limit=1,
         )[0]
+        first = uow.outbox.authorize_dispatch(
+            runs=uow.runs,
+            events=uow.events,
+            interrupts=uow.interrupts,
+            effect_id=first_claimed.effect_id,
+            worker_id=worker_id,
+            expected_generation=first_claimed.attempt_count,
+            now=clock.now_utc(),
+        )
+    assert first is not None
     clock.advance(timedelta(seconds=5))
     with SQLiteUnitOfWork(database_path, clock=clock) as uow:
-        second = uow.outbox.claim_due(
+        second_claimed = uow.outbox.claim_due(
             worker_id=worker_id,
             now=clock.now_utc(),
             lease_duration=timedelta(seconds=5),
             limit=1,
         )[0]
-        assert second.attempt_count == first.attempt_count + 1
-        uow.outbox.mark_succeeded(
-            effect_id=second.effect_id,
+        second = uow.outbox.authorize_dispatch(
+            runs=uow.runs,
+            events=uow.events,
+            interrupts=uow.interrupts,
+            effect_id=second_claimed.effect_id,
             worker_id=worker_id,
-            expected_generation=second.attempt_count,
+            expected_generation=second_claimed.attempt_count,
             now=clock.now_utc(),
-            result_summary={"generation": second.attempt_count},
         )
-        with pytest.raises(LeaseLostError):
-            uow.outbox.mark_succeeded(
-                effect_id=first.effect_id,
-                worker_id=worker_id,
-                expected_generation=first.attempt_count,
-                now=clock.now_utc(),
-                result_summary={"generation": first.attempt_count},
-            )
-        assert uow.outbox.mark_succeeded(
-            effect_id=second.effect_id,
-            worker_id=worker_id,
-            expected_generation=second.attempt_count,
-            now=clock.now_utc(),
-            result_summary={"generation": second.attempt_count},
+    assert second is not None
+    assert second.generation == first.generation + 1
+    assert (
+        EffectCompletionService(database_path, clock=clock)
+        .complete(second, HandlerResult(success=True))
+        .outcome
+        == "succeeded"
+    )
+    with pytest.raises(LeaseLostError):
+        EffectCompletionService(database_path, clock=clock).complete(
+            first, HandlerResult(success=True)
         )
 
 
@@ -201,7 +210,8 @@ def test_worker_revalidates_each_effect_after_handler_clock_advance(tmp_path) ->
     clock, database_path, _, _, _ = _seed(tmp_path, count=2)
     seen: list[tuple[EffectId, datetime, datetime]] = []
 
-    def handler(effect):
+    def handler(permit):
+        effect = permit.effect
         seen.append((effect.effect_id, effect.lease_expires_at_utc, clock.now_utc()))
         if len(seen) == 1:
             clock.advance(timedelta(seconds=10))
@@ -223,7 +233,7 @@ def test_terminal_receipt_conflict_and_no_delete_trigger(tmp_path) -> None:
     clock, database_path, service, created, effect_ids = _seed(tmp_path)
     worker = OutboxWorker(
         database_path,
-        lambda _effect: HandlerResult(success=True, result_summary={"ok": True}),
+        lambda _permit: HandlerResult(success=True),
         clock=clock,
     )
     assert worker.run_once(limit=1)[0].outcome == "succeeded"
@@ -241,7 +251,11 @@ def test_terminal_receipt_conflict_and_no_delete_trigger(tmp_path) -> None:
             run_id=created.run_id,
             expected_revision=1,
             effect_id=effect_ids[0],
-            result_summary={"ok": False},
+            result_summary={
+                "receipt_schema": "effect-success/v1",
+                "outcome_code": "completed",
+                "artifact_ids": ["artifact_00000000000000000000000000000001"],
+            },
             requested_at_utc=clock.now_utc(),
         )
     )
@@ -315,7 +329,7 @@ def test_worker_never_persists_arbitrary_failure_diagnostics(tmp_path) -> None:
     clock, database_path, _, _, effect_ids = _seed(tmp_path)
     worker = OutboxWorker(
         database_path,
-        lambda _effect: HandlerResult(
+        lambda _permit: HandlerResult(
             success=False,
             error_code="secret_token",
             error_message="traceback: token=do-not-store /secret/path",
@@ -326,8 +340,8 @@ def test_worker_never_persists_arbitrary_failure_diagnostics(tmp_path) -> None:
     assert worker.run_once(limit=1)[0].outcome == "dead_letter"
     with SQLiteUnitOfWork(database_path, clock=clock) as uow:
         record = uow.outbox.get(effect_ids[0])
-        assert record.last_error_code == "handler_failed"
-        assert record.last_error_message == "The handler reported a controlled failure."
+        assert record.last_error_code == "invalid_handler_result"
+        assert record.last_error_message == "The handler returned an invalid result."
 
 
 def test_real_second_connection_lock_is_typed(tmp_path) -> None:

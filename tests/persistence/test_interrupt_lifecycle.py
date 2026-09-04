@@ -9,6 +9,7 @@ from orca_agent.domain.ids import EffectId, InterruptId, WorkerId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
 from orca_agent.infrastructure.outbox import OutboxStatus
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+from orca_agent.infrastructure.worker import HandlerResult, OutboxWorker
 from orca_agent.orchestration.commands import (
     CancelRun,
     CreateRun,
@@ -233,6 +234,12 @@ def test_projection_hash_tamper_fails_closed(tmp_path) -> None:
     created = _created(service)
     requested = service.execute(_request(service, created.run_id, 1))
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "UPDATE interrupts SET payload_hash = ? WHERE interrupt_id = ?",
+                ("0" * 64, str(requested.interrupt_id)),
+            )
+        uow.connection.execute("DROP TRIGGER interrupt_identity_immutable")
         uow.connection.execute(
             "UPDATE interrupts SET payload_hash = ? WHERE interrupt_id = ?",
             ("0" * 64, str(requested.interrupt_id)),
@@ -257,24 +264,18 @@ def test_deleted_pending_interrupt_blocks_effect_progress(tmp_path) -> None:
         )
     )
     requested = service.execute(_request(service, created.run_id, 1))
-    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=service.clock) as uow:
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
         effect_row = uow.connection.execute("SELECT effect_id FROM outbox").fetchone()
         effect_id = EffectId(str(effect_row[0]))
-        worker_id = WorkerId("worker_00000000000000000000000000000000")
-        claimed = uow.outbox.claim_due(
-            worker_id=worker_id,
-            now=service.clock.now_utc(),
-            lease_duration=timedelta(seconds=30),
-            limit=1,
-        )[0]
-        assert claimed.effect_id == effect_id
-        uow.outbox.mark_succeeded(
-            effect_id=effect_id,
-            worker_id=worker_id,
-            expected_generation=claimed.attempt_count,
-            now=service.clock.now_utc(),
-            result_summary={"accepted": True},
-        )
+    worker_id = WorkerId("worker_00000000000000000000000000000000")
+    report = OutboxWorker(
+        tmp_path / "state.sqlite3",
+        lambda _permit: HandlerResult(success=True),
+        clock=service.clock,
+        worker_id=worker_id,
+    ).run_once(limit=1)
+    assert report and report[0].effect_id == effect_id
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
         uow.connection.execute(
             "DELETE FROM interrupts WHERE interrupt_id = ?", (str(requested.interrupt_id),)
         )
@@ -284,14 +285,18 @@ def test_deleted_pending_interrupt_blocks_effect_progress(tmp_path) -> None:
             run_id=created.run_id,
             expected_revision=2,
             effect_id=effect_id,
-            result_summary={"accepted": True},
+            result_summary={
+                "receipt_schema": "effect-success/v1",
+                "outcome_code": "completed",
+                "artifact_ids": [],
+            },
         )
     )
 
     assert result.accepted is False
     assert result.code == "state_integrity_error"
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
-        assert uow.runs.require(created.run_id).revision == 2
+        assert uow.runs.require(created.run_id).revision == 3
         assert uow.outbox.get(effect_id).status is OutboxStatus.SUCCEEDED
 
 
@@ -300,6 +305,12 @@ def test_expiry_tamper_is_rejected_by_due_sweep(tmp_path) -> None:
     created = _created(service)
     requested = service.execute(_request(service, created.run_id, 1, expiry_offset=5))
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "UPDATE interrupts SET expires_at_utc = ? WHERE interrupt_id = ?",
+                ("2026-09-04T01:00:00.000000Z", str(requested.interrupt_id)),
+            )
+        uow.connection.execute("DROP TRIGGER interrupt_identity_immutable")
         uow.connection.execute(
             "UPDATE interrupts SET expires_at_utc = ? WHERE interrupt_id = ?",
             ("2026-09-04T01:00:00.000000Z", str(requested.interrupt_id)),
@@ -321,6 +332,12 @@ def test_interrupt_request_event_cross_run_tamper_fails_closed(tmp_path) -> None
             (str(second_interrupt.interrupt_id),),
         ).fetchone()[0]
         uow.connection.execute("PRAGMA foreign_keys = OFF")
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "UPDATE interrupts SET request_event_id = ? WHERE interrupt_id = ?",
+                (second_event_id, str(first_interrupt.interrupt_id)),
+            )
+        uow.connection.execute("DROP TRIGGER interrupt_identity_immutable")
         uow.connection.execute(
             "UPDATE interrupts SET request_event_id = ? WHERE interrupt_id = ?",
             (second_event_id, str(first_interrupt.interrupt_id)),

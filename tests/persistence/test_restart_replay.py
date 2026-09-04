@@ -36,6 +36,7 @@ def test_state_change_refuses_deleted_event_history(tmp_path) -> None:
     service = KernelApplicationService(tmp_path / "state.sqlite3", clock=clock)
     created = service.execute(CreateRun.create())
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        uow.connection.execute("PRAGMA foreign_keys = OFF")
         uow.connection.execute("DELETE FROM events WHERE run_id = ?", (str(created.run_id),))
 
     result = service.execute(
@@ -85,6 +86,7 @@ def test_invalid_persisted_event_fields_return_typed_storage_error(tmp_path, col
     service = KernelApplicationService(tmp_path / "state.sqlite3", clock=clock)
     created = service.execute(CreateRun.create())
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        uow.connection.execute("PRAGMA foreign_keys = OFF")
         uow.connection.execute(
             f"UPDATE events SET {column} = ? WHERE run_id = ?",  # noqa: S608 - test column allowlist
             (value, str(created.run_id)),
