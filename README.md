@@ -2,11 +2,15 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current scope: V2-P0
+## Current scope: V2-P1
 
-V2-P0 establishes a traceable repository and migration baseline only. It does
-not implement business logic, migrate legacy modules, or execute LLM, PubChem,
-or ORCA workloads.
+V2-P0 established the traceable repository and migration baseline. V2-P1 adds
+the reproducible Python toolchain, versioned domain contracts, deterministic
+canonical JSON/hash primitives, typed errors, import boundaries, and offline
+quality gates.
+
+P1 does not implement business logic, migrate legacy modules, or execute LLM,
+PubChem, or ORCA workloads. P2 has not started.
 
 The legacy repository at `E:\BG6022` is a read-only reference. V2 uses a new
 database and a new artifact root; legacy active state is never migrated.
@@ -25,6 +29,6 @@ reviewed.
 
 ## P0 contents
 
-The package under `src/orca_agent` is an intentionally empty importable
-placeholder. `pyproject.toml` is a minimal packaging skeleton with no runtime
-dependencies.
+The package under `src/orca_agent` currently contains only P1 domain contracts
+and deterministic primitives. Runtime execution, persistence, molecule
+identity, and scientific workflows remain future work packages.
