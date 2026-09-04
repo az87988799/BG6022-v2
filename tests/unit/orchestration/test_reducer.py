@@ -1,7 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pydantic import ValidationError
 
 from orca_agent.application.errors import InvalidTransitionError
 from orca_agent.application.results import ApplicationResult
@@ -192,8 +191,9 @@ def test_transition_effect_limit_is_checked_by_reducer() -> None:
         result=event.result,
         occurred_at_utc=BASE_TIME,
     )
-    with pytest.raises(ValidationError):
+    with pytest.raises(InvalidTransitionError) as error:
         reduce_event(None, event)
+    assert error.value.code == "invalid_transition"
 
 
 def test_snapshot_integrity_compares_replay_and_metadata() -> None:

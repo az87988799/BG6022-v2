@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 
 import pytest
 
@@ -58,6 +60,34 @@ def test_claim_order_is_stable_and_two_workers_do_not_share_a_live_lease(tmp_pat
     assert {record.run_id for record in first} == {run_id}
     assert {record.source_event_id for record in first} == {event_id}
     assert [record.effect_id for record in first] == sorted(record.effect_id for record in first)
+
+
+def test_two_workers_race_on_two_connections(tmp_path) -> None:
+    clock, _, _ = _seed(tmp_path)
+    database_path = tmp_path / "state.sqlite3"
+    worker_ids = (new_id(WorkerId), new_id(WorkerId))
+    workers = tuple(
+        OutboxWorker(
+            database_path,
+            lambda _effect: HandlerResult(success=True),
+            clock=clock,
+            worker_id=worker_id,
+        )
+        for worker_id in worker_ids
+    )
+    barrier = Barrier(2)
+
+    def run(worker: OutboxWorker):
+        barrier.wait(timeout=5)
+        return worker.run_once(limit=1)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = tuple(pool.submit(run, worker) for worker in workers)
+        reports = tuple(future.result() for future in futures)
+
+    assert sorted(len(report) for report in reports) == [0, 1]
+    with SQLiteUnitOfWork(database_path) as uow:
+        assert uow.outbox.count(status=OutboxStatus.SUCCEEDED) == 1
 
 
 def test_expired_lease_is_reclaimed_with_same_effect_id_and_attempt_count(tmp_path) -> None:
@@ -138,6 +168,41 @@ def test_renew_requires_owner_and_succeed_is_not_claimed_again(tmp_path) -> None
         )
 
 
+def test_renew_rejects_non_positive_or_shortening_duration(tmp_path) -> None:
+    clock, _, _ = _seed(tmp_path)
+    owner = new_id(WorkerId)
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        effect = uow.outbox.claim_due(
+            worker_id=owner,
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=10),
+            limit=1,
+        )[0]
+        with pytest.raises(ValueError):
+            uow.outbox.renew(
+                effect_id=effect.effect_id,
+                worker_id=owner,
+                now=clock.now_utc(),
+                lease_duration=timedelta(seconds=-1),
+            )
+        with pytest.raises(ValueError):
+            uow.outbox.renew(
+                effect_id=effect.effect_id,
+                worker_id=owner,
+                now=clock.now_utc(),
+                lease_duration=timedelta(seconds=5),
+            )
+        with pytest.raises(ValueError):
+            uow.outbox.renew(
+                effect_id=effect.effect_id,
+                worker_id=owner,
+                now=clock.now_utc(),
+                lease_duration=timedelta(0),
+            )
+        unchanged = uow.outbox.get(effect.effect_id)
+        assert unchanged.lease_expires_at_utc == BASE_TIME + timedelta(seconds=10)
+
+
 def test_failure_uses_one_two_four_backoff_then_dead_letters(tmp_path) -> None:
     clock, _, _ = _seed(tmp_path)
     owner = new_id(WorkerId)
@@ -205,6 +270,24 @@ def test_successful_handler_and_exception_handler_have_safe_reports(tmp_path) ->
         assert row.last_error_code == "handler_exception"
         assert row.last_error_message == "injected handler raised an exception"
         assert "do not persist" not in (row.last_error_message or "")
+
+
+def test_non_typed_handler_result_fails_closed(tmp_path) -> None:
+    clock, _, _ = _seed(tmp_path / "invalid")
+    worker = OutboxWorker(
+        tmp_path / "invalid" / "state.sqlite3",
+        lambda _effect: "failure",
+        clock=clock,
+    )
+
+    report = worker.run_once(limit=1)
+
+    assert report[0].outcome == "retry"
+    with SQLiteUnitOfWork(tmp_path / "invalid" / "state.sqlite3") as uow:
+        row = uow.outbox.get(report[0].effect_id)
+        assert row.status is OutboxStatus.PENDING
+        assert row.last_error_code == "invalid_handler_result"
+        assert row.last_error_message == "injected handler returned a non-HandlerResult"
 
 
 def test_handler_success_before_mark_is_at_least_once_after_lease_expiry(tmp_path) -> None:

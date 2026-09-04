@@ -96,6 +96,8 @@ def _effects(payload: Mapping[str, object], *, event: KernelEvent) -> tuple[Effe
         )
     except (TypeError, ValidationError) as error:
         raise _invalid("event contains an invalid effect", event=event) from error
+    if sum(effect.effect_class.value == "external" for effect in effects) > 1:
+        raise _invalid("event contains more than one external effect", event=event)
     return effects
 
 

@@ -142,9 +142,8 @@ class Transition(KernelModel):
         pending_id = self.next_state.pending_interrupt_id
         if pending_id is None and pending_ops:
             raise ValueError("pending projection operation must be reflected in next state")
-        if pending_id is not None:
-            if not pending_ops or pending_ops[0].interrupt_id != pending_id:
-                raise ValueError("state pending interrupt must match its projection operation")
+        if pending_ops and pending_ops[0].interrupt_id != pending_id:
+            raise ValueError("state pending interrupt must match its projection operation")
         if self.next_status.is_terminal and pending_id is not None:
             raise ValueError("terminal state cannot retain a pending interrupt")
         return self

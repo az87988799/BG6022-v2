@@ -1,9 +1,11 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from orca_agent.application.errors import StateIntegrityError
 from orca_agent.application.service import KernelApplicationService
+from orca_agent.domain.ids import InterruptId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.orchestration.commands import (
@@ -94,6 +96,46 @@ def test_second_plain_request_is_rejected_by_service_and_database_guard(tmp_path
     assert second.code == "interrupt_already_pending"
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
         assert uow.interrupts.count_for_run(created.run_id) == 1
+
+
+def test_partial_unique_pending_index_rejects_direct_duplicate_insert(tmp_path) -> None:
+    service = _service(tmp_path)
+    created = _created(service)
+    requested = service.execute(_request(service, created.run_id, 1))
+
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        index_sql = uow.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND name = 'one_pending_interrupt_per_run'"
+        ).fetchone()[0]
+        assert "UNIQUE INDEX" in index_sql.upper()
+        assert "WHERE status = 'pending'" in index_sql
+        row = uow.connection.execute(
+            "SELECT run_id, kind, schema_version, engine_version, request_event_id, "
+            "payload_json, payload_hash, created_at_utc, expires_at_utc "
+            "FROM interrupts WHERE interrupt_id = ?",
+            (str(requested.interrupt_id),),
+        ).fetchone()
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "INSERT INTO interrupts(interrupt_id, run_id, kind, status, schema_version, "
+                "engine_version, request_event_id, terminal_event_id, payload_json, "
+                "payload_hash, response_json, response_hash, created_at_utc, expires_at_utc, "
+                "terminal_at_utc, superseded_by) VALUES (?, ?, ?, 'pending', ?, ?, ?, NULL, "
+                "?, ?, NULL, NULL, ?, ?, NULL, NULL)",
+                (
+                    str(new_id(InterruptId)),
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                ),
+            )
 
 
 def test_resolve_at_deadline_persists_expiry_and_returns_typed_rejection(tmp_path) -> None:

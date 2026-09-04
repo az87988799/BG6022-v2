@@ -83,9 +83,7 @@ class OutboxWorker:
         reports: list[DeliveryReport] = []
         for effect in claimed:
             try:
-                result = self.handler(effect)
-                if not isinstance(result, HandlerResult):
-                    result = HandlerResult(success=bool(result))  # type: ignore[arg-type]
+                result = _normalize_handler_result(self.handler(effect))
             except Exception:
                 result = HandlerResult(
                     success=False,
@@ -131,6 +129,36 @@ class OutboxWorker:
             return DeliveryReport(effect.effect_id, "lease_lost", effect.attempt_count)
         outcome = "dead_letter" if updated.status is OutboxStatus.DEAD_LETTER else "retry"
         return DeliveryReport(effect.effect_id, outcome, updated.attempt_count)
+
+
+def _normalize_handler_result(value: object) -> HandlerResult:
+    """Fail closed when an injected handler violates the typed return contract."""
+
+    if not isinstance(value, HandlerResult):
+        return HandlerResult(
+            success=False,
+            error_code="invalid_handler_result",
+            error_message="injected handler returned a non-HandlerResult",
+        )
+    if type(value.success) is not bool or not _safe_optional_text(value.error_code):
+        return HandlerResult(
+            success=False,
+            error_code="invalid_handler_result",
+            error_message="injected handler returned an invalid HandlerResult",
+        )
+    if not _safe_optional_text(value.error_message):
+        return HandlerResult(
+            success=False,
+            error_code="invalid_handler_result",
+            error_message="injected handler returned an invalid HandlerResult",
+        )
+    return value
+
+
+def _safe_optional_text(value: object) -> bool:
+    return value is None or (
+        isinstance(value, str) and bool(value.strip()) and len(value) <= 256 and "\x00" not in value
+    )
 
 
 __all__ = ["DeliveryReport", "Handler", "HandlerResult", "OutboxWorker"]

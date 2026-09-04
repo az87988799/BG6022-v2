@@ -26,6 +26,18 @@ class RunAlreadyExistsError(ApplicationError):
     code = "run_already_exists"
 
 
+class EffectNotFoundError(ApplicationError):
+    code = "effect_not_found"
+
+
+class EffectRunMismatchError(ApplicationError):
+    code = "effect_run_mismatch"
+
+
+class EffectStatusError(ApplicationError):
+    code = "effect_status_invalid"
+
+
 class RevisionConflictError(ApplicationError):
     code = "revision_conflict"
 
@@ -87,6 +99,9 @@ def safe_error_details(error: ApplicationError) -> dict[str, JsonValue]:
 __all__ = [
     "ApplicationError",
     "DuplicateCommandConflictError",
+    "EffectNotFoundError",
+    "EffectRunMismatchError",
+    "EffectStatusError",
     "InterruptAlreadyPendingError",
     "InterruptExpiredError",
     "InvalidInterruptExpiryError",

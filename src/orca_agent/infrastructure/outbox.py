@@ -225,11 +225,8 @@ class OutboxRepository:
 
         if limit < 1:
             return ()
-        if lease_duration <= timedelta(0):
-            raise ValueError("lease_duration must be positive")
+        _require_positive_lease_duration(lease_duration)
         owner = WorkerId(str(worker_id))
-        if lease_duration <= timedelta(0):
-            raise ValueError("lease_duration must be positive")
         now_text = format_utc(now)
         lease_expires_text = format_utc(now + lease_duration)
         claimed_ids: list[EffectId] = []
@@ -279,11 +276,25 @@ class OutboxRepository:
     ) -> OutboxRecord:
         """Extend only a currently valid lease owned by ``worker_id``."""
 
+        _require_positive_lease_duration(lease_duration)
         owner = WorkerId(str(worker_id))
         now_text = format_utc(now)
-        new_expiry = format_utc(now + lease_duration)
         try:
             self.connection.execute("BEGIN IMMEDIATE")
+            current = self.get(effect_id)
+            if current is None:
+                raise StateIntegrityError("effect was not found")
+            if (
+                current.status is not OutboxStatus.LEASED
+                or current.lease_owner != owner
+                or current.lease_expires_at_utc is None
+                or current.lease_expires_at_utc <= now
+            ):
+                raise LeaseLostError("outbox lease is no longer owned or valid")
+            next_expiry = now + lease_duration
+            if next_expiry <= current.lease_expires_at_utc:
+                raise ValueError("lease renewal must extend the current lease")
+            new_expiry = format_utc(next_expiry)
             cursor = self.connection.execute(
                 "UPDATE outbox SET lease_expires_at_utc = ?, updated_at_utc = ? "
                 "WHERE effect_id = ? AND status = 'leased' AND lease_owner = ? "
@@ -418,6 +429,11 @@ def _safe_error_text(value: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 256 or "\x00" in value:
         raise ValueError(f"{field_name} is empty, too long, or contains NUL")
     return value.strip()
+
+
+def _require_positive_lease_duration(value: object) -> None:
+    if not isinstance(value, timedelta) or value <= timedelta(0):
+        raise ValueError("lease_duration must be a positive timedelta")
 
 
 LeasedEffect = OutboxRecord

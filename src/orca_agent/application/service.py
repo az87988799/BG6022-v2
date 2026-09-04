@@ -7,9 +7,14 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from orca_agent.application.errors import (
     ApplicationError,
     DuplicateCommandConflictError,
+    EffectNotFoundError,
+    EffectRunMismatchError,
+    EffectStatusError,
     InterruptAlreadyPendingError,
     InterruptNotExpiredError,
     InterruptNotPendingError,
@@ -22,6 +27,7 @@ from orca_agent.application.errors import (
 from orca_agent.domain.ids import EventId, InterruptId, new_id
 from orca_agent.domain.json_types import JsonObject, thaw_json
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
+from orca_agent.infrastructure.outbox import OutboxStatus
 from orca_agent.infrastructure.repositories import RunSnapshot, StoredEvent
 from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
@@ -74,6 +80,12 @@ class KernelApplicationService:
                 return result
         except ApplicationError as error:
             return self._rejected(command, error, snapshot=snapshot)
+        except ValidationError as error:
+            transition_error = InvalidTransitionError(
+                "command transition failed validation",
+                details={"validation_error_count": len(error.errors())},
+            )
+            return self._rejected(command, transition_error, snapshot=snapshot)
         except sqlite3.IntegrityError:
             storage_error = StorageError("database invariant rejected the operation")
             return self._rejected(command, storage_error, snapshot=snapshot)
@@ -139,7 +151,7 @@ class KernelApplicationService:
             return self._retry_or_conflict(uow, command, command_hash, stored)
         if isinstance(command, CreateRun):
             return self._create_run(uow, command, command_hash)
-        current = uow.runs.require(command.run_id)
+        current = uow.runs.get_verified(command.run_id, uow.events)
         if command.expected_revision != current.revision:
             raise RevisionConflictError(
                 "expected revision does not match current revision",
@@ -317,9 +329,21 @@ class KernelApplicationService:
             payload = command.event_payload()
             interrupt_id = current.state.pending_interrupt_id
         elif isinstance(command, RecordEffectSucceeded):
+            self._require_effect_status(
+                uow,
+                run_id=command.run_id,
+                effect_id=command.effect_id,
+                expected_status=OutboxStatus.SUCCEEDED,
+            )
             event_type = EventType.EFFECT_SUCCEEDED
             payload = command.event_payload()
         elif isinstance(command, RecordEffectFailed):
+            self._require_effect_status(
+                uow,
+                run_id=command.run_id,
+                effect_id=command.effect_id,
+                expected_status=OutboxStatus.DEAD_LETTER,
+            )
             event_type = EventType.EFFECT_DEAD_LETTERED
             payload = command.event_payload()
         else:
@@ -350,6 +374,37 @@ class KernelApplicationService:
             raise InterruptNotPendingError(
                 "interrupt ID is not the run's pending interrupt",
                 details={"interrupt_id": str(interrupt_id)},
+            )
+
+    def _require_effect_status(
+        self,
+        uow: SQLiteUnitOfWork,
+        *,
+        run_id: object,
+        effect_id: object,
+        expected_status: OutboxStatus,
+    ) -> None:
+        if uow.outbox is None:
+            raise StorageError("outbox repository is unavailable")
+        effect = uow.outbox.get(effect_id)
+        if effect is None:
+            raise EffectNotFoundError(
+                "effect was not found",
+                details={"effect_id": str(effect_id)},
+            )
+        if effect.run_id != run_id:
+            raise EffectRunMismatchError(
+                "effect does not belong to the run",
+                details={"effect_id": str(effect_id), "run_id": str(run_id)},
+            )
+        if effect.status is not expected_status:
+            raise EffectStatusError(
+                "effect is not in the required audit status",
+                details={
+                    "effect_id": str(effect_id),
+                    "expected_status": expected_status.value,
+                    "actual_status": effect.status.value,
+                },
             )
 
     def _persist_transition(
