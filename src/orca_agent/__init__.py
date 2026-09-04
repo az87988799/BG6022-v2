@@ -1,3 +1,10 @@
-"""BG6022 V2 package placeholder established by V2-P0."""
+"""BG6022 V2 package."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("orca-agent")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
+
+__all__ = ["__version__"]

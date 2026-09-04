@@ -5,12 +5,39 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "orca-agent"
 version = "0.1.0"
-description = "BG6022 V2 ORCA agent rebuild placeholder"
-requires-python = ">=3.11"
-dependencies = []
+description = "BG6022 V2 ORCA agent rebuild"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "pydantic>=2.13.5,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=6",
+    "pytest-socket>=0.7",
+    "ruff>=0.8",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "--disable-socket"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+line-ending = "lf"
