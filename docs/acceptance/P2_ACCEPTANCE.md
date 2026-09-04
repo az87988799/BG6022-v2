@@ -1,12 +1,12 @@
 # V2-P2 Acceptance
 
 - Status: NO-GO
-- Date: 2026-09-04
+- Date: 2026-09-05
 - Branch: `codex/v2-p2-hardening`
-- Reviewed implementation commit: `31dde814907f2cc4e3a3f29bceaedd157640e8e3`
+- Reviewed implementation commit: `0697d0783b4407055391068dbed28051fdad20ce`
 - Acceptance PR: `#3`
-- Latest verified workflow for reviewed implementation: `33889433401`
-- P2.8.2/P2.9 hardening status: implementation and four-job CI complete; independent review and merge pending
+- Latest verified workflow for reviewed implementation: `33900506365`
+- P2.8.2/P2.9 hardening status: implementation, 214-test suite, 80.28% coverage, and four-job CI complete; independent review and merge pending
 - Independent GitHub approval: Pending; PR #3 has no reviews
 - `main` merge: Pending; `main` remains `a001a31b6c0123a24e7e5d89774b0a1799024a27`
 - Python local: `3.14.6`
@@ -22,24 +22,24 @@ document intentionally does not refer to the commit that updates itself.
 
 | Gate | Result | Evidence |
 |---|---|---|
-| uv lock | PASS (CI) | `uv lock --check` in workflow `33889433401` |
+| uv lock | PASS (CI) | `uv lock --check` in workflow `33900506365` |
 | compileall | PASS (local/CI) | local `python -m compileall -q src tests`; CI uses `uv run --offline --no-sync python -m compileall -q src tests` |
-| pytest | PASS (local runnable suite) | `PYTHONPATH=src pytest -q tests/contract tests/integration tests/persistence tests/unit -o addopts=''`: `147 passed` |
-| ruff check/format | PASS (local/CI) | `ruff check src tests`; `ruff format --check src tests`; `61 files already formatted` |
+| pytest | PASS (local runnable suite) | `PYTHONPATH=src pytest -q --ignore=tests/test_offline.py -o addopts=''`: `213 passed`; CI complete suite: `214 passed` |
+| ruff check/format | PASS (local/CI) | `ruff check src tests`; `ruff format --check src tests`; `70 files already formatted` |
 | git diff check | PASS | `git diff --check` |
 | package build | PASS (local/CI) | local `python -m build --no-isolation`; CI `uv build` produced sdist and wheel |
-| migration fresh/idempotent/drift/rollback/v1-to-v3 | PASS | `tests/persistence/test_migrations.py` |
+| migration fresh/idempotent/drift/rollback/v1-to-v4 | PASS | `tests/persistence/test_migrations.py` |
 | reducer purity/replay | PASS | `tests/unit/orchestration/test_reducer.py`; `tests/persistence/test_restart_replay.py` |
 | CAS concurrency | PASS | `tests/persistence/test_revision_cas.py` |
 | command idempotency | PASS | `tests/persistence/test_run_event_atomicity.py`; `tests/persistence/test_effect_commands.py` |
 | interrupt lifecycle | PASS | `tests/persistence/test_interrupt_lifecycle.py` |
 | outbox lease/retry/dead-letter | PASS | `tests/persistence/test_outbox_leases.py` |
 | crash/restart | PASS | `tests/persistence/test_atomic_failure_points.py`; `tests/persistence/test_restart_replay.py` |
-| P2.8.2/P2.9 typed boundary hardening | PASS | `tests/persistence/test_effect_commands.py`; `tests/persistence/test_outbox_leases.py`; `tests/persistence/test_p2_9_hardening.py` |
+| P2.8.2/P2.9 typed boundary hardening | PASS | `tests/persistence/test_effect_commands.py`; `tests/persistence/test_outbox_leases.py`; `tests/persistence/test_p2_9_hardening.py`; `tests/persistence/test_p2_boundary_coverage.py` |
 | P2.8.2/P2.9 strict history and projection verification | PASS | `tests/persistence/test_restart_replay.py`; `tests/persistence/test_interrupt_lifecycle.py`; `tests/persistence/test_p2_9_hardening.py`; `src/orca_agent/infrastructure/integrity.py` |
-| P2.8.2/P2.9 stale-owner generation fencing and full Effect spec protection | PASS | `tests/persistence/test_outbox_leases.py`; `tests/persistence/test_p2_9_hardening.py` |
-| P2.8.2/P2.9 composite run ownership and v3 receipts | PASS | `tests/persistence/test_migrations.py`; `tests/persistence/test_interrupt_lifecycle.py`; `tests/persistence/test_p2_9_hardening.py` |
-| P2.8.2/P2.9 crash-point coverage | PASS | `tests/persistence/test_atomic_failure_points.py`; `tests/persistence/test_crash_restart_hardening.py` |
+| P2.8.2/P2.9 stale-owner generation fencing and full Effect spec protection | PASS | `tests/persistence/test_outbox_leases.py`; `tests/persistence/test_p2_9_hardening.py`; `tests/persistence/test_p2_hardening_repair.py` |
+| P2.8.2/P2.9 composite run ownership and v4 receipts | PASS | `tests/persistence/test_migrations.py`; `tests/persistence/test_interrupt_lifecycle.py`; `tests/persistence/test_p2_9_hardening.py` |
+| P2.8.2/P2.9 crash-point coverage | PASS | `tests/persistence/test_atomic_failure_points.py`; `tests/persistence/test_crash_restart_hardening.py`; `tests/persistence/test_p2_hardening_repair.py` |
 | P2.8.2/P2.9 typed busy/locked boundary | PASS | `tests/persistence/test_outbox_leases.py`; `tests/persistence/test_p2_9_hardening.py`; `src/orca_agent/infrastructure/sqlite.py` |
 | no tracked SQLite artifacts | PASS | `git ls-files "*.sqlite" "*.sqlite3" "*.db" "*-wal" "*-shm"` returned no paths |
 
@@ -51,10 +51,10 @@ the complete suite with the locked development dependencies.
 
 | OS | Python | Result | Workflow URL |
 |---|---:|---|---|
-| Ubuntu | 3.11 | PASS | [run 33889433401](https://github.com/az87988799/BG6022-v2/actions/runs/33889433401) |
-| Ubuntu | 3.14 | PASS | [run 33889433401](https://github.com/az87988799/BG6022-v2/actions/runs/33889433401) |
-| Windows | 3.14 | PASS | [run 33889433401](https://github.com/az87988799/BG6022-v2/actions/runs/33889433401) |
-| Quality | 3.14 | PASS | [run 33889433401](https://github.com/az87988799/BG6022-v2/actions/runs/33889433401) |
+| Ubuntu | 3.11 | PASS | [run 33900506365](https://github.com/az87988799/BG6022-v2/actions/runs/33900506365) |
+| Ubuntu | 3.14 | PASS | [run 33900506365](https://github.com/az87988799/BG6022-v2/actions/runs/33900506365) |
+| Windows | 3.14 | PASS | [run 33900506365](https://github.com/az87988799/BG6022-v2/actions/runs/33900506365) |
+| Quality | 3.14 | PASS | [run 33900506365](https://github.com/az87988799/BG6022-v2/actions/runs/33900506365) |
 
 ## Durable-kernel invariants
 
@@ -78,7 +78,7 @@ the complete suite with the locked development dependencies.
   store the completion worker and generation.
 - Success summaries and failure errors are persisted before the single matching
   effect audit event is bound; duplicate audits return the original result.
-- Outbox terminal rows are monotonic and append-only through v3 triggers.
+- Outbox terminal rows are monotonic and append-only through v4 triggers.
 - Outbox delivery is documented as at-least-once.
 - Leased effects recover after expiry.
 - Only the worker recorded in `completed_by_worker_id` may repeat terminal
@@ -100,8 +100,9 @@ the complete suite with the locked development dependencies.
 
 ## Decision
 
-The P2.8.2/P2.9 hardening implementation, local runnable gates, and the
-four-job GitHub Actions matrix pass for the reviewed implementation commit
-above. V2-P2 remains `NO-GO` because PR #3 is not independently approved or
-merged, `main` has not received the hardening commit and its post-merge CI,
-and user acceptance is still pending. P3 has not started.
+The P2.8.2/P2.9 hardening implementation, local runnable gates, 80.28% CI
+coverage gate, and the four-job GitHub Actions matrix pass for the reviewed
+implementation commit above. V2-P2 remains `NO-GO` because PR #3 is not
+independently approved or merged, `main` has not received the hardening commit
+and its post-merge CI, and user acceptance is still pending. P3 has not
+started.
