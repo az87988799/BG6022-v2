@@ -146,6 +146,43 @@ def test_handler_failure_retry_commit_then_restart_can_deliver_again(tmp_path) -
     assert report[0].outcome == "succeeded"
 
 
+def test_handler_failure_retry_write_before_commit_rolls_back_and_reclaims(tmp_path) -> None:
+    clock, database_path, _, effect_id = _seed(tmp_path)
+    first_worker = new_id(WorkerId)
+    with SQLiteUnitOfWork(database_path, clock=clock) as uow:
+        claimed = uow.outbox.claim_due(
+            worker_id=first_worker,
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=5),
+            limit=1,
+        )[0]
+
+    factory = _FailNextCommitFactory(database_path)
+    with SQLiteUnitOfWork(database_path, clock=clock, connection_factory=factory) as uow:
+        uow.connection.fail_next_commit = True
+        with pytest.raises(RuntimeError):
+            uow.outbox.mark_failed(
+                effect_id=claimed.effect_id,
+                worker_id=first_worker,
+                now=clock.now_utc(),
+                error_code="handler_failed",
+                error_message="retry me",
+                max_attempts=5,
+            )
+
+    clock.advance(timedelta(seconds=5))
+    with SQLiteUnitOfWork(database_path, clock=clock) as uow:
+        reclaimed = uow.outbox.claim_due(
+            worker_id=new_id(WorkerId),
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=5),
+            limit=1,
+        )[0]
+
+    assert reclaimed.effect_id == effect_id
+    assert reclaimed.attempt_count == 2
+
+
 def test_success_write_before_commit_rolls_back_and_redelivers(tmp_path) -> None:
     clock, database_path, _, effect_id = _seed(tmp_path)
     first_worker = new_id(WorkerId)

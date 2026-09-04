@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
 from orca_agent.application.errors import (
     MigrationDriftError,
     MigrationVersionError,
+    StateIntegrityError,
     StorageBusyError,
 )
 from orca_agent.domain.canonical import canonical_json_bytes
+from orca_agent.domain.errors import DomainError
+from orca_agent.domain.hashing import effect_spec_hash, verify_sha256
+from orca_agent.domain.ids import EffectId, EventId, RunId, effect_id_for
+from orca_agent.domain.json_types import freeze_json_object
+from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
+from orca_agent.orchestration.effects import EffectClass
+from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import Clock, SystemClock, format_utc
 from .sqlite import begin_immediate
@@ -40,6 +49,7 @@ class Migration:
     name: str
     statements: tuple[str, ...]
     checksum: str = ""
+    post_apply: Callable[[sqlite3.Connection], None] | None = None
 
     def __post_init__(self) -> None:
         if self.version < 1:
@@ -177,11 +187,206 @@ INITIAL_SCHEMA_STATEMENTS = (
     "CREATE INDEX outbox_lease_expiry ON outbox(status, lease_expires_at_utc)",
 )
 
+
+LEGACY_COMPLETION_WORKER_ID = "worker_ffffffffffffffffffffffffffffffff"
+
+
+def _backfill_effect_spec_hashes(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        "SELECT effect_id, run_id, source_event_id, effect_index, effect_type, "
+        "effect_class, schema_version, engine_version, payload_json, payload_hash "
+        "FROM outbox"
+    ).fetchall()
+    for row in rows:
+        try:
+            effect_id = EffectId(str(row[0]))
+            run_id = RunId(str(row[1]))
+            source_event_id = EventId(str(row[2]))
+            effect_index = int(row[3])
+            effect_type = str(row[4])
+            effect_class = EffectClass(str(row[5]))
+            schema_version = int(row[6])
+            engine_version = str(row[7])
+            payload = freeze_json_object(json.loads(str(row[8])))
+            payload_hash = str(row[9])
+            if schema_version != CURRENT_SCHEMA_VERSION or engine_version != ENGINE_VERSION:
+                raise StateIntegrityError("legacy outbox version is unsupported")
+            if effect_id != effect_id_for(source_event_id, effect_index):
+                raise StateIntegrityError("legacy outbox effect ID is not deterministic")
+            verify_sha256(payload, payload_hash)
+            spec_hash = effect_spec_hash(
+                effect_id=str(effect_id),
+                run_id=str(run_id),
+                source_event_id=str(source_event_id),
+                effect_index=effect_index,
+                effect_type=effect_type,
+                effect_class=effect_class.value,
+                schema_version=schema_version,
+                engine_version=engine_version,
+                payload=payload,
+                payload_hash=payload_hash,
+            )
+        except (DomainError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise StateIntegrityError("legacy outbox payload is invalid") from error
+        connection.execute(
+            "UPDATE outbox SET spec_hash = ? WHERE effect_id = ?",
+            (
+                spec_hash,
+                str(effect_id),
+            ),
+        )
+
+
+V2_HARDENING_STATEMENTS = (
+    "CREATE UNIQUE INDEX events_run_event_unique ON events(run_id, event_id)",
+    "DROP INDEX IF EXISTS one_pending_interrupt_per_run",
+    "DROP INDEX IF EXISTS interrupts_due",
+    "ALTER TABLE interrupts RENAME TO interrupts_v1",
+    """
+    CREATE TABLE interrupts (
+        interrupt_id        TEXT PRIMARY KEY,
+        run_id              TEXT NOT NULL REFERENCES runs(run_id),
+        kind                TEXT NOT NULL,
+        status              TEXT NOT NULL CHECK (
+            status IN ('pending', 'resolved', 'expired', 'superseded', 'cancelled')
+        ),
+        schema_version      INTEGER NOT NULL,
+        engine_version      TEXT NOT NULL,
+        request_event_id    TEXT NOT NULL,
+        terminal_event_id   TEXT,
+        payload_json        TEXT NOT NULL,
+        payload_hash        TEXT NOT NULL,
+        response_json       TEXT,
+        response_hash       TEXT,
+        created_at_utc      TEXT NOT NULL,
+        expires_at_utc      TEXT NOT NULL,
+        terminal_at_utc     TEXT,
+        superseded_by       TEXT,
+        UNIQUE (run_id, interrupt_id),
+        FOREIGN KEY (run_id, request_event_id)
+            REFERENCES events(run_id, event_id),
+        FOREIGN KEY (run_id, terminal_event_id)
+            REFERENCES events(run_id, event_id),
+        FOREIGN KEY (run_id, superseded_by)
+            REFERENCES interrupts(run_id, interrupt_id)
+            DEFERRABLE INITIALLY DEFERRED,
+        CHECK (
+            (status = 'pending' AND terminal_event_id IS NULL AND terminal_at_utc IS NULL)
+            OR
+            (status <> 'pending' AND terminal_event_id IS NOT NULL AND terminal_at_utc IS NOT NULL)
+        ),
+        CHECK (
+            (response_json IS NULL AND response_hash IS NULL)
+            OR
+            (response_json IS NOT NULL AND response_hash IS NOT NULL)
+        )
+    )
+    """.strip(),
+    """
+    INSERT INTO interrupts(
+        interrupt_id, run_id, kind, status, schema_version, engine_version,
+        request_event_id, terminal_event_id, payload_json, payload_hash,
+        response_json, response_hash, created_at_utc, expires_at_utc,
+        terminal_at_utc, superseded_by
+    )
+    SELECT
+        interrupt_id, run_id, kind, status, schema_version, engine_version,
+        request_event_id, terminal_event_id, payload_json, payload_hash,
+        response_json, response_hash, created_at_utc, expires_at_utc,
+        terminal_at_utc, superseded_by
+    FROM interrupts_v1
+    """.strip(),
+    "DROP TABLE interrupts_v1",
+    (
+        "CREATE UNIQUE INDEX one_pending_interrupt_per_run ON interrupts(run_id) "
+        "WHERE status = 'pending'"
+    ),
+    "CREATE INDEX interrupts_due ON interrupts(status, expires_at_utc)",
+    "DROP INDEX IF EXISTS outbox_due",
+    "DROP INDEX IF EXISTS outbox_lease_expiry",
+    "ALTER TABLE outbox RENAME TO outbox_v1",
+    """
+    CREATE TABLE outbox (
+        effect_id            TEXT PRIMARY KEY,
+        run_id               TEXT NOT NULL REFERENCES runs(run_id),
+        source_event_id      TEXT NOT NULL,
+        effect_index         INTEGER NOT NULL CHECK (effect_index >= 0),
+        effect_type          TEXT NOT NULL,
+        effect_class         TEXT NOT NULL CHECK (effect_class IN ('internal', 'external')),
+        schema_version       INTEGER NOT NULL,
+        engine_version       TEXT NOT NULL,
+        payload_json         TEXT NOT NULL,
+        payload_hash         TEXT NOT NULL,
+        spec_hash            TEXT NOT NULL,
+        status                TEXT NOT NULL CHECK (
+            status IN ('pending', 'leased', 'succeeded', 'dead_letter')
+        ),
+        attempt_count        INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        available_at_utc     TEXT NOT NULL,
+        lease_owner          TEXT,
+        lease_expires_at_utc TEXT,
+        completed_at_utc     TEXT,
+        completed_by_worker_id TEXT,
+        last_error_code      TEXT,
+        last_error_message   TEXT,
+        created_at_utc       TEXT NOT NULL,
+        updated_at_utc       TEXT NOT NULL,
+        UNIQUE (source_event_id, effect_index),
+        FOREIGN KEY (run_id, source_event_id)
+            REFERENCES events(run_id, event_id),
+        CHECK (
+            (status = 'leased' AND lease_owner IS NOT NULL AND lease_expires_at_utc IS NOT NULL)
+            OR
+            (status <> 'leased' AND lease_owner IS NULL AND lease_expires_at_utc IS NULL)
+        ),
+        CHECK (
+            (status IN ('succeeded', 'dead_letter')
+             AND completed_at_utc IS NOT NULL
+             AND completed_by_worker_id IS NOT NULL)
+            OR
+            (status IN ('pending', 'leased')
+             AND completed_at_utc IS NULL
+             AND completed_by_worker_id IS NULL)
+        )
+    )
+    """.strip(),
+    """
+    INSERT INTO outbox(
+        effect_id, run_id, source_event_id, effect_index, effect_type, effect_class,
+        schema_version, engine_version, payload_json, payload_hash, spec_hash, status,
+        attempt_count, available_at_utc, lease_owner, lease_expires_at_utc,
+        completed_at_utc, completed_by_worker_id, last_error_code, last_error_message,
+        created_at_utc, updated_at_utc
+    )
+    SELECT
+        effect_id, run_id, source_event_id, effect_index, effect_type, effect_class,
+        schema_version, engine_version, payload_json, payload_hash, '', status,
+        attempt_count, available_at_utc, lease_owner, lease_expires_at_utc,
+        completed_at_utc,
+        CASE
+            WHEN status IN ('succeeded', 'dead_letter')
+            THEN 'worker_ffffffffffffffffffffffffffffffff'
+            ELSE NULL
+        END,
+        last_error_code, last_error_message, created_at_utc, updated_at_utc
+    FROM outbox_v1
+    """.strip(),
+    "DROP TABLE outbox_v1",
+    "CREATE INDEX outbox_due ON outbox(status, available_at_utc, created_at_utc, effect_id)",
+    "CREATE INDEX outbox_lease_expiry ON outbox(status, lease_expires_at_utc)",
+)
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
         name="initial_durable_kernel",
         statements=INITIAL_SCHEMA_STATEMENTS,
+    ),
+    Migration(
+        version=2,
+        name="p2_projection_ownership_and_outbox_completion",
+        statements=V2_HARDENING_STATEMENTS,
+        post_apply=_backfill_effect_spec_hashes,
     ),
 )
 
@@ -236,6 +441,8 @@ def apply_migrations(
 
             for statement in migration.statements:
                 connection.execute(statement)
+            if migration.post_apply is not None:
+                migration.post_apply(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name, checksum, applied_at_utc) "
                 "VALUES (?, ?, ?, ?)",

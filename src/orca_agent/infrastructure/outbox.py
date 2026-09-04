@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
+from pydantic import ValidationError
+
 from orca_agent.application.errors import LeaseLostError, StateIntegrityError
-from orca_agent.domain.errors import HashMismatchError
-from orca_agent.domain.hashing import sha256_hex, verify_sha256
+from orca_agent.domain.errors import DomainError, HashMismatchError
+from orca_agent.domain.hashing import effect_spec_hash, sha256_hex, verify_sha256
 from orca_agent.domain.ids import EffectId, EventId, RunId, WorkerId, effect_id_for
-from orca_agent.domain.json_types import FrozenJsonObject, freeze_json_object
+from orca_agent.domain.json_types import FrozenJsonObject, freeze_json_object, thaw_json
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import KernelEvent
@@ -19,6 +21,7 @@ from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import format_utc, parse_utc
 from .repositories import json_text, json_value
+from .sqlite import begin_immediate
 
 
 class OutboxStatus(StrEnum):
@@ -40,12 +43,14 @@ class OutboxRecord:
     engine_version: str
     payload: FrozenJsonObject
     payload_hash: str
+    spec_hash: str
     status: OutboxStatus
     attempt_count: int
     available_at_utc: datetime
     lease_owner: WorkerId | None
     lease_expires_at_utc: datetime | None
     completed_at_utc: datetime | None
+    completed_by_worker_id: WorkerId | None
     last_error_code: str | None
     last_error_message: str | None
     created_at_utc: datetime
@@ -60,9 +65,11 @@ class OutboxRepository:
 
     _SELECT = (
         "SELECT effect_id, run_id, source_event_id, effect_index, effect_type, effect_class, "
-        "schema_version, engine_version, payload_json, payload_hash, status, attempt_count, "
+        "schema_version, engine_version, payload_json, payload_hash, spec_hash, status, "
+        "attempt_count, "
         "available_at_utc, lease_owner, lease_expires_at_utc, completed_at_utc, "
-        "last_error_code, last_error_message, created_at_utc, updated_at_utc FROM outbox"
+        "completed_by_worker_id, last_error_code, last_error_message, created_at_utc, "
+        "updated_at_utc FROM outbox"
     )
 
     def _load(self, row: sqlite3.Row) -> OutboxRecord:
@@ -74,27 +81,60 @@ class OutboxRepository:
             payload = freeze_json_object(json_value(str(row[8]), what="outbox payload"))
             payload_hash = str(row[9])
             verify_sha256(payload, payload_hash)
-            status = OutboxStatus(str(row[10]))
+            spec_hash = str(row[10])
+            status = OutboxStatus(str(row[11]))
             if int(row[6]) != CURRENT_SCHEMA_VERSION or str(row[7]) != ENGINE_VERSION:
                 raise StateIntegrityError("stored outbox version is unsupported")
-            lease_owner = None if row[13] is None else WorkerId(str(row[13]))
-            lease_expires = None if row[14] is None else parse_utc(str(row[14]))
-            completed = None if row[15] is None else parse_utc(str(row[15]))
+            run_id = RunId(str(row[1]))
+            lease_owner = None if row[14] is None else WorkerId(str(row[14]))
+            lease_expires = None if row[15] is None else parse_utc(str(row[15]))
+            completed = None if row[16] is None else parse_utc(str(row[16]))
+            completed_by = None if row[17] is None else WorkerId(str(row[17]))
             if status is OutboxStatus.LEASED:
                 if lease_owner is None or lease_expires is None:
                     raise StateIntegrityError("leased effect is missing lease metadata")
             elif lease_owner is not None or lease_expires is not None:
                 raise StateIntegrityError("non-leased effect contains lease metadata")
-            if status in (OutboxStatus.SUCCEEDED, OutboxStatus.DEAD_LETTER) and completed is None:
-                raise StateIntegrityError("terminal effect is missing completion time")
-            if status in (OutboxStatus.PENDING, OutboxStatus.LEASED) and completed is not None:
-                raise StateIntegrityError("active effect contains completion time")
-            error_message = None if row[17] is None else str(row[17])
+            if status in (OutboxStatus.SUCCEEDED, OutboxStatus.DEAD_LETTER) and (
+                completed is None or completed_by is None
+            ):
+                raise StateIntegrityError("terminal effect is missing completion metadata")
+            if status in (OutboxStatus.PENDING, OutboxStatus.LEASED) and (
+                completed is not None or completed_by is not None
+            ):
+                raise StateIntegrityError("active effect contains completion metadata")
+            expected_spec_hash = effect_spec_hash(
+                effect_id=str(effect_id),
+                run_id=str(run_id),
+                source_event_id=str(source_event_id),
+                effect_index=int(row[3]),
+                effect_type=str(row[4]),
+                effect_class=str(row[5]),
+                schema_version=int(row[6]),
+                engine_version=str(row[7]),
+                payload=payload,
+                payload_hash=payload_hash,
+            )
+            if spec_hash != expected_spec_hash:
+                raise StateIntegrityError("stored effect specification hash does not match")
+            self._verify_source_event(
+                run_id=run_id,
+                source_event_id=source_event_id,
+                effect_id=effect_id,
+                effect_index=int(row[3]),
+                effect_type=str(row[4]),
+                effect_class=EffectClass(str(row[5])),
+                schema_version=int(row[6]),
+                engine_version=str(row[7]),
+                payload=payload,
+                payload_hash=payload_hash,
+            )
+            error_message = None if row[19] is None else str(row[19])
             if error_message is not None and (len(error_message) > 256 or "\x00" in error_message):
                 raise StateIntegrityError("stored outbox error message is unsafe")
             return OutboxRecord(
                 effect_id=effect_id,
-                run_id=RunId(str(row[1])),
+                run_id=run_id,
                 source_event_id=source_event_id,
                 effect_index=int(row[3]),
                 effect_type=str(row[4]),
@@ -103,21 +143,71 @@ class OutboxRepository:
                 engine_version=str(row[7]),
                 payload=payload,
                 payload_hash=payload_hash,
+                spec_hash=spec_hash,
                 status=status,
-                attempt_count=int(row[11]),
-                available_at_utc=parse_utc(str(row[12])),
+                attempt_count=int(row[12]),
+                available_at_utc=parse_utc(str(row[13])),
                 lease_owner=lease_owner,
                 lease_expires_at_utc=lease_expires,
                 completed_at_utc=completed,
-                last_error_code=None if row[16] is None else str(row[16]),
+                completed_by_worker_id=completed_by,
+                last_error_code=None if row[18] is None else str(row[18]),
                 last_error_message=error_message,
-                created_at_utc=parse_utc(str(row[18])),
-                updated_at_utc=parse_utc(str(row[19])),
+                created_at_utc=parse_utc(str(row[20])),
+                updated_at_utc=parse_utc(str(row[21])),
             )
         except StateIntegrityError:
             raise
-        except (HashMismatchError, TypeError, ValueError) as error:
+        except (DomainError, HashMismatchError, TypeError, ValueError) as error:
             raise StateIntegrityError("stored outbox record is invalid") from error
+
+    def _verify_source_event(
+        self,
+        *,
+        run_id: RunId,
+        source_event_id: EventId,
+        effect_id: EffectId,
+        effect_index: int,
+        effect_type: str,
+        effect_class: EffectClass,
+        schema_version: int,
+        engine_version: str,
+        payload: FrozenJsonObject,
+        payload_hash: str,
+    ) -> None:
+        from .repositories import EventRepository
+
+        event = EventRepository(self.connection).get(source_event_id)
+        if event is None or event.run_id != run_id:
+            raise StateIntegrityError("outbox source event does not belong to the run")
+        raw_effects = event.payload.get("effects", [])
+        if not isinstance(raw_effects, (list, tuple)):
+            raise StateIntegrityError("outbox source event effects are invalid")
+        try:
+            effects = tuple(
+                EffectSpec.model_validate(thaw_json(item), strict=False) for item in raw_effects
+            )
+        except (TypeError, ValueError, ValidationError) as error:
+            raise StateIntegrityError("outbox source event effect is invalid") from error
+        indexes = tuple(effect.effect_index for effect in effects)
+        if indexes != tuple(range(len(indexes))):
+            raise StateIntegrityError("outbox source event effect indexes are invalid")
+        if sum(effect.effect_class is EffectClass.EXTERNAL for effect in effects) > 1:
+            raise StateIntegrityError("outbox source event contains too many external effects")
+        matches = tuple(effect for effect in effects if effect.effect_index == effect_index)
+        if len(matches) != 1:
+            raise StateIntegrityError("outbox effect is not present in its source event")
+        expected = matches[0]
+        if (
+            effect_id != expected.effect_id(source_event_id)
+            or effect_type != expected.effect_type
+            or effect_class != expected.effect_class
+            or payload != expected.payload
+            or payload_hash != sha256_hex(expected.payload)
+            or schema_version != event.schema_version
+            or engine_version != event.engine_version
+        ):
+            raise StateIntegrityError("outbox effect does not match its source event")
 
     def get(self, effect_id: EffectId) -> OutboxRecord | None:
         row = self.connection.execute(
@@ -136,6 +226,8 @@ class OutboxRepository:
         created_at_utc: datetime | None = None,
     ) -> tuple[EffectId, ...]:
         created_at = created_at_utc or available_at_utc
+        if event.run_id != run_id:
+            raise StateIntegrityError("outbox run_id does not match source event")
         indexes = tuple(effect.effect_index for effect in effects)
         if indexes != tuple(range(len(indexes))):
             raise StateIntegrityError("effect indexes must be contiguous and ordered")
@@ -144,9 +236,21 @@ class OutboxRepository:
             effect_id = effect.effect_id(event.event_id)
             payload_hash = sha256_hex(effect.payload)
             payload_json = json_text(effect.payload)
+            spec_hash = effect_spec_hash(
+                effect_id=str(effect_id),
+                run_id=str(run_id),
+                source_event_id=str(event.event_id),
+                effect_index=effect.effect_index,
+                effect_type=effect.effect_type,
+                effect_class=effect.effect_class.value,
+                schema_version=event.schema_version,
+                engine_version=event.engine_version,
+                payload=effect.payload,
+                payload_hash=payload_hash,
+            )
             existing = self.connection.execute(
                 "SELECT run_id, source_event_id, effect_index, effect_type, effect_class, "
-                "payload_json, payload_hash FROM outbox WHERE effect_id = ?",
+                "payload_json, payload_hash, spec_hash FROM outbox WHERE effect_id = ?",
                 (str(effect_id),),
             ).fetchone()
             if existing is not None:
@@ -158,6 +262,7 @@ class OutboxRepository:
                     and str(existing[4]) == effect.effect_class.value
                     and str(existing[5]) == payload_json
                     and str(existing[6]) == payload_hash
+                    and str(existing[7]) == spec_hash
                 )
                 if not same:
                     raise StateIntegrityError("deterministic effect ID maps to different content")
@@ -167,11 +272,11 @@ class OutboxRepository:
                 self.connection.execute(
                     "INSERT INTO outbox(effect_id, run_id, source_event_id, effect_index, "
                     "effect_type, effect_class, schema_version, engine_version, payload_json, "
-                    "payload_hash, status, attempt_count, available_at_utc, lease_owner, "
-                    "lease_expires_at_utc, completed_at_utc, last_error_code, last_error_message, "
+                    "payload_hash, spec_hash, status, attempt_count, available_at_utc, "
+                    "lease_owner, lease_expires_at_utc, completed_at_utc, "
+                    "completed_by_worker_id, last_error_code, last_error_message, "
                     "created_at_utc, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, "
-                    "NULL, NULL, NULL, NULL, NULL, ?, ?)",
+                    "?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)",
                     (
                         str(effect_id),
                         str(run_id),
@@ -183,6 +288,7 @@ class OutboxRepository:
                         event.engine_version,
                         payload_json,
                         payload_hash,
+                        spec_hash,
                         OutboxStatus.PENDING.value,
                         0,
                         format_utc(available_at_utc),
@@ -203,6 +309,13 @@ class OutboxRepository:
                 "SELECT COUNT(*) FROM outbox WHERE source_event_id = ?", (str(event_id),)
             ).fetchone()[0]
         )
+
+    def list_for_run(self, run_id: RunId) -> tuple[OutboxRecord, ...]:
+        rows = self.connection.execute(
+            f"{self._SELECT} WHERE run_id = ? ORDER BY created_at_utc, effect_id",
+            (str(run_id),),
+        ).fetchall()
+        return tuple(self._load(row) for row in rows)
 
     def count(self, *, status: OutboxStatus | None = None) -> int:
         if status is None:
@@ -231,7 +344,7 @@ class OutboxRepository:
         lease_expires_text = format_utc(now + lease_duration)
         claimed_ids: list[EffectId] = []
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
+            begin_immediate(self.connection)
             rows = self.connection.execute(
                 f"{self._SELECT} WHERE "
                 "(status = 'pending' AND available_at_utc <= ?) "
@@ -261,6 +374,10 @@ class OutboxRepository:
             )
             self.connection.commit()
             return records
+        except DomainError as error:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise StateIntegrityError("stored outbox effect ID is invalid") from error
         except Exception:
             if self.connection.in_transaction:
                 self.connection.rollback()
@@ -280,7 +397,7 @@ class OutboxRepository:
         owner = WorkerId(str(worker_id))
         now_text = format_utc(now)
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
+            begin_immediate(self.connection)
             current = self.get(effect_id)
             if current is None:
                 raise StateIntegrityError("effect was not found")
@@ -325,11 +442,13 @@ class OutboxRepository:
         owner = WorkerId(str(worker_id))
         now_text = format_utc(now)
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
+            begin_immediate(self.connection)
             current = self.get(effect_id)
             if current is None:
                 raise StateIntegrityError("effect was not found")
             if current.status is OutboxStatus.SUCCEEDED:
+                if current.completed_by_worker_id != owner:
+                    raise LeaseLostError("outbox completion belongs to another worker")
                 self.connection.commit()
                 return True
             if (
@@ -341,9 +460,10 @@ class OutboxRepository:
                 raise LeaseLostError("outbox lease is no longer owned or valid")
             cursor = self.connection.execute(
                 "UPDATE outbox SET status = 'succeeded', lease_owner = NULL, "
-                "lease_expires_at_utc = NULL, completed_at_utc = ?, updated_at_utc = ? "
+                "lease_expires_at_utc = NULL, completed_at_utc = ?, "
+                "completed_by_worker_id = ?, updated_at_utc = ? "
                 "WHERE effect_id = ? AND status = 'leased' AND lease_owner = ?",
-                (now_text, now_text, str(effect_id), str(owner)),
+                (now_text, str(owner), now_text, str(effect_id), str(owner)),
             )
             if cursor.rowcount != 1:
                 raise LeaseLostError("outbox lease is no longer owned or valid")
@@ -373,10 +493,15 @@ class OutboxRepository:
         owner = WorkerId(str(worker_id))
         now_text = format_utc(now)
         try:
-            self.connection.execute("BEGIN IMMEDIATE")
+            begin_immediate(self.connection)
             current = self.get(effect_id)
             if current is None:
                 raise StateIntegrityError("effect was not found")
+            if current.status is OutboxStatus.DEAD_LETTER:
+                if current.completed_by_worker_id != owner:
+                    raise LeaseLostError("outbox completion belongs to another worker")
+                self.connection.commit()
+                return current
             if (
                 current.status is not OutboxStatus.LEASED
                 or current.lease_owner != owner
@@ -388,22 +513,26 @@ class OutboxRepository:
             next_status = OutboxStatus.DEAD_LETTER if terminal else OutboxStatus.PENDING
             available = now if terminal else now + backoff_for_attempt(current.attempt_count)
             completed = now_text if terminal else None
-            self.connection.execute(
+            cursor = self.connection.execute(
                 "UPDATE outbox SET status = ?, available_at_utc = ?, lease_owner = NULL, "
                 "lease_expires_at_utc = NULL, completed_at_utc = ?, last_error_code = ?, "
-                "last_error_message = ?, updated_at_utc = ? WHERE effect_id = ? AND "
+                "completed_by_worker_id = ?, last_error_message = ?, updated_at_utc = ? "
+                "WHERE effect_id = ? AND "
                 "status = 'leased' AND lease_owner = ?",
                 (
                     next_status.value,
                     format_utc(available),
                     completed,
                     error_code,
+                    str(owner) if terminal else None,
                     error_message,
                     now_text,
                     str(effect_id),
                     str(owner),
                 ),
             )
+            if cursor.rowcount != 1:
+                raise LeaseLostError("outbox lease is no longer owned or valid")
             updated = self.get(effect_id)
             self.connection.commit()
             if updated is None:

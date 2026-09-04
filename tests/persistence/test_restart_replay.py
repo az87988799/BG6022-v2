@@ -72,6 +72,62 @@ def test_sequence_gap_fails_closed(tmp_path) -> None:
             uow.runs.get_verified(created.run_id, uow.events)
 
 
+@pytest.mark.parametrize(
+    "column, value",
+    (
+        ("event_id", "event_invalid"),
+        ("command_id", "command_invalid"),
+        ("schema_version", 99),
+    ),
+)
+def test_invalid_persisted_event_fields_return_typed_storage_error(tmp_path, column, value) -> None:
+    clock = FrozenClock(datetime(2026, 9, 4, tzinfo=UTC))
+    service = KernelApplicationService(tmp_path / "state.sqlite3", clock=clock)
+    created = service.execute(CreateRun.create())
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        uow.connection.execute(
+            f"UPDATE events SET {column} = ? WHERE run_id = ?",  # noqa: S608 - test column allowlist
+            (value, str(created.run_id)),
+        )
+
+    result = service.execute(
+        CancelRun.create(
+            run_id=created.run_id,
+            expected_revision=1,
+            reason_code="user_cancelled",
+        )
+    )
+
+    assert result.accepted is False
+    assert result.code == "state_integrity_error"
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    (("last_event_id", "event_invalid"), ("schema_version", 99)),
+)
+def test_invalid_persisted_run_fields_return_typed_storage_error(tmp_path, column, value) -> None:
+    clock = FrozenClock(datetime(2026, 9, 4, tzinfo=UTC))
+    service = KernelApplicationService(tmp_path / "state.sqlite3", clock=clock)
+    created = service.execute(CreateRun.create())
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        uow.connection.execute(
+            f"UPDATE runs SET {column} = ? WHERE run_id = ?",  # noqa: S608 - test column allowlist
+            (value, str(created.run_id)),
+        )
+
+    result = service.execute(
+        CancelRun.create(
+            run_id=created.run_id,
+            expected_revision=1,
+            reason_code="user_cancelled",
+        )
+    )
+
+    assert result.accepted is False
+    assert result.code == "state_integrity_error"
+
+
 @pytest.mark.parametrize("tamper", ["last_event", "revision", "result_hash", "snapshot_hash"])
 def test_snapshot_and_result_metadata_tamper_fails_closed(tmp_path, tamper: str) -> None:
     clock = FrozenClock(datetime(2026, 9, 4, tzinfo=UTC))

@@ -1,14 +1,15 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier
 
 import pytest
 
-from orca_agent.application.errors import LeaseLostError, StateIntegrityError
+from orca_agent.application.errors import LeaseLostError, StateIntegrityError, StorageBusyError
 from orca_agent.application.service import KernelApplicationService
 from orca_agent.domain.ids import WorkerId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
-from orca_agent.infrastructure.outbox import OutboxStatus, backoff_for_attempt
+from orca_agent.infrastructure.outbox import OutboxRepository, OutboxStatus, backoff_for_attempt
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.infrastructure.worker import HandlerResult, OutboxWorker
 from orca_agent.orchestration.commands import CreateRun
@@ -152,11 +153,12 @@ def test_renew_requires_owner_and_succeed_is_not_claimed_again(tmp_path) -> None
             worker_id=owner,
             now=clock.now_utc(),
         )
-        assert uow.outbox.mark_succeeded(
-            effect_id=effect.effect_id,
-            worker_id=other,
-            now=clock.now_utc(),
-        )
+        with pytest.raises(LeaseLostError):
+            uow.outbox.mark_succeeded(
+                effect_id=effect.effect_id,
+                worker_id=other,
+                now=clock.now_utc(),
+            )
         assert (
             uow.outbox.claim_due(
                 worker_id=other,
@@ -333,3 +335,143 @@ def test_outbox_payload_tamper_fails_closed(tmp_path) -> None:
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
         with pytest.raises(StateIntegrityError):
             uow.outbox.get(effect.effect_id)
+
+
+def test_stale_owner_cannot_complete_after_reclaim(tmp_path) -> None:
+    clock, _, _ = _seed(tmp_path)
+    first_worker = new_id(WorkerId)
+    second_worker = new_id(WorkerId)
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        first = uow.outbox.claim_due(
+            worker_id=first_worker,
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=5),
+            limit=1,
+        )[0]
+    clock.advance(timedelta(seconds=5))
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        second = uow.outbox.claim_due(
+            worker_id=second_worker,
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=5),
+            limit=1,
+        )[0]
+        uow.outbox.mark_succeeded(
+            effect_id=second.effect_id,
+            worker_id=second_worker,
+            now=clock.now_utc(),
+        )
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        with pytest.raises(LeaseLostError):
+            uow.outbox.mark_succeeded(
+                effect_id=first.effect_id,
+                worker_id=first_worker,
+                now=clock.now_utc(),
+            )
+        assert uow.outbox.mark_succeeded(
+            effect_id=first.effect_id,
+            worker_id=second_worker,
+            now=clock.now_utc(),
+        )
+        stored = uow.outbox.get(first.effect_id)
+        assert stored.completed_by_worker_id == second_worker
+
+
+def test_dead_letter_completion_is_idempotent_only_for_original_owner(tmp_path) -> None:
+    clock, _, _ = _seed(tmp_path)
+    owner = new_id(WorkerId)
+    other = new_id(WorkerId)
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        effect = uow.outbox.claim_due(
+            worker_id=owner,
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=10),
+            limit=1,
+        )[0]
+        terminal = uow.outbox.mark_failed(
+            effect_id=effect.effect_id,
+            worker_id=owner,
+            now=clock.now_utc(),
+            error_code="terminal_failure",
+            error_message="controlled failure",
+            max_attempts=1,
+        )
+        assert terminal.status is OutboxStatus.DEAD_LETTER
+        assert (
+            uow.outbox.mark_failed(
+                effect_id=effect.effect_id,
+                worker_id=owner,
+                now=clock.now_utc(),
+                error_code="different_message_is_ignored",
+                error_message="different message is ignored",
+                max_attempts=1,
+            )
+            == terminal
+        )
+        with pytest.raises(LeaseLostError):
+            uow.outbox.mark_failed(
+                effect_id=effect.effect_id,
+                worker_id=other,
+                now=clock.now_utc(),
+                error_code="late_failure",
+                error_message="late failure",
+                max_attempts=1,
+            )
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    (("effect_type", "external.tampered"), ("effect_class", "internal")),
+)
+def test_complete_effect_spec_tamper_fails_closed(tmp_path, column: str, value: str) -> None:
+    clock, _, _ = _seed(tmp_path)
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        effect = uow.outbox.claim_due(
+            worker_id=new_id(WorkerId),
+            now=clock.now_utc(),
+            lease_duration=timedelta(seconds=10),
+            limit=1,
+        )[0]
+        uow.connection.execute(
+            f"UPDATE outbox SET {column} = ? WHERE effect_id = ?",  # noqa: S608 - test column allowlist
+            (value, str(effect.effect_id)),
+        )
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        with pytest.raises(StateIntegrityError):
+            uow.outbox.get(effect.effect_id)
+
+
+def test_cross_run_effect_tamper_fails_closed(tmp_path) -> None:
+    clock, run_id, _ = _seed(tmp_path)
+    other = KernelApplicationService(tmp_path / "state.sqlite3", clock=clock).execute(
+        CreateRun.create()
+    )
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
+        row = uow.connection.execute("SELECT effect_id FROM outbox").fetchone()
+        effect_id = row[0]
+        uow.connection.execute("PRAGMA foreign_keys = OFF")
+        uow.connection.execute(
+            "UPDATE outbox SET run_id = ? WHERE effect_id = ?",
+            (str(other.run_id), effect_id),
+        )
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        with pytest.raises(StateIntegrityError):
+            uow.outbox.get(effect_id)
+    assert run_id != other.run_id
+
+
+class _BusyConnection:
+    in_transaction = False
+
+    def execute(self, _sql):
+        raise sqlite3.OperationalError("database is locked")
+
+
+def test_outbox_begin_immediate_maps_busy_to_typed_error() -> None:
+    with pytest.raises(StorageBusyError):
+        OutboxRepository(_BusyConnection()).claim_due(
+            worker_id=WorkerId("worker_00000000000000000000000000000000"),
+            now=BASE_TIME,
+            lease_duration=timedelta(seconds=5),
+            limit=1,
+        )

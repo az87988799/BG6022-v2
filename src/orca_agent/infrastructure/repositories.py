@@ -10,8 +10,9 @@ from datetime import datetime
 
 from pydantic import ValidationError
 
-from orca_agent.application.errors import RunNotFoundError, StateIntegrityError
+from orca_agent.application.errors import ApplicationError, RunNotFoundError, StateIntegrityError
 from orca_agent.domain.canonical import canonical_json_bytes
+from orca_agent.domain.errors import DomainError
 from orca_agent.domain.ids import EventId, RunId
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.events import KernelEvent
@@ -72,10 +73,12 @@ class RunRepository:
         if row is None:
             return None
         try:
+            stored_run_id = RunId(str(row[0]))
             state = KernelState.model_validate_json(str(row[5]))
             stored_hash = str(row[6])
             if (
-                state.run_id != run_id
+                stored_run_id != run_id
+                or state.run_id != run_id
                 or state.status.value != str(row[4])
                 or int(row[1]) != CURRENT_SCHEMA_VERSION
                 or str(row[2]) != ENGINE_VERSION
@@ -88,7 +91,7 @@ class RunRepository:
             updated_at = parse_utc(str(row[9]))
         except StateIntegrityError:
             raise
-        except (ValidationError, ValueError, TypeError) as error:
+        except (DomainError, ValidationError, ValueError, TypeError) as error:
             raise StateIntegrityError("stored run snapshot is invalid") from error
         return RunSnapshot(
             run_id=run_id,
@@ -107,6 +110,13 @@ class RunRepository:
         if snapshot is None:
             raise RunNotFoundError("run was not found", details={"run_id": str(run_id)})
         return snapshot
+
+    def list_ids(self) -> tuple[RunId, ...]:
+        rows = self.connection.execute("SELECT run_id FROM runs ORDER BY run_id").fetchall()
+        try:
+            return tuple(RunId(str(row[0])) for row in rows)
+        except DomainError as error:
+            raise StateIntegrityError("stored run ID is invalid") from error
 
     def insert(self, snapshot: RunSnapshot) -> None:
         if snapshot.state_hash != state_hash(snapshot.state):
@@ -158,18 +168,47 @@ class RunRepository:
         )
         return cursor.rowcount == 1
 
-    def get_verified(self, run_id: RunId, events: EventRepository) -> RunSnapshot:
-        """Load a snapshot only after replaying and checking its complete event stream."""
+    def get_verified(
+        self,
+        run_id: RunId,
+        events: EventRepository,
+        *,
+        interrupts: object | None = None,
+        outbox: object | None = None,
+    ) -> RunSnapshot:
+        """Load a snapshot only after replaying and checking every projection."""
 
         snapshot = self.require(run_id)
         stored_events = events.list_for_run(run_id)
-        verify_snapshot(
-            snapshot=snapshot.state,
-            stored_state_hash=snapshot.state_hash,
-            stored_revision=snapshot.revision,
-            stored_last_event_id=snapshot.last_event_id,
-            events=tuple(item.event for item in stored_events),
-        )
+        event_values = tuple(item.event for item in stored_events)
+        try:
+            verify_snapshot(
+                snapshot=snapshot.state,
+                stored_state_hash=snapshot.state_hash,
+                stored_revision=snapshot.revision,
+                stored_last_event_id=snapshot.last_event_id,
+                events=event_values,
+            )
+            if interrupts is None:
+                from .interrupts import InterruptRepository
+
+                interrupts = InterruptRepository(self.connection)
+            if outbox is None:
+                from .outbox import OutboxRepository
+
+                outbox = OutboxRepository(self.connection)
+            from .integrity import verify_run_projections
+
+            verify_run_projections(
+                snapshot=snapshot,
+                events=event_values,
+                interrupts=interrupts.list_for_run(run_id),  # type: ignore[union-attr]
+                outbox=outbox.list_for_run(run_id),  # type: ignore[union-attr]
+            )
+        except StateIntegrityError:
+            raise
+        except (ApplicationError, DomainError, ValidationError, TypeError, ValueError) as error:
+            raise StateIntegrityError("stored run projections are invalid") from error
         return snapshot
 
 
@@ -211,7 +250,7 @@ class EventRepository:
                 raise StateIntegrityError("stored event version is unsupported")
             if _HASH_PATTERN.fullmatch(str(row[3])) is None:
                 raise StateIntegrityError("stored command hash is invalid")
-        except (ValidationError, TypeError, ValueError) as error:
+        except (DomainError, ValidationError, TypeError, ValueError) as error:
             raise StateIntegrityError("stored event is invalid") from error
         return StoredEvent(event=event, command_hash=str(row[3]))
 
@@ -225,6 +264,16 @@ class EventRepository:
             (str(command_id),),
         ).fetchone()
         return None if row is None else self._load(row)
+
+    def get(self, event_id: EventId) -> KernelEvent | None:
+        row = self.connection.execute(
+            "SELECT event_id, command_id, command_type, command_hash, run_id, sequence_no, "
+            "expected_revision, new_revision, event_type, schema_version, engine_version, "
+            "payload_json, payload_hash, result_json, result_hash, occurred_at_utc, "
+            "recorded_at_utc FROM events WHERE event_id = ?",
+            (str(event_id),),
+        ).fetchone()
+        return None if row is None else self._load(row).event
 
     def append(self, event: KernelEvent, *, command_hash: str) -> None:
         self.connection.execute(

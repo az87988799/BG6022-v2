@@ -5,17 +5,20 @@ import pytest
 
 from orca_agent.application.errors import StateIntegrityError
 from orca_agent.application.service import KernelApplicationService
-from orca_agent.domain.ids import InterruptId, new_id
+from orca_agent.domain.ids import EffectId, InterruptId, WorkerId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
+from orca_agent.infrastructure.outbox import OutboxStatus
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.orchestration.commands import (
     CancelRun,
     CreateRun,
     ExpireInterrupt,
+    RecordEffectSucceeded,
     ReplaceInterrupt,
     RequestInterrupt,
     ResolveInterrupt,
 )
+from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.state import RunStatus
 
 BASE_TIME = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -237,3 +240,127 @@ def test_projection_hash_tamper_fails_closed(tmp_path) -> None:
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
         with pytest.raises(StateIntegrityError):
             uow.interrupts.get(requested.interrupt_id)
+
+
+def test_deleted_pending_interrupt_blocks_effect_progress(tmp_path) -> None:
+    service = _service(tmp_path)
+    created = service.execute(
+        CreateRun.create(
+            effects=(
+                EffectSpec(
+                    effect_index=0,
+                    effect_type="internal.audit",
+                    effect_class=EffectClass.INTERNAL,
+                    payload={"source": "test"},
+                ),
+            )
+        )
+    )
+    requested = service.execute(_request(service, created.run_id, 1))
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=service.clock) as uow:
+        effect_row = uow.connection.execute("SELECT effect_id FROM outbox").fetchone()
+        effect_id = EffectId(str(effect_row[0]))
+        worker_id = WorkerId("worker_00000000000000000000000000000000")
+        claimed = uow.outbox.claim_due(
+            worker_id=worker_id,
+            now=service.clock.now_utc(),
+            lease_duration=timedelta(seconds=30),
+            limit=1,
+        )[0]
+        assert claimed.effect_id == effect_id
+        uow.outbox.mark_succeeded(
+            effect_id=effect_id,
+            worker_id=worker_id,
+            now=service.clock.now_utc(),
+        )
+        uow.connection.execute(
+            "DELETE FROM interrupts WHERE interrupt_id = ?", (str(requested.interrupt_id),)
+        )
+
+    result = service.execute(
+        RecordEffectSucceeded.create(
+            run_id=created.run_id,
+            expected_revision=2,
+            effect_id=effect_id,
+            result_summary={"accepted": True},
+        )
+    )
+
+    assert result.accepted is False
+    assert result.code == "state_integrity_error"
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        assert uow.runs.require(created.run_id).revision == 2
+        assert uow.outbox.get(effect_id).status is OutboxStatus.SUCCEEDED
+
+
+def test_expiry_tamper_is_rejected_by_due_sweep(tmp_path) -> None:
+    service = _service(tmp_path)
+    created = _created(service)
+    requested = service.execute(_request(service, created.run_id, 1, expiry_offset=5))
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        uow.connection.execute(
+            "UPDATE interrupts SET expires_at_utc = ? WHERE interrupt_id = ?",
+            ("2026-09-04T01:00:00.000000Z", str(requested.interrupt_id)),
+        )
+
+    with pytest.raises(StateIntegrityError):
+        service.expire_due(limit=10)
+
+
+def test_interrupt_request_event_cross_run_tamper_fails_closed(tmp_path) -> None:
+    service = _service(tmp_path)
+    first = _created(service)
+    first_interrupt = service.execute(_request(service, first.run_id, 1))
+    second = _created(service)
+    second_interrupt = service.execute(_request(service, second.run_id, 1))
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        second_event_id = uow.connection.execute(
+            "SELECT request_event_id FROM interrupts WHERE interrupt_id = ?",
+            (str(second_interrupt.interrupt_id),),
+        ).fetchone()[0]
+        uow.connection.execute("PRAGMA foreign_keys = OFF")
+        uow.connection.execute(
+            "UPDATE interrupts SET request_event_id = ? WHERE interrupt_id = ?",
+            (second_event_id, str(first_interrupt.interrupt_id)),
+        )
+
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        with pytest.raises(StateIntegrityError):
+            uow.interrupts.get(first_interrupt.interrupt_id)
+
+
+def test_composite_run_ownership_foreign_keys_reject_cross_run_links(tmp_path) -> None:
+    service = _service(tmp_path)
+    first = service.execute(
+        CreateRun.create(
+            effects=(
+                EffectSpec(
+                    effect_index=0,
+                    effect_type="internal.audit",
+                    effect_class=EffectClass.INTERNAL,
+                    payload={"source": "first"},
+                ),
+            )
+        )
+    )
+    second = _created(service)
+    first_interrupt = service.execute(_request(service, first.run_id, 1))
+    second_interrupt = service.execute(_request(service, second.run_id, 1))
+
+    with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:
+        assert uow.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        effect_id = uow.connection.execute("SELECT effect_id FROM outbox").fetchone()[0]
+        second_event_id = uow.connection.execute(
+            "SELECT request_event_id FROM interrupts WHERE interrupt_id = ?",
+            (str(second_interrupt.interrupt_id),),
+        ).fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "UPDATE outbox SET run_id = ? WHERE effect_id = ?",
+                (str(second.run_id), effect_id),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            uow.connection.execute(
+                "UPDATE interrupts SET request_event_id = ? WHERE interrupt_id = ?",
+                (second_event_id, str(first_interrupt.interrupt_id)),
+            )

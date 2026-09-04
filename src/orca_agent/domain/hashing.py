@@ -32,3 +32,34 @@ def verify_sha256(value: JsonValue | BaseModel, expected: str) -> None:
             "canonical value hash does not match expected hash",
             details={"expected": expected, "actual": actual},
         )
+
+
+def effect_spec_hash(
+    *,
+    effect_id: str,
+    run_id: str,
+    source_event_id: str,
+    effect_index: int,
+    effect_type: str,
+    effect_class: str,
+    schema_version: int,
+    engine_version: str,
+    payload: object,
+    payload_hash: str,
+) -> str:
+    """Hash every immutable field of a persisted effect specification."""
+
+    return sha256_hex(
+        {
+            "effect_class": effect_class,
+            "effect_id": effect_id,
+            "effect_index": effect_index,
+            "effect_type": effect_type,
+            "engine_version": engine_version,
+            "payload": payload,
+            "payload_hash": payload_hash,
+            "run_id": run_id,
+            "schema_version": schema_version,
+            "source_event_id": source_event_id,
+        }
+    )

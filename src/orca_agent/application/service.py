@@ -108,6 +108,15 @@ class KernelApplicationService:
             uow.begin()
             if uow.interrupts is None:
                 raise StorageError("interrupt repository is unavailable")
+            if uow.runs is None or uow.events is None or uow.outbox is None:
+                raise StorageError("kernel repositories are unavailable")
+            for run_id in uow.runs.list_ids():
+                uow.runs.get_verified(
+                    run_id,
+                    uow.events,
+                    interrupts=uow.interrupts,
+                    outbox=uow.outbox,
+                )
             due = uow.interrupts.due_ids(now=now, limit=limit)
             uow.commit()
 
@@ -151,7 +160,12 @@ class KernelApplicationService:
             return self._retry_or_conflict(uow, command, command_hash, stored)
         if isinstance(command, CreateRun):
             return self._create_run(uow, command, command_hash)
-        current = uow.runs.get_verified(command.run_id, uow.events)
+        current = uow.runs.get_verified(
+            command.run_id,
+            uow.events,
+            interrupts=uow.interrupts,
+            outbox=uow.outbox,
+        )
         if command.expected_revision != current.revision:
             raise RevisionConflictError(
                 "expected revision does not match current revision",
