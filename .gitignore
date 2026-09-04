@@ -1,0 +1,56 @@
+# Secrets and local environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# Python caches and tool state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Temporary and generated agent data
+.tmp/
+tmp/
+agent_output/
+
+# Local databases
+*.sqlite
+*.sqlite3
+*.db
+
+# ORCA scratch and artifact roots
+scratch/
+artifacts/
+orca_scratch/
+orca-scratch/
+orca_artifacts/
+orca-artifacts/
+**/scratch/
+**/artifacts/
+**/orca_scratch/
+**/orca-scratch/
+**/orca_artifacts/
+**/orca-artifacts/
+*.gbw
+*.hess
+*.engrad
+
+# IDE and editor-private files
+.idea/
+.vscode/
+*.iml
+*.code-workspace
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
