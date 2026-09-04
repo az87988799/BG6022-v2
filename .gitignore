@@ -9,6 +9,7 @@ env/
 # Python caches and tool state
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
