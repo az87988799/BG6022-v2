@@ -1,4 +1,4 @@
-"""Fail-closed, one-shot outbox worker with fenced leases."""
+"""Fail-closed, one-shot outbox worker with fenced dispatch permits."""
 
 from __future__ import annotations
 
@@ -7,22 +7,37 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-from orca_agent.application.errors import LeaseLostError, StorageError
+from orca_agent.application.effect_completion import EffectCompletionService
+from orca_agent.application.errors import (
+    EffectDispatchBlockedError,
+    LeaseLostError,
+    StorageError,
+)
 from orca_agent.domain.ids import EffectId, WorkerId, new_id
-from orca_agent.domain.json_types import JsonObject, freeze_json_object, thaw_json
+from orca_agent.orchestration.codes import HandlerErrorCode
+from orca_agent.orchestration.dispatch_policy import (
+    DEFAULT_EFFECT_REGISTRY,
+    EffectRegistry,
+)
+from orca_agent.orchestration.effect_receipts import (
+    EffectSuccessReceiptV1,
+    parse_effect_success_receipt,
+)
 
 from .clock import Clock, SystemClock
-from .outbox import LeasedEffect, OutboxStatus
+from .outbox import DispatchPermit
 from .sqlite import resolve_database_path
 from .unit_of_work import SQLiteUnitOfWork
 
 
 @dataclass(frozen=True)
 class HandlerResult:
+    """Closed worker-to-kernel completion input."""
+
     success: bool
-    error_code: str | None = None
+    error_code: HandlerErrorCode | None = None
     error_message: str | None = None
-    result_summary: object | None = None
+    result_summary: EffectSuccessReceiptV1 | object | None = None
 
 
 @dataclass(frozen=True)
@@ -32,11 +47,11 @@ class DeliveryReport:
     attempt_count: int
 
 
-Handler = Callable[[LeasedEffect], object]
+Handler = Callable[[DispatchPermit], HandlerResult]
 
 
 class OutboxWorker:
-    """Claim, verify, handle, and complete one effect at a time."""
+    """Claim, authorize, handle, and atomically complete one effect at a time."""
 
     def __init__(
         self,
@@ -48,6 +63,7 @@ class OutboxWorker:
         worker_id: WorkerId | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
         max_attempts: int = 5,
+        registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
@@ -59,15 +75,17 @@ class OutboxWorker:
             raise ValueError("database_path and state_root are mutually exclusive")
         if handler is None:
             raise ValueError("handler is required")
-        self.database_path = resolve_database_path(database_path or state_root)  # type: ignore[arg-type]
+        configured_path = database_path if database_path is not None else state_root
+        self.database_path = resolve_database_path(configured_path)  # type: ignore[arg-type]
         self.handler = handler
         self.clock = clock or SystemClock()
         self.worker_id = worker_id or new_id(WorkerId)
         self.lease_duration = lease_duration
         self.max_attempts = max_attempts
+        self.registry = registry
 
     def run_once(self, *, limit: int = 1) -> tuple[DeliveryReport, ...]:
-        """Deliver at most ``limit`` effects without preclaiming a stale batch."""
+        """Deliver at most ``limit`` effects without invoking a handler pre-authorization."""
 
         if type(limit) is not int or limit < 1:
             return ()
@@ -90,6 +108,7 @@ class OutboxWorker:
                     now=now,
                     lease_duration=self.lease_duration,
                     limit=1,
+                    registry=self.registry,
                 )
             if not claimed:
                 break
@@ -103,7 +122,7 @@ class OutboxWorker:
                         or uow.outbox is None
                     ):
                         raise StorageError("kernel repositories are unavailable")
-                    effect = uow.outbox.prepare_dispatch(
+                    permit = uow.outbox.authorize_dispatch(
                         runs=uow.runs,
                         events=uow.events,
                         interrupts=uow.interrupts,
@@ -111,6 +130,7 @@ class OutboxWorker:
                         worker_id=self.worker_id,
                         expected_generation=claimed_effect.attempt_count,
                         now=self.clock.now_utc(),
+                        registry=self.registry,
                     )
             except LeaseLostError:
                 reports.append(
@@ -121,102 +141,82 @@ class OutboxWorker:
                     )
                 )
                 continue
-            if effect is None:
+            except EffectDispatchBlockedError:
                 reports.append(
                     DeliveryReport(
                         claimed_effect.effect_id,
-                        "lease_lost",
+                        "blocked",
+                        claimed_effect.attempt_count,
+                    )
+                )
+                continue
+            if permit is None:
+                reports.append(
+                    DeliveryReport(
+                        claimed_effect.effect_id,
+                        "cancelled",
                         claimed_effect.attempt_count,
                     )
                 )
                 continue
 
             try:
-                result = _normalize_handler_result(self.handler(effect))
+                normalized = _normalize_handler_result(self.handler(permit))
             except Exception:
-                result = HandlerResult(
+                normalized = HandlerResult(
                     success=False,
-                    error_code="handler_exception",
-                    error_message="injected handler raised an exception",
+                    error_code=HandlerErrorCode.HANDLER_EXCEPTION,
                 )
-            if result.success:
-                reports.append(self._record_success(effect, result))
-            else:
-                reports.append(self._record_failure(effect, result))
-        return tuple(reports)
-
-    def _record_success(self, effect: LeasedEffect, result: HandlerResult) -> DeliveryReport:
-        summary = result.result_summary
-        if not isinstance(summary, dict):
-            summary = thaw_json(freeze_json_object(summary or {}))
-        try:
-            with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
-                if uow.outbox is None:
-                    raise StorageError("outbox repository is unavailable")
-                uow.outbox.mark_succeeded(
-                    effect_id=effect.effect_id,
-                    worker_id=self.worker_id,
-                    expected_generation=effect.attempt_count,
-                    now=self.clock.now_utc(),
-                    result_summary=summary,
-                )
-        except LeaseLostError:
-            return DeliveryReport(effect.effect_id, "lease_lost", effect.attempt_count)
-        return DeliveryReport(effect.effect_id, "succeeded", effect.attempt_count)
-
-    def _record_failure(self, effect: LeasedEffect, result: HandlerResult) -> DeliveryReport:
-        try:
-            with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
-                if uow.outbox is None:
-                    raise StorageError("outbox repository is unavailable")
-                updated = uow.outbox.mark_failed(
-                    effect_id=effect.effect_id,
-                    worker_id=self.worker_id,
-                    expected_generation=effect.attempt_count,
-                    now=self.clock.now_utc(),
-                    error_code=result.error_code or "handler_failed",
-                    error_message=result.error_message
-                    or "The handler reported a controlled failure.",
+            try:
+                completion = EffectCompletionService(
+                    self.database_path,
+                    clock=self.clock,
+                    registry=self.registry,
                     max_attempts=self.max_attempts,
+                ).complete(permit, normalized)
+            except LeaseLostError:
+                reports.append(
+                    DeliveryReport(permit.effect.effect_id, "lease_lost", permit.generation)
                 )
-        except LeaseLostError:
-            return DeliveryReport(effect.effect_id, "lease_lost", effect.attempt_count)
-        outcome = "dead_letter" if updated.status is OutboxStatus.DEAD_LETTER else "retry"
-        return DeliveryReport(effect.effect_id, outcome, updated.attempt_count)
+                continue
+            reports.append(
+                DeliveryReport(
+                    permit.effect.effect_id,
+                    completion.outcome,
+                    completion.attempt_count,
+                )
+            )
+        return tuple(reports)
 
 
 def _normalize_handler_result(value: object) -> HandlerResult:
-    """Fail closed and retain only fixed, non-sensitive failure summaries."""
+    """Keep only typed receipts and allowlisted fixed failure codes."""
 
-    if not isinstance(value, HandlerResult):
+    if not isinstance(value, HandlerResult) or type(value.success) is not bool:
         return HandlerResult(
             success=False,
-            error_code="invalid_handler_result",
-            error_message="injected handler returned a non-HandlerResult",
-        )
-    if type(value.success) is not bool:
-        return HandlerResult(
-            success=False,
-            error_code="invalid_handler_result",
-            error_message="injected handler returned an invalid HandlerResult",
+            error_code=HandlerErrorCode.INVALID_HANDLER_RESULT,
         )
     if not value.success:
-        return HandlerResult(
-            success=False,
-            error_code="handler_failed",
-            error_message="The handler reported a controlled failure.",
-        )
+        if value.error_code is None:
+            code = HandlerErrorCode.HANDLER_FAILED
+        elif isinstance(value.error_code, HandlerErrorCode):
+            code = value.error_code
+        else:
+            code = HandlerErrorCode.INVALID_HANDLER_RESULT
+        return HandlerResult(success=False, error_code=code)
     try:
-        summary: JsonObject = {}
-        if value.result_summary is not None:
-            summary = thaw_json(freeze_json_object(value.result_summary))  # type: ignore[assignment]
-    except (TypeError, ValueError):
+        receipt = parse_effect_success_receipt(
+            {"receipt_schema": "effect-success/v1", "outcome_code": "completed"}
+            if value.result_summary is None
+            else value.result_summary
+        )
+    except ValueError:
         return HandlerResult(
             success=False,
-            error_code="invalid_handler_result",
-            error_message="injected handler returned an invalid HandlerResult",
+            error_code=HandlerErrorCode.INVALID_HANDLER_RESULT,
         )
-    return HandlerResult(success=True, result_summary=summary)
+    return HandlerResult(success=True, result_summary=receipt)
 
 
 __all__ = ["DeliveryReport", "Handler", "HandlerResult", "OutboxWorker"]
