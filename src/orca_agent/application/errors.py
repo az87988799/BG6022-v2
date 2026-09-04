@@ -54,6 +54,10 @@ class InterruptNotExpiredError(ApplicationError):
     code = "interrupt_not_expired"
 
 
+class InvalidInterruptExpiryError(ApplicationError):
+    code = "invalid_interrupt_expiry"
+
+
 class LeaseLostError(ApplicationError):
     code = "lease_lost"
 
@@ -85,6 +89,7 @@ __all__ = [
     "DuplicateCommandConflictError",
     "InterruptAlreadyPendingError",
     "InterruptExpiredError",
+    "InvalidInterruptExpiryError",
     "InterruptNotExpiredError",
     "InterruptNotPendingError",
     "InvalidTransitionError",

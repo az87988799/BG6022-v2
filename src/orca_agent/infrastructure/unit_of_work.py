@@ -8,6 +8,7 @@ from pathlib import Path
 from orca_agent.infrastructure.migrations import apply_migrations
 
 from .clock import Clock, SystemClock
+from .interrupts import InterruptRepository
 from .outbox import OutboxRepository
 from .repositories import EventRepository, RunRepository
 from .sqlite import SQLiteConnectionFactory, begin_immediate
@@ -28,6 +29,7 @@ class SQLiteUnitOfWork:
         self.connection: sqlite3.Connection | None = None
         self.runs: RunRepository | None = None
         self.events: EventRepository | None = None
+        self.interrupts: InterruptRepository | None = None
         self.outbox: OutboxRepository | None = None
         self._closed = False
 
@@ -36,6 +38,7 @@ class SQLiteUnitOfWork:
         apply_migrations(self.connection, clock=self.clock)
         self.runs = RunRepository(self.connection)
         self.events = EventRepository(self.connection)
+        self.interrupts = InterruptRepository(self.connection)
         self.outbox = OutboxRepository(self.connection)
         return self
 

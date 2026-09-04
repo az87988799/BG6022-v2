@@ -186,6 +186,32 @@ class RequestInterrupt(CommandBase):
             "expires_at_utc": self.expires_at_utc.isoformat().replace("+00:00", "Z"),
         }
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        kind: str,
+        payload: JsonObject,
+        expires_at_utc: datetime,
+        interrupt_id: InterruptId | None = None,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> RequestInterrupt:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.REQUEST_INTERRUPT,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            interrupt_id=interrupt_id or new_id(InterruptId),
+            kind=kind,
+            payload=payload,
+            expires_at_utc=expires_at_utc,
+        )
+
 
 class ReplaceInterrupt(CommandBase):
     command_type: Literal[CommandType.REPLACE_INTERRUPT] = CommandType.REPLACE_INTERRUPT
@@ -226,6 +252,37 @@ class ReplaceInterrupt(CommandBase):
             "expires_at_utc": self.expires_at_utc.isoformat().replace("+00:00", "Z"),
         }
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        old_interrupt_id: InterruptId,
+        kind: str,
+        payload: JsonObject,
+        expires_at_utc: datetime,
+        new_interrupt_id: InterruptId | None = None,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> ReplaceInterrupt:
+        replacement_id = new_interrupt_id or new_id(InterruptId)
+        if replacement_id == old_interrupt_id:
+            replacement_id = new_id(InterruptId)
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.REPLACE_INTERRUPT,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            old_interrupt_id=old_interrupt_id,
+            new_interrupt_id=replacement_id,
+            kind=kind,
+            payload=payload,
+            expires_at_utc=expires_at_utc,
+        )
+
 
 class ResolveInterrupt(CommandBase):
     command_type: Literal[CommandType.RESOLVE_INTERRUPT] = CommandType.RESOLVE_INTERRUPT
@@ -241,6 +298,28 @@ class ResolveInterrupt(CommandBase):
     def event_payload(self) -> JsonObject:
         return {"interrupt_id": str(self.interrupt_id), "response": self.response}
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        interrupt_id: InterruptId,
+        response: JsonObject,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> ResolveInterrupt:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.RESOLVE_INTERRUPT,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            interrupt_id=interrupt_id,
+            response=response,
+        )
+
 
 class ExpireInterrupt(CommandBase):
     command_type: Literal[CommandType.EXPIRE_INTERRUPT] = CommandType.EXPIRE_INTERRUPT
@@ -249,6 +328,26 @@ class ExpireInterrupt(CommandBase):
 
     def event_payload(self) -> JsonObject:
         return {"interrupt_id": str(self.interrupt_id)}
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        interrupt_id: InterruptId,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> ExpireInterrupt:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.EXPIRE_INTERRUPT,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            interrupt_id=interrupt_id,
+        )
 
 
 class CancelRun(CommandBase):
@@ -264,6 +363,26 @@ class CancelRun(CommandBase):
     def event_payload(self) -> JsonObject:
         return {"reason_code": self.reason_code}
 
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        reason_code: str,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> CancelRun:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.CANCEL_RUN,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            reason_code=reason_code,
+        )
+
 
 class RecordEffectSucceeded(CommandBase):
     command_type: Literal[CommandType.RECORD_EFFECT_SUCCEEDED] = CommandType.RECORD_EFFECT_SUCCEEDED
@@ -278,6 +397,28 @@ class RecordEffectSucceeded(CommandBase):
 
     def event_payload(self) -> JsonObject:
         return {"effect_id": str(self.effect_id), "result_summary": self.result_summary}
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        effect_id: EffectId,
+        result_summary: JsonObject,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> RecordEffectSucceeded:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.RECORD_EFFECT_SUCCEEDED,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            effect_id=effect_id,
+            result_summary=result_summary,
+        )
 
 
 class RecordEffectFailed(CommandBase):
@@ -302,6 +443,30 @@ class RecordEffectFailed(CommandBase):
             "error_code": self.error_code,
             "error_message": self.error_message,
         }
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: RunId,
+        expected_revision: int,
+        effect_id: EffectId,
+        error_code: str,
+        error_message: str,
+        command_id: CommandId | None = None,
+        requested_at_utc: datetime | None = None,
+    ) -> RecordEffectFailed:
+        return cls(
+            command_id=command_id or new_id(CommandId),
+            command_type=CommandType.RECORD_EFFECT_FAILED,
+            schema_version=CURRENT_SCHEMA_VERSION,
+            run_id=run_id,
+            expected_revision=expected_revision,
+            requested_at_utc=requested_at_utc or datetime.now(UTC),
+            effect_id=effect_id,
+            error_code=error_code,
+            error_message=error_message,
+        )
 
 
 Command: TypeAlias = (
