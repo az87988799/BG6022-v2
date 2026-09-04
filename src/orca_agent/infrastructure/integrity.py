@@ -7,12 +7,15 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from orca_agent.application.errors import StateIntegrityError
+from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import effect_spec_hash, sha256_hex
 from orca_agent.domain.ids import EffectId, EventId, InterruptId
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.reducer import reduce_event
 from orca_agent.orchestration.state import KernelState, RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
+
+from .outbox import OutboxStatus
 
 if TYPE_CHECKING:
     from .interrupts import InterruptRecord
@@ -178,6 +181,24 @@ def _verify_outbox(
     if set(actual_by_id) != set(expected):
         raise StateIntegrityError("outbox projection does not match event history")
 
+    audit_events: dict[EffectId, KernelEvent] = {}
+    for event in events:
+        if event.event_type.value not in {"effect_succeeded", "effect_dead_lettered"}:
+            continue
+        raw_effect_id = event.payload.get("effect_id")
+        try:
+            if not isinstance(raw_effect_id, str):
+                raise StateIntegrityError("effect audit event is missing effect ID")
+            effect_id = EffectId(raw_effect_id)
+        except (DomainError, TypeError, ValueError) as error:
+            raise StateIntegrityError("effect audit event has an invalid effect ID") from error
+        if effect_id in audit_events:
+            raise StateIntegrityError("effect has more than one terminal audit event")
+        audit_events[effect_id] = event
+    unknown_audits = set(audit_events) - set(expected)
+    if unknown_audits:
+        raise StateIntegrityError("effect audit event does not reference an emitted effect")
+
     for effect_id, (event, effect) in expected.items():
         record = actual_by_id[effect_id]
         payload_hash = sha256_hex(effect.payload)
@@ -207,6 +228,21 @@ def _verify_outbox(
         )
         if any(left != right for left, right in fields):
             raise StateIntegrityError("outbox projection does not match event history")
+        if record.status is OutboxStatus.CANCELLED:
+            if not snapshot.state.status.is_terminal:
+                raise StateIntegrityError("cancelled effect belongs to a non-terminal run")
+            if record.audit_event_id is not None:
+                raise StateIntegrityError("cancelled effect has an audit event")
+        elif snapshot.state.status.is_terminal and record.status in (
+            OutboxStatus.PENDING,
+            OutboxStatus.LEASED,
+        ):
+            raise StateIntegrityError("terminal run retains an active outbox effect")
+        audit_event = audit_events.get(effect_id)
+        if audit_event is not None and record.audit_event_id != audit_event.event_id:
+            raise StateIntegrityError("effect audit event is not bound to its outbox receipt")
+        if record.audit_event_id is not None and audit_event is None:
+            raise StateIntegrityError("outbox receipt references a missing audit event")
 
 
 __all__ = ["verify_run_projections"]

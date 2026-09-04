@@ -164,6 +164,7 @@ def test_handler_failure_retry_write_before_commit_rolls_back_and_reclaims(tmp_p
             uow.outbox.mark_failed(
                 effect_id=claimed.effect_id,
                 worker_id=first_worker,
+                expected_generation=claimed.attempt_count,
                 now=clock.now_utc(),
                 error_code="handler_failed",
                 error_message="retry me",
@@ -201,7 +202,9 @@ def test_success_write_before_commit_rolls_back_and_redelivers(tmp_path) -> None
             uow.outbox.mark_succeeded(
                 effect_id=claimed.effect_id,
                 worker_id=first_worker,
+                expected_generation=claimed.attempt_count,
                 now=clock.now_utc(),
+                result_summary={},
             )
 
     clock.advance(timedelta(seconds=5))

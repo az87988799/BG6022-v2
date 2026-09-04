@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from orca_agent.application.errors import (
     ApplicationError,
     DuplicateCommandConflictError,
+    EffectAuditConflictError,
     EffectNotFoundError,
     EffectRunMismatchError,
     EffectStatusError,
@@ -24,10 +25,12 @@ from orca_agent.application.errors import (
     RunAlreadyExistsError,
     StorageError,
 )
+from orca_agent.domain.errors import DomainError
+from orca_agent.domain.hashing import GENESIS_EVENT_HASH
 from orca_agent.domain.ids import EventId, InterruptId, new_id
 from orca_agent.domain.json_types import JsonObject, thaw_json
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
-from orca_agent.infrastructure.outbox import OutboxStatus
+from orca_agent.infrastructure.outbox import OutboxRecord, OutboxStatus
 from orca_agent.infrastructure.repositories import RunSnapshot, StoredEvent
 from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
@@ -86,6 +89,18 @@ class KernelApplicationService:
                 details={"validation_error_count": len(error.errors())},
             )
             return self._rejected(command, transition_error, snapshot=snapshot)
+        except DomainError:
+            return self._rejected(
+                command,
+                StorageError("stored domain value is invalid"),
+                snapshot=snapshot,
+            )
+        except ArithmeticError:
+            return self._rejected(
+                command,
+                StorageError("stored numeric value is invalid"),
+                snapshot=snapshot,
+            )
         except sqlite3.IntegrityError:
             storage_error = StorageError("database invariant rejected the operation")
             return self._rejected(command, storage_error, snapshot=snapshot)
@@ -166,6 +181,10 @@ class KernelApplicationService:
             interrupts=uow.interrupts,
             outbox=uow.outbox,
         )
+        if isinstance(command, (RecordEffectSucceeded, RecordEffectFailed)):
+            existing_audit = self._existing_effect_audit(uow, command)
+            if existing_audit is not None:
+                return existing_audit
         if command.expected_revision != current.revision:
             raise RevisionConflictError(
                 "expected revision does not match current revision",
@@ -192,6 +211,14 @@ class KernelApplicationService:
                 "command ID is already bound to a different command",
                 details={"command_id": str(command.command_id)},
             )
+        if uow.runs is None or uow.interrupts is None or uow.outbox is None:
+            raise StorageError("unit of work repositories are unavailable")
+        uow.runs.get_verified(
+            stored.event.run_id,
+            uow.events,
+            interrupts=uow.interrupts,
+            outbox=uow.outbox,
+        )
         try:
             return ApplicationResult.model_validate_json(
                 json.dumps(thaw_json(stored.event.result), ensure_ascii=False)
@@ -234,6 +261,8 @@ class KernelApplicationService:
             payload=command.event_payload(),
             result=result,
             occurred_at_utc=now,
+            command_hash=command_hash,
+            previous_event_hash=GENESIS_EVENT_HASH,
         )
         transition = reduce_event(None, event)
         snapshot = RunSnapshot(
@@ -332,6 +361,7 @@ class KernelApplicationService:
                     "interrupt deadline has not been reached",
                     details={"interrupt_id": str(command.interrupt_id)},
                 )
+            accepted = False
             event_type = EventType.INTERRUPT_EXPIRED
             payload = {
                 "interrupt_id": str(command.interrupt_id),
@@ -343,23 +373,37 @@ class KernelApplicationService:
             payload = command.event_payload()
             interrupt_id = current.state.pending_interrupt_id
         elif isinstance(command, RecordEffectSucceeded):
-            self._require_effect_status(
+            effect = self._require_effect_status(
                 uow,
                 run_id=command.run_id,
                 effect_id=command.effect_id,
                 expected_status=OutboxStatus.SUCCEEDED,
             )
+            if effect.result_summary != command.result_summary:
+                raise EffectAuditConflictError("success audit conflicts with persisted receipt")
             event_type = EventType.EFFECT_SUCCEEDED
-            payload = command.event_payload()
+            payload = {
+                "effect_id": str(command.effect_id),
+                "result_summary": thaw_json(effect.result_summary),
+            }
         elif isinstance(command, RecordEffectFailed):
-            self._require_effect_status(
+            effect = self._require_effect_status(
                 uow,
                 run_id=command.run_id,
                 effect_id=command.effect_id,
                 expected_status=OutboxStatus.DEAD_LETTER,
             )
+            if (
+                effect.last_error_code != command.error_code
+                or effect.last_error_message != command.error_message
+            ):
+                raise EffectAuditConflictError("failure audit conflicts with persisted receipt")
             event_type = EventType.EFFECT_DEAD_LETTERED
-            payload = command.event_payload()
+            payload = {
+                "effect_id": str(command.effect_id),
+                "error_code": effect.last_error_code,
+                "error_message": effect.last_error_message,
+            }
         else:
             raise InvalidTransitionError(
                 "command is not enabled in the current kernel stage",
@@ -397,7 +441,7 @@ class KernelApplicationService:
         run_id: object,
         effect_id: object,
         expected_status: OutboxStatus,
-    ) -> None:
+    ) -> OutboxRecord:
         if uow.outbox is None:
             raise StorageError("outbox repository is unavailable")
         effect = uow.outbox.get(effect_id)
@@ -420,6 +464,45 @@ class KernelApplicationService:
                     "actual_status": effect.status.value,
                 },
             )
+        return effect
+
+    def _existing_effect_audit(
+        self,
+        uow: SQLiteUnitOfWork,
+        command: RecordEffectSucceeded | RecordEffectFailed,
+    ) -> ApplicationResult | None:
+        if uow.outbox is None or uow.events is None:
+            raise StorageError("effect audit repositories are unavailable")
+        expected_status = (
+            OutboxStatus.SUCCEEDED
+            if isinstance(command, RecordEffectSucceeded)
+            else OutboxStatus.DEAD_LETTER
+        )
+        effect = self._require_effect_status(
+            uow,
+            run_id=command.run_id,
+            effect_id=command.effect_id,
+            expected_status=expected_status,
+        )
+        if effect.audit_event_id is None:
+            return None
+        audit_event = uow.events.get(effect.audit_event_id)
+        if audit_event is None:
+            raise StorageError("effect audit event is missing")
+        if isinstance(command, RecordEffectSucceeded):
+            if effect.result_summary != command.result_summary:
+                raise EffectAuditConflictError("success audit conflicts with persisted receipt")
+        elif (
+            effect.last_error_code != command.error_code
+            or effect.last_error_message != command.error_message
+        ):
+            raise EffectAuditConflictError("failure audit conflicts with persisted receipt")
+        try:
+            return ApplicationResult.model_validate_json(
+                json.dumps(thaw_json(audit_event.result), ensure_ascii=False)
+            )
+        except Exception as error:
+            raise StorageError("stored effect audit result is invalid") from error
 
     def _persist_transition(
         self,
@@ -436,6 +519,10 @@ class KernelApplicationService:
     ) -> ApplicationResult:
         if uow.runs is None or uow.events is None or uow.interrupts is None or uow.outbox is None:
             raise StorageError("unit of work repositories are unavailable")
+        previous_event = uow.events.get(current.last_event_id)
+        if previous_event is None:
+            raise StorageError("previous event was not found")
+        previous_event_hash = previous_event.event_hash
         event_id = new_id(EventId)
         placeholder = ApplicationResult.accepted_result(
             code=event_type.value,
@@ -455,6 +542,8 @@ class KernelApplicationService:
             payload=payload,
             result=placeholder,
             occurred_at_utc=occurred_at_utc,
+            command_hash=command_hash,
+            previous_event_hash=previous_event_hash,
         )
         transition = reduce_event(current.state, event)
         result = ApplicationResult(
@@ -481,7 +570,22 @@ class KernelApplicationService:
             recorded_at_utc=event.recorded_at_utc,
             engine_version=event.engine_version,
             schema_version=event.schema_version,
+            command_hash=command_hash,
+            previous_event_hash=previous_event_hash,
         )
+        uow.events.append(event, command_hash=command_hash)
+        uow.interrupts.apply_operations(event=event, operations=transition.interrupt_operations)
+        uow.outbox.register_effects(
+            event=event,
+            run_id=command.run_id,
+            effects=transition.effects,
+            available_at_utc=occurred_at_utc,
+            created_at_utc=occurred_at_utc,
+        )
+        if transition.next_state.status.is_terminal:
+            uow.outbox.cancel_pending_for_run(run_id=command.run_id, now=occurred_at_utc)
+        if isinstance(command, (RecordEffectSucceeded, RecordEffectFailed)):
+            uow.outbox.bind_audit_event(effect_id=command.effect_id, event=event)
         if not uow.runs.compare_and_swap(
             run_id=command.run_id,
             expected_revision=current.revision,
@@ -497,15 +601,6 @@ class KernelApplicationService:
                     "current_revision": latest.revision,
                 },
             )
-        uow.events.append(event, command_hash=command_hash)
-        uow.interrupts.apply_operations(event=event, operations=transition.interrupt_operations)
-        uow.outbox.register_effects(
-            event=event,
-            run_id=command.run_id,
-            effects=transition.effects,
-            available_at_utc=occurred_at_utc,
-            created_at_utc=occurred_at_utc,
-        )
         return result
 
     def _rejected(

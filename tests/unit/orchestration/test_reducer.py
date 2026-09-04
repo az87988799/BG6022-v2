@@ -4,6 +4,7 @@ import pytest
 
 from orca_agent.application.errors import InvalidTransitionError
 from orca_agent.application.results import ApplicationResult
+from orca_agent.domain.hashing import GENESIS_EVENT_HASH
 from orca_agent.domain.ids import CommandId, EventId, InterruptId, RunId, new_id
 from orca_agent.orchestration.commands import CommandType
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
@@ -24,16 +25,28 @@ def _event(
     command_type: CommandType = CommandType.CREATE_RUN,
     occurred_at: datetime = BASE_TIME,
     expected_revision: int | None = None,
+    previous_event_hash: str = GENESIS_EVENT_HASH,
 ) -> KernelEvent:
+    event_id = new_id(EventId)
+    status = {
+        EventType.RUN_CREATED: RunStatus.CREATED,
+        EventType.INTERRUPT_REQUESTED: RunStatus.WAITING_FOR_INPUT,
+        EventType.INTERRUPT_REPLACED: RunStatus.WAITING_FOR_INPUT,
+        EventType.INTERRUPT_RESOLVED: RunStatus.READY,
+        EventType.INTERRUPT_EXPIRED: RunStatus.READY,
+        EventType.RUN_CANCELLED: RunStatus.CANCELLED,
+        EventType.EFFECT_SUCCEEDED: RunStatus.CREATED,
+        EventType.EFFECT_DEAD_LETTERED: RunStatus.FAILED,
+    }[event_type]
     result = ApplicationResult.accepted_result(
         code=event_type.value,
         run_id=run_id,
         revision=sequence,
-        status=RunStatus.CREATED,
-        event_id=None,
+        status=status,
+        event_id=event_id,
     )
     return KernelEvent.create(
-        event_id=new_id(EventId),
+        event_id=event_id,
         command_id=new_id(CommandId),
         command_type=command_type,
         run_id=run_id,
@@ -43,6 +56,8 @@ def _event(
         payload=payload,
         result=result,
         occurred_at_utc=occurred_at,
+        command_hash="0" * 64,
+        previous_event_hash=previous_event_hash,
     )
 
 
@@ -58,6 +73,7 @@ def _created(run_id: RunId) -> KernelEvent:
 def test_reducer_transition_table_and_replay() -> None:
     run_id = new_id(RunId)
     interrupt_id = new_id(InterruptId)
+    created = _created(run_id)
     requested = _event(
         run_id=run_id,
         sequence=2,
@@ -70,6 +86,7 @@ def test_reducer_transition_table_and_replay() -> None:
             "expires_at_utc": "2026-09-04T12:05:00.000000Z",
             "effects": [],
         },
+        previous_event_hash=created.event_hash,
     )
     resolved = _event(
         run_id=run_id,
@@ -77,8 +94,9 @@ def test_reducer_transition_table_and_replay() -> None:
         event_type=EventType.INTERRUPT_RESOLVED,
         command_type=CommandType.RESOLVE_INTERRUPT,
         payload={"interrupt_id": str(interrupt_id), "response": {"approved": True}, "effects": []},
+        previous_event_hash=requested.event_hash,
     )
-    events = (_created(run_id), requested, resolved)
+    events = (created, requested, resolved)
 
     first = reduce_event(None, events[0]).next_state
     waiting = reduce_event(first, events[1]).next_state
@@ -126,7 +144,8 @@ def test_reducer_rejects_invalid_transitions() -> None:
 def test_expiry_uses_inclusive_deadline_and_cancel_projects_pending() -> None:
     run_id = new_id(RunId)
     interrupt_id = new_id(InterruptId)
-    created = reduce_event(None, _created(run_id)).next_state
+    created_event = _created(run_id)
+    created = reduce_event(None, created_event).next_state
     waiting_event = _event(
         run_id=run_id,
         sequence=2,
@@ -138,6 +157,7 @@ def test_expiry_uses_inclusive_deadline_and_cancel_projects_pending() -> None:
             "payload": {},
             "expires_at_utc": "2026-09-04T12:05:00.000000Z",
         },
+        previous_event_hash=created_event.event_hash,
     )
     waiting = reduce_event(created, waiting_event).next_state
     expired = _event(
@@ -150,6 +170,7 @@ def test_expiry_uses_inclusive_deadline_and_cancel_projects_pending() -> None:
             "interrupt_id": str(interrupt_id),
             "expires_at_utc": "2026-09-04T12:05:00.000000Z",
         },
+        previous_event_hash=waiting_event.event_hash,
     )
     assert reduce_event(waiting, expired).next_state.status is RunStatus.READY
 
@@ -190,6 +211,7 @@ def test_transition_effect_limit_is_checked_by_reducer() -> None:
         payload=payload,
         result=event.result,
         occurred_at_utc=BASE_TIME,
+        command_hash=event.command_hash,
     )
     with pytest.raises(InvalidTransitionError) as error:
         reduce_event(None, event)

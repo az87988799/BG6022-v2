@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pydantic import field_validator
+
 from orca_agent.domain.ids import EventId, InterruptId, RunId
-from orca_agent.domain.json_types import FrozenJsonObject, JsonObject
+from orca_agent.domain.json_types import FrozenJsonObject, JsonObject, freeze_json_object
 from orca_agent.orchestration.state import KernelModel, RunStatus
 
 
@@ -16,6 +18,14 @@ class ApplicationResult(KernelModel):
     event_id: EventId | None
     interrupt_id: InterruptId | None
     details: FrozenJsonObject
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def _details_are_frozen_json(cls, value: object) -> FrozenJsonObject:
+        try:
+            return freeze_json_object(value)
+        except ValueError as error:
+            raise ValueError("result details must be a JSON object") from error
 
     @classmethod
     def accepted_result(

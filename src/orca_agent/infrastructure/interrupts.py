@@ -33,7 +33,7 @@ from orca_agent.orchestration.transitions import (
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import format_utc, parse_utc
-from .repositories import json_text, json_value
+from .repositories import json_text, json_value, stored_int
 
 
 @dataclass(frozen=True)
@@ -67,7 +67,8 @@ class InterruptRepository:
             interrupt_id = InterruptId(str(row[0]))
             run_id = RunId(str(row[1]))
             status = InterruptStatus(str(row[3]))
-            if int(row[4]) != CURRENT_SCHEMA_VERSION or str(row[5]) != ENGINE_VERSION:
+            schema_version = stored_int(row[4], what="interrupt schema_version", minimum=1)
+            if schema_version != CURRENT_SCHEMA_VERSION or str(row[5]) != ENGINE_VERSION:
                 raise StateIntegrityError("stored interrupt version is unsupported")
             request_event_id = EventId(str(row[6]))
             terminal_event_id = None if row[7] is None else EventId(str(row[7]))
@@ -90,7 +91,7 @@ class InterruptRepository:
                 run_id=run_id,
                 kind=str(row[2]),
                 status=status,
-                schema_version=int(row[4]),
+                schema_version=schema_version,
                 engine_version=str(row[5]),
                 request_event_id=request_event_id,
                 terminal_event_id=terminal_event_id,
@@ -107,7 +108,14 @@ class InterruptRepository:
             return record
         except StateIntegrityError:
             raise
-        except (DomainError, HashMismatchError, ValidationError, TypeError, ValueError) as error:
+        except (
+            DomainError,
+            HashMismatchError,
+            ValidationError,
+            TypeError,
+            ValueError,
+            ArithmeticError,
+        ) as error:
             raise StateIntegrityError("stored interrupt projection is invalid") from error
 
     def _verify_event_links(self, record: InterruptRecord) -> None:

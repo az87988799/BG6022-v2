@@ -38,6 +38,18 @@ class EffectStatusError(ApplicationError):
     code = "effect_status_invalid"
 
 
+class EffectAuditConflictError(ApplicationError):
+    code = "effect_audit_conflict"
+
+
+class EffectAuditNotReadyError(ApplicationError):
+    code = "effect_audit_not_ready"
+
+
+class EffectCompletionConflictError(ApplicationError):
+    code = "effect_completion_conflict"
+
+
 class RevisionConflictError(ApplicationError):
     code = "revision_conflict"
 
@@ -99,6 +111,9 @@ def safe_error_details(error: ApplicationError) -> dict[str, JsonValue]:
 __all__ = [
     "ApplicationError",
     "DuplicateCommandConflictError",
+    "EffectAuditConflictError",
+    "EffectAuditNotReadyError",
+    "EffectCompletionConflictError",
     "EffectNotFoundError",
     "EffectRunMismatchError",
     "EffectStatusError",

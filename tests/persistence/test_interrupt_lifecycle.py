@@ -271,7 +271,9 @@ def test_deleted_pending_interrupt_blocks_effect_progress(tmp_path) -> None:
         uow.outbox.mark_succeeded(
             effect_id=effect_id,
             worker_id=worker_id,
+            expected_generation=claimed.attempt_count,
             now=service.clock.now_utc(),
+            result_summary={"accepted": True},
         )
         uow.connection.execute(
             "DELETE FROM interrupts WHERE interrupt_id = ?", (str(requested.interrupt_id),)

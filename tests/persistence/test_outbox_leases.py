@@ -5,7 +5,12 @@ from threading import Barrier
 
 import pytest
 
-from orca_agent.application.errors import LeaseLostError, StateIntegrityError, StorageBusyError
+from orca_agent.application.errors import (
+    EffectCompletionConflictError,
+    LeaseLostError,
+    StateIntegrityError,
+    StorageBusyError,
+)
 from orca_agent.application.service import KernelApplicationService
 from orca_agent.domain.ids import WorkerId, new_id
 from orca_agent.infrastructure.clock import FrozenClock
@@ -108,6 +113,7 @@ def test_expired_lease_is_reclaimed_with_same_effect_id_and_attempt_count(tmp_pa
             uow.outbox.renew(
                 effect_id=first.effect_id,
                 worker_id=first_worker,
+                expected_generation=first.attempt_count,
                 now=clock.now_utc(),
                 lease_duration=timedelta(seconds=5),
             )
@@ -138,12 +144,14 @@ def test_renew_requires_owner_and_succeed_is_not_claimed_again(tmp_path) -> None
             uow.outbox.renew(
                 effect_id=effect.effect_id,
                 worker_id=other,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
                 lease_duration=timedelta(seconds=10),
             )
         renewed = uow.outbox.renew(
             effect_id=effect.effect_id,
             worker_id=owner,
+            expected_generation=effect.attempt_count,
             now=clock.now_utc(),
             lease_duration=timedelta(seconds=20),
         )
@@ -151,13 +159,17 @@ def test_renew_requires_owner_and_succeed_is_not_claimed_again(tmp_path) -> None
         assert uow.outbox.mark_succeeded(
             effect_id=effect.effect_id,
             worker_id=owner,
+            expected_generation=effect.attempt_count,
             now=clock.now_utc(),
+            result_summary={},
         )
         with pytest.raises(LeaseLostError):
             uow.outbox.mark_succeeded(
                 effect_id=effect.effect_id,
                 worker_id=other,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
+                result_summary={},
             )
         assert (
             uow.outbox.claim_due(
@@ -184,6 +196,7 @@ def test_renew_rejects_non_positive_or_shortening_duration(tmp_path) -> None:
             uow.outbox.renew(
                 effect_id=effect.effect_id,
                 worker_id=owner,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
                 lease_duration=timedelta(seconds=-1),
             )
@@ -191,6 +204,7 @@ def test_renew_rejects_non_positive_or_shortening_duration(tmp_path) -> None:
             uow.outbox.renew(
                 effect_id=effect.effect_id,
                 worker_id=owner,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
                 lease_duration=timedelta(seconds=5),
             )
@@ -198,6 +212,7 @@ def test_renew_rejects_non_positive_or_shortening_duration(tmp_path) -> None:
             uow.outbox.renew(
                 effect_id=effect.effect_id,
                 worker_id=owner,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
                 lease_duration=timedelta(0),
             )
@@ -221,6 +236,7 @@ def test_failure_uses_one_two_four_backoff_then_dead_letters(tmp_path) -> None:
             updated = uow.outbox.mark_failed(
                 effect_id=claimed.effect_id,
                 worker_id=owner,
+                expected_generation=claimed.attempt_count,
                 now=clock.now_utc(),
                 error_code="handler_failed",
                 error_message="controlled test failure",
@@ -315,7 +331,9 @@ def test_handler_success_before_mark_is_at_least_once_after_lease_expiry(tmp_pat
         uow.outbox.mark_succeeded(
             effect_id=second.effect_id,
             worker_id=second_worker,
+            expected_generation=second.attempt_count,
             now=clock.now_utc(),
+            result_summary={},
         )
 
 
@@ -359,19 +377,25 @@ def test_stale_owner_cannot_complete_after_reclaim(tmp_path) -> None:
         uow.outbox.mark_succeeded(
             effect_id=second.effect_id,
             worker_id=second_worker,
+            expected_generation=second.attempt_count,
             now=clock.now_utc(),
+            result_summary={},
         )
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
         with pytest.raises(LeaseLostError):
             uow.outbox.mark_succeeded(
                 effect_id=first.effect_id,
                 worker_id=first_worker,
+                expected_generation=first.attempt_count,
                 now=clock.now_utc(),
+                result_summary={},
             )
         assert uow.outbox.mark_succeeded(
             effect_id=first.effect_id,
             worker_id=second_worker,
+            expected_generation=second.attempt_count,
             now=clock.now_utc(),
+            result_summary={},
         )
         stored = uow.outbox.get(first.effect_id)
         assert stored.completed_by_worker_id == second_worker
@@ -391,19 +415,31 @@ def test_dead_letter_completion_is_idempotent_only_for_original_owner(tmp_path) 
         terminal = uow.outbox.mark_failed(
             effect_id=effect.effect_id,
             worker_id=owner,
+            expected_generation=effect.attempt_count,
             now=clock.now_utc(),
             error_code="terminal_failure",
             error_message="controlled failure",
             max_attempts=1,
         )
         assert terminal.status is OutboxStatus.DEAD_LETTER
+        with pytest.raises(EffectCompletionConflictError):
+            uow.outbox.mark_failed(
+                effect_id=effect.effect_id,
+                worker_id=owner,
+                expected_generation=effect.attempt_count,
+                now=clock.now_utc(),
+                error_code="different_message_is_ignored",
+                error_message="different message is ignored",
+                max_attempts=1,
+            )
         assert (
             uow.outbox.mark_failed(
                 effect_id=effect.effect_id,
                 worker_id=owner,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
-                error_code="different_message_is_ignored",
-                error_message="different message is ignored",
+                error_code="terminal_failure",
+                error_message="controlled failure",
                 max_attempts=1,
             )
             == terminal
@@ -412,6 +448,7 @@ def test_dead_letter_completion_is_idempotent_only_for_original_owner(tmp_path) 
             uow.outbox.mark_failed(
                 effect_id=effect.effect_id,
                 worker_id=other,
+                expected_generation=effect.attempt_count,
                 now=clock.now_utc(),
                 error_code="late_failure",
                 error_message="late failure",

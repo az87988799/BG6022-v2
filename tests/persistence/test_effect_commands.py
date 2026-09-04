@@ -55,12 +55,15 @@ def _complete_effect(
             uow.outbox.mark_succeeded(
                 effect_id=effect_id,
                 worker_id=worker_id,
+                expected_generation=claimed.attempt_count,
                 now=clock.now_utc(),
+                result_summary={"accepted": True},
             )
         else:
             uow.outbox.mark_failed(
                 effect_id=effect_id,
                 worker_id=worker_id,
+                expected_generation=claimed.attempt_count,
                 now=clock.now_utc(),
                 error_code="terminal_failure",
                 error_message="controlled failure",
