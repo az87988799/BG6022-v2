@@ -47,7 +47,7 @@ def test_connection_policy_and_fresh_schema(tmp_path) -> None:
                 connection,
                 clock=FrozenClock(datetime(2026, 9, 4, tzinfo=UTC)),
             )
-            == 3
+            == 4
         )
         tables = {
             row[0]
@@ -73,7 +73,7 @@ def test_migration_is_idempotent_across_close_and_reopen(tmp_path) -> None:
     reopened = _connection(tmp_path)
     try:
         clock.advance(timedelta(seconds=5))
-        assert apply_migrations(reopened, clock=clock) == 3
+        assert apply_migrations(reopened, clock=clock) == 4
         second = reopened.execute(
             "SELECT version, name, checksum, applied_at_utc FROM schema_migrations"
         ).fetchall()
@@ -115,7 +115,7 @@ def test_registry_gaps_and_future_database_versions_fail_closed(tmp_path) -> Non
         apply_migrations(connection)
         connection.execute(
             "INSERT INTO schema_migrations(version, name, checksum, applied_at_utc) "
-            "VALUES (4, 'future', ?, '2026-09-04T00:00:00.000000Z')",
+            "VALUES (5, 'future', ?, '2026-09-04T00:00:00.000000Z')",
             ("1" * 64,),
         )
         with pytest.raises(MigrationVersionError):
@@ -149,6 +149,14 @@ def test_default_migration_checksum_is_stable() -> None:
     migration = DEFAULT_MIGRATIONS[0]
     assert migration.checksum
     assert len(migration.checksum) == 64
+
+
+def test_historical_migration_checksums_are_frozen() -> None:
+    assert tuple(migration.checksum for migration in DEFAULT_MIGRATIONS[:3]) == (
+        "6f1ff16b97b9e45c286097b1b8de8adeef5ac483c3e08bb02793a156943c9463",
+        "3df844dc355db2dc9e8c95e96678233397bf947387f2bc74d358a574fd161a42",
+        "21353d3f1dd37b5237b588056457cde33bd6138849266328bd08033a391dc998",
+    )
 
 
 def test_post_apply_identity_is_part_of_new_migration_checksum() -> None:
@@ -276,23 +284,38 @@ def test_v2_upgrades_existing_v1_data_and_backfills_immutable_effect_metadata(tm
                 "2026-09-04T00:00:00.000000Z",
             ),
         )
-        assert apply_migrations(connection) == 3
+        assert apply_migrations(connection, migrations=DEFAULT_MIGRATIONS[:3]) == 3
         assert (
             connection.execute(
                 "SELECT checksum FROM schema_migrations WHERE version = 1"
             ).fetchone()[0]
             == v1_checksum
         )
-        upgraded = OutboxRepository(connection).get(effect_id)
-        assert upgraded is not None
-        assert len(upgraded.spec_hash) == 64
-        assert upgraded.completed_by_worker_id is None
+        v3_upgraded = OutboxRepository(connection).get(effect_id)
+        assert v3_upgraded is not None
+        assert len(v3_upgraded.spec_hash) == 64
+        assert v3_upgraded.completed_by_worker_id is None
         assert [
             row[0]
             for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")
         ] == [1, 2, 3]
         foreign_keys = [tuple(row) for row in connection.execute("PRAGMA foreign_key_list(outbox)")]
         assert {row[2] for row in foreign_keys} >= {"events", "runs"}
+        assert apply_migrations(connection) == 4
+        upgraded = OutboxRepository(connection).get(effect_id)
+        assert upgraded is not None
+        assert upgraded.completion_protocol == 4
+        assert upgraded.dispatch_run_revision is None
+        assert upgraded.audit_event_id is None
+        assert connection.execute("SELECT COUNT(*) FROM command_receipts").fetchone()[0] == 1
+        assert [
+            row[0]
+            for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")
+        ] == [1, 2, 3, 4]
+        interrupt_foreign_keys = [
+            tuple(row) for row in connection.execute("PRAGMA foreign_key_list(interrupts)")
+        ]
+        assert {row[2] for row in interrupt_foreign_keys} >= {"events", "runs"}
     finally:
         connection.close()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -24,9 +25,10 @@ from orca_agent.domain.hashing import (
     sha256_hex,
     verify_sha256,
 )
-from orca_agent.domain.ids import EffectId, EventId, RunId, effect_id_for
+from orca_agent.domain.ids import CommandId, EffectId, EventId, RunId, effect_id_for
 from orca_agent.domain.json_types import freeze_json_object, thaw_json
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
+from orca_agent.orchestration.commands import CommandType
 from orca_agent.orchestration.effects import EffectClass
 from orca_agent.orchestration.events import EventType, KernelEvent
 from orca_agent.orchestration.versions import ENGINE_VERSION
@@ -215,7 +217,15 @@ INITIAL_SCHEMA_STATEMENTS = (
 LEGACY_COMPLETION_WORKER_ID = "worker_ffffffffffffffffffffffffffffffff"
 
 
-def _backfill_effect_spec_hashes(connection: sqlite3.Connection) -> None:
+def _backfill_effect_spec_hashes_v2_legacy(connection: sqlite3.Connection) -> None:
+    """Backfill v2 using the historical callback semantics.
+
+    IMMUTABLE MIGRATION CALLBACK: this function is part of the v2 migration
+    identity.  Do not replace its permissive integer conversion with the
+    stricter runtime storage parser; new validation belongs in later
+    post-apply hooks and repository loaders.
+    """
+
     rows = connection.execute(
         "SELECT effect_id, run_id, source_event_id, effect_index, effect_type, "
         "effect_class, schema_version, engine_version, payload_json, payload_hash "
@@ -226,10 +236,10 @@ def _backfill_effect_spec_hashes(connection: sqlite3.Connection) -> None:
             effect_id = EffectId(str(row[0]))
             run_id = RunId(str(row[1]))
             source_event_id = EventId(str(row[2]))
-            effect_index = _migration_int(row[3], what="outbox effect_index", minimum=0)
+            effect_index = int(row[3])
             effect_type = str(row[4])
             effect_class = EffectClass(str(row[5]))
-            schema_version = _migration_int(row[6], what="outbox schema_version", minimum=1)
+            schema_version = int(row[6])
             engine_version = str(row[7])
             payload = freeze_json_object(json.loads(str(row[8])))
             payload_hash = str(row[9])
@@ -402,6 +412,10 @@ V2_HARDENING_STATEMENTS = (
 
 
 _V3_EMPTY_RESULT_HASH = "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+_V4_LEGACY_EMPTY_RECEIPT_JSON = (
+    '{"artifact_ids":[],"outcome_code":"completed","receipt_schema":"effect-success/v1"}'
+)
+_V4_LEGACY_EMPTY_RECEIPT_HASH = "b67c2b56e9c4474e273276f170fcc01e9aadf17926662e96dbc6aa5e696c1ddd"
 
 
 V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS = (
@@ -507,6 +521,394 @@ V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS = (
     "CREATE INDEX outbox_due ON outbox(status, available_at_utc, created_at_utc, effect_id)",
     "CREATE INDEX outbox_lease_expiry ON outbox(status, lease_expires_at_utc)",
 )
+
+
+V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS = (
+    "DROP TRIGGER IF EXISTS outbox_no_delete",
+    "DROP TRIGGER IF EXISTS outbox_terminal_monotonic",
+    "DROP TRIGGER IF EXISTS outbox_terminal_metadata_immutable",
+    "DROP INDEX IF EXISTS one_dispatching_effect_per_run",
+    "DROP INDEX IF EXISTS outbox_due",
+    "DROP INDEX IF EXISTS outbox_lease_expiry",
+    "ALTER TABLE outbox RENAME TO outbox_v3",
+    """
+    CREATE TABLE outbox (
+        effect_id                 TEXT PRIMARY KEY,
+        run_id                    TEXT NOT NULL REFERENCES runs(run_id),
+        source_event_id           TEXT NOT NULL,
+        effect_index              INTEGER NOT NULL CHECK (effect_index >= 0),
+        effect_type               TEXT NOT NULL,
+        effect_class              TEXT NOT NULL CHECK (effect_class IN ('internal', 'external')),
+        schema_version            INTEGER NOT NULL,
+        engine_version            TEXT NOT NULL,
+        payload_json              TEXT NOT NULL,
+        payload_hash              TEXT NOT NULL,
+        spec_hash                 TEXT NOT NULL,
+        status                    TEXT NOT NULL CHECK (
+            status IN ('pending', 'leased', 'dispatching', 'succeeded', 'dead_letter', 'cancelled')
+        ),
+        attempt_count             INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        available_at_utc          TEXT NOT NULL,
+        lease_owner               TEXT,
+        lease_expires_at_utc      TEXT,
+        dispatch_authorized_at_utc TEXT,
+        dispatch_run_revision     INTEGER,
+        dispatch_policy_version   INTEGER,
+        completed_at_utc          TEXT,
+        completed_by_worker_id    TEXT,
+        terminal_generation       INTEGER,
+        audit_event_id            TEXT,
+        result_summary_json       TEXT,
+        result_summary_hash       TEXT,
+        completion_protocol       INTEGER NOT NULL CHECK (completion_protocol IN (3, 4)),
+        last_error_code           TEXT,
+        last_error_message        TEXT,
+        created_at_utc            TEXT NOT NULL,
+        updated_at_utc            TEXT NOT NULL,
+        UNIQUE (source_event_id, effect_index),
+        UNIQUE (audit_event_id),
+        FOREIGN KEY (run_id, source_event_id)
+            REFERENCES events(run_id, event_id),
+        FOREIGN KEY (run_id, audit_event_id)
+            REFERENCES events(run_id, event_id),
+        CHECK (
+            (status = 'pending'
+             AND lease_owner IS NULL AND lease_expires_at_utc IS NULL
+             AND dispatch_authorized_at_utc IS NULL
+             AND dispatch_run_revision IS NULL AND dispatch_policy_version IS NULL)
+            OR
+            (status = 'leased'
+             AND lease_owner IS NOT NULL AND lease_expires_at_utc IS NOT NULL
+             AND dispatch_authorized_at_utc IS NULL
+             AND dispatch_run_revision IS NULL AND dispatch_policy_version IS NULL)
+            OR
+            (status = 'dispatching'
+             AND lease_owner IS NOT NULL AND lease_expires_at_utc IS NOT NULL
+             AND dispatch_authorized_at_utc IS NOT NULL
+             AND dispatch_run_revision IS NOT NULL AND dispatch_run_revision >= 1
+             AND dispatch_policy_version IS NOT NULL AND dispatch_policy_version >= 1)
+            OR
+            (status IN ('succeeded', 'dead_letter', 'cancelled')
+             AND lease_owner IS NULL AND lease_expires_at_utc IS NULL
+             AND dispatch_authorized_at_utc IS NULL
+             AND dispatch_run_revision IS NULL AND dispatch_policy_version IS NULL)
+        ),
+        CHECK (
+            (status IN ('succeeded', 'dead_letter', 'cancelled')
+             AND completed_at_utc IS NOT NULL
+             AND completed_by_worker_id IS NOT NULL
+             AND terminal_generation IS NOT NULL
+             AND terminal_generation >= 0)
+            OR
+            (status IN ('pending', 'leased', 'dispatching')
+             AND completed_at_utc IS NULL
+             AND completed_by_worker_id IS NULL
+             AND terminal_generation IS NULL)
+        ),
+        CHECK (
+            (status = 'succeeded' AND result_summary_json IS NOT NULL
+             AND result_summary_hash IS NOT NULL)
+            OR
+            (status <> 'succeeded' AND result_summary_json IS NULL
+             AND result_summary_hash IS NULL)
+        ),
+        CHECK (
+            (result_summary_json IS NULL AND result_summary_hash IS NULL)
+            OR
+            (result_summary_json IS NOT NULL AND result_summary_hash IS NOT NULL)
+        ),
+        CHECK (
+            (status IN ('pending', 'leased', 'dispatching')
+             AND audit_event_id IS NULL AND completion_protocol = 4)
+            OR
+            (status IN ('succeeded', 'dead_letter')
+             AND completion_protocol = 4 AND audit_event_id IS NOT NULL)
+            OR
+            (status IN ('succeeded', 'dead_letter', 'cancelled')
+             AND completion_protocol = 3 AND audit_event_id IS NULL)
+            OR
+            (status = 'cancelled' AND completion_protocol = 4 AND audit_event_id IS NULL)
+        ),
+        CHECK (
+            (last_error_code IS NULL AND last_error_message IS NULL)
+            OR
+            (last_error_code IS NOT NULL AND last_error_message IS NOT NULL)
+        )
+    )
+    """.strip(),
+    """
+    INSERT INTO outbox(
+        effect_id, run_id, source_event_id, effect_index, effect_type, effect_class,
+        schema_version, engine_version, payload_json, payload_hash, spec_hash, status,
+        attempt_count, available_at_utc, lease_owner, lease_expires_at_utc,
+        dispatch_authorized_at_utc, dispatch_run_revision, dispatch_policy_version,
+        completed_at_utc, completed_by_worker_id, terminal_generation, audit_event_id,
+        result_summary_json, result_summary_hash, completion_protocol, last_error_code,
+        last_error_message, created_at_utc, updated_at_utc
+    )
+    SELECT
+        effect_id, run_id, source_event_id, effect_index, effect_type, effect_class,
+        schema_version, engine_version, payload_json, payload_hash, spec_hash, status,
+        attempt_count, available_at_utc, lease_owner, lease_expires_at_utc,
+        NULL, NULL, NULL, completed_at_utc, completed_by_worker_id, terminal_generation,
+        audit_event_id,
+        CASE
+            WHEN status = 'succeeded' AND result_summary_json = '{}'
+            THEN '{_V4_LEGACY_EMPTY_RECEIPT_JSON}'
+            ELSE result_summary_json
+        END,
+        CASE
+            WHEN status = 'succeeded' AND result_summary_json = '{}'
+            THEN '{_V4_LEGACY_EMPTY_RECEIPT_HASH}'
+            ELSE result_summary_hash
+        END,
+        CASE
+            WHEN status IN ('succeeded', 'dead_letter', 'cancelled')
+                 AND audit_event_id IS NULL THEN 3
+            ELSE 4
+        END,
+        last_error_code, last_error_message, created_at_utc, updated_at_utc
+    FROM outbox_v3
+    """.strip(),
+    "DROP TABLE outbox_v3",
+    "CREATE INDEX outbox_due ON outbox(status, available_at_utc, created_at_utc, effect_id)",
+    "CREATE INDEX outbox_lease_expiry ON outbox(status, lease_expires_at_utc)",
+    "CREATE UNIQUE INDEX one_dispatching_effect_per_run ON outbox(run_id) "
+    "WHERE status = 'dispatching'",
+    """
+    CREATE TRIGGER outbox_spec_immutable
+    BEFORE UPDATE ON outbox
+    WHEN NEW.effect_id IS NOT OLD.effect_id
+         OR NEW.run_id IS NOT OLD.run_id
+         OR NEW.source_event_id IS NOT OLD.source_event_id
+         OR NEW.effect_index IS NOT OLD.effect_index
+         OR NEW.effect_type IS NOT OLD.effect_type
+         OR NEW.effect_class IS NOT OLD.effect_class
+         OR NEW.schema_version IS NOT OLD.schema_version
+         OR NEW.engine_version IS NOT OLD.engine_version
+         OR NEW.payload_json IS NOT OLD.payload_json
+         OR NEW.payload_hash IS NOT OLD.payload_hash
+         OR NEW.spec_hash IS NOT OLD.spec_hash
+    BEGIN
+        SELECT RAISE(ABORT, 'outbox effect specification is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER interrupt_identity_immutable
+    BEFORE UPDATE ON interrupts
+    WHEN NEW.interrupt_id IS NOT OLD.interrupt_id
+         OR NEW.run_id IS NOT OLD.run_id
+         OR NEW.kind IS NOT OLD.kind
+         OR NEW.schema_version IS NOT OLD.schema_version
+         OR NEW.engine_version IS NOT OLD.engine_version
+         OR NEW.request_event_id IS NOT OLD.request_event_id
+         OR NEW.created_at_utc IS NOT OLD.created_at_utc
+         OR NEW.expires_at_utc IS NOT OLD.expires_at_utc
+         OR NEW.payload_json IS NOT OLD.payload_json
+         OR NEW.payload_hash IS NOT OLD.payload_hash
+    BEGIN
+        SELECT RAISE(ABORT, 'interrupt identity is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TABLE command_receipts (
+        command_id       TEXT PRIMARY KEY,
+        command_type     TEXT NOT NULL,
+        command_hash     TEXT NOT NULL CHECK(length(command_hash) = 64),
+        run_id           TEXT NOT NULL,
+        binding_kind     TEXT NOT NULL CHECK(
+            binding_kind IN ('event', 'effect_audit_alias')
+        ),
+        effect_id        TEXT,
+        result_event_id  TEXT NOT NULL,
+        recorded_at_utc  TEXT NOT NULL,
+        FOREIGN KEY(run_id, result_event_id)
+            REFERENCES events(run_id, event_id),
+        CHECK(
+            (binding_kind = 'event' AND effect_id IS NULL)
+            OR
+            (binding_kind = 'effect_audit_alias' AND effect_id IS NOT NULL)
+        )
+    )
+    """.strip(),
+    """
+    INSERT INTO command_receipts(
+        command_id, command_type, command_hash, run_id, binding_kind,
+        effect_id, result_event_id, recorded_at_utc
+    )
+    SELECT command_id, command_type, command_hash, run_id, 'event', NULL,
+        event_id, recorded_at_utc
+    FROM events
+    """.strip(),
+    """
+    CREATE TRIGGER outbox_no_delete
+    BEFORE DELETE ON outbox
+    BEGIN
+        SELECT RAISE(ABORT, 'outbox rows are append-only terminal receipts');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER outbox_terminal_monotonic
+    BEFORE UPDATE ON outbox
+    WHEN OLD.status IN ('succeeded', 'dead_letter', 'cancelled')
+         AND NEW.status <> OLD.status
+    BEGIN
+        SELECT RAISE(ABORT, 'outbox terminal status is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER outbox_terminal_metadata_immutable
+    BEFORE UPDATE ON outbox
+    WHEN OLD.status IN ('succeeded', 'dead_letter', 'cancelled')
+         AND (
+             NEW.completed_at_utc IS NOT OLD.completed_at_utc
+             OR NEW.completed_by_worker_id IS NOT OLD.completed_by_worker_id
+             OR NEW.terminal_generation IS NOT OLD.terminal_generation
+             OR NEW.audit_event_id IS NOT OLD.audit_event_id
+             OR NEW.result_summary_json IS NOT OLD.result_summary_json
+             OR NEW.result_summary_hash IS NOT OLD.result_summary_hash
+             OR NEW.completion_protocol IS NOT OLD.completion_protocol
+             OR NEW.last_error_code IS NOT OLD.last_error_code
+             OR NEW.last_error_message IS NOT OLD.last_error_message
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'outbox terminal receipt is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER outbox_dispatch_metadata_immutable
+    BEFORE UPDATE ON outbox
+    WHEN OLD.status = 'dispatching'
+         AND NEW.status = 'dispatching'
+         AND (
+             NEW.dispatch_authorized_at_utc IS NOT OLD.dispatch_authorized_at_utc
+             OR NEW.dispatch_run_revision IS NOT OLD.dispatch_run_revision
+             OR NEW.dispatch_policy_version IS NOT OLD.dispatch_policy_version
+             OR NEW.lease_owner IS NOT OLD.lease_owner
+             OR NEW.attempt_count IS NOT OLD.attempt_count
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'dispatch permit metadata is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER command_receipts_no_update
+    BEFORE UPDATE ON command_receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'command receipts are append-only');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER command_receipts_no_delete
+    BEFORE DELETE ON command_receipts
+    BEGIN
+        SELECT RAISE(ABORT, 'command receipts are append-only');
+    END;
+    """.strip(),
+)
+
+
+_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _post_apply_v4(connection: sqlite3.Connection) -> None:
+    """Validate the expanded schema before recording migration version four."""
+
+    foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if foreign_key_errors:
+        raise StateIntegrityError("foreign key check failed during v4 migration")
+
+    from .interrupts import InterruptRepository
+    from .outbox import OutboxRepository
+    from .repositories import EventRepository, RunRepository
+
+    events = EventRepository(connection)
+    _verify_v4_command_receipts(connection, events)
+    runs = RunRepository(connection)
+    interrupts = InterruptRepository(connection)
+    outbox = OutboxRepository(connection)
+    for run_id in runs.list_ids():
+        runs.get_verified(
+            run_id,
+            events,
+            interrupts=interrupts,
+            outbox=outbox,
+        )
+
+
+def _verify_v4_command_receipts(connection: sqlite3.Connection, events: object) -> None:
+    rows = connection.execute(
+        "SELECT command_id, command_type, command_hash, run_id, binding_kind, effect_id, "
+        "result_event_id, recorded_at_utc FROM command_receipts"
+    ).fetchall()
+    event_ids = {
+        str(row[0]) for row in connection.execute("SELECT event_id FROM events").fetchall()
+    }
+    authoritative_event_ids: set[str] = set()
+    for row in rows:
+        try:
+            command_id = CommandId(str(row[0]))
+            command_type = CommandType(str(row[1]))
+            command_hash = str(row[2])
+            run_id = RunId(str(row[3]))
+            result_event_id = EventId(str(row[6]))
+            _migration_utc(str(row[7]))
+        except (DomainError, TypeError, ValueError) as error:
+            raise StateIntegrityError("v4 command receipt is invalid") from error
+        if _HASH_PATTERN.fullmatch(command_hash) is None:
+            raise StateIntegrityError("v4 command receipt hash is invalid")
+        binding_kind = str(row[4])
+        if binding_kind == "event":
+            if row[5] is not None:
+                raise StateIntegrityError("event command receipt contains an effect ID")
+            if str(result_event_id) in authoritative_event_ids:
+                raise StateIntegrityError("multiple command receipts bind one event")
+        elif binding_kind == "effect_audit_alias":
+            try:
+                effect_id = EffectId(str(row[5]))
+            except (DomainError, TypeError, ValueError) as error:
+                raise StateIntegrityError("v4 command receipt effect ID is invalid") from error
+            if command_type not in (
+                CommandType.RECORD_EFFECT_SUCCEEDED,
+                CommandType.RECORD_EFFECT_FAILED,
+            ):
+                raise StateIntegrityError("effect audit alias has an invalid command type")
+            effect_row = connection.execute(
+                "SELECT run_id, status, audit_event_id FROM outbox WHERE effect_id = ?",
+                (str(effect_id),),
+            ).fetchone()
+            expected_status = (
+                "succeeded"
+                if command_type is CommandType.RECORD_EFFECT_SUCCEEDED
+                else "dead_letter"
+            )
+            if (
+                effect_row is None
+                or str(effect_row[0]) != str(run_id)
+                or str(effect_row[1]) != expected_status
+                or str(effect_row[2]) != str(result_event_id)
+            ):
+                raise StateIntegrityError("effect audit alias is not authoritative")
+        else:
+            raise StateIntegrityError("v4 command receipt binding kind is invalid")
+        event = events.get(result_event_id)  # type: ignore[union-attr]
+        if event is None or event.run_id != run_id:
+            raise StateIntegrityError("command receipt result event is invalid")
+        if binding_kind == "event" and (
+            event.command_id != command_id
+            or event.command_type is not command_type
+            or event.command_hash != command_hash
+        ):
+            raise StateIntegrityError("event command receipt does not match its event")
+        if binding_kind == "event":
+            authoritative_event_ids.add(str(result_event_id))
+        elif event.event_type not in (
+            EventType.EFFECT_SUCCEEDED,
+            EventType.EFFECT_DEAD_LETTERED,
+        ):
+            raise StateIntegrityError("effect audit alias references a non-audit event")
+    if authoritative_event_ids != event_ids:
+        raise StateIntegrityError("command receipts do not cover the event history")
 
 
 def _migration_int(value: object, *, what: str, minimum: int | None = None) -> int:
@@ -774,7 +1176,7 @@ DEFAULT_MIGRATIONS = (
         version=2,
         name="p2_projection_ownership_and_outbox_completion",
         statements=V2_HARDENING_STATEMENTS,
-        post_apply=_backfill_effect_spec_hashes,
+        post_apply=_backfill_effect_spec_hashes_v2_legacy,
     ),
     Migration(
         version=3,
@@ -782,6 +1184,13 @@ DEFAULT_MIGRATIONS = (
         statements=V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS,
         post_apply=_post_apply_v3,
         post_apply_id="p2-event-chain-outbox-receipts-v1",
+    ),
+    Migration(
+        version=4,
+        name="p2_dispatch_permits_atomic_completion_and_command_receipts",
+        statements=V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS,
+        post_apply=_post_apply_v4,
+        post_apply_id="p2-dispatch-permits-atomic-completion-v1",
     ),
 )
 
@@ -905,6 +1314,7 @@ __all__ = [
     "SCHEMA_MIGRATIONS_SQL",
     "V2_HARDENING_STATEMENTS",
     "V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS",
+    "V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",
