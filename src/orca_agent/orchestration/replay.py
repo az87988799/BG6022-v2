@@ -13,6 +13,7 @@ from orca_agent.domain.json_types import thaw_json
 
 from .events import KernelEvent
 from .reducer import reduce_event
+from .result_contract import expected_application_result
 from .state import KernelState
 
 
@@ -40,15 +41,12 @@ def replay(events: Sequence[KernelEvent]) -> KernelState:
             result = ApplicationResult.model_validate_json(
                 json.dumps(thaw_json(event.result), ensure_ascii=False)
             )
-            if (
-                result.run_id != event.run_id
-                or result.event_id != event.event_id
-                or result.revision != event.new_revision
-                or result.status is not transition.next_status
-                or result.code != transition.outcome.code
-                or result.accepted is not transition.outcome.accepted
-                or result.details != transition.outcome.details
-            ):
+            expected_result = expected_application_result(
+                prior_state=state,
+                event=event,
+                transition=transition,
+            )
+            if result != expected_result:
                 raise StateIntegrityError("event result does not match its envelope")
             state = transition.next_state
             previous_event_hash = event.event_hash
