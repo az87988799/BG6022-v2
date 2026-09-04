@@ -236,8 +236,17 @@ def _verify_outbox(
         elif snapshot.state.status.is_terminal and record.status in (
             OutboxStatus.PENDING,
             OutboxStatus.LEASED,
+            OutboxStatus.DISPATCHING,
         ):
             raise StateIntegrityError("terminal run retains an active outbox effect")
+        elif record.status is OutboxStatus.DISPATCHING:
+            if (
+                record.audit_event_id is not None
+                or record.dispatch_authorized_at_utc is None
+                or record.dispatch_run_revision > snapshot.revision
+                or record.dispatch_policy_version is None
+            ):
+                raise StateIntegrityError("dispatching effect has an invalid permit projection")
         audit_event = audit_events.get(effect_id)
         if audit_event is not None and record.audit_event_id != audit_event.event_id:
             raise StateIntegrityError("effect audit event is not bound to its outbox receipt")

@@ -50,6 +50,14 @@ class EffectCompletionConflictError(ApplicationError):
     code = "effect_completion_conflict"
 
 
+class EffectDispatchBlockedError(ApplicationError):
+    code = "effect_dispatch_blocked"
+
+
+class EffectInFlightError(ApplicationError):
+    code = "effect_in_flight"
+
+
 class RevisionConflictError(ApplicationError):
     code = "revision_conflict"
 
@@ -114,6 +122,8 @@ __all__ = [
     "EffectAuditConflictError",
     "EffectAuditNotReadyError",
     "EffectCompletionConflictError",
+    "EffectDispatchBlockedError",
+    "EffectInFlightError",
     "EffectNotFoundError",
     "EffectRunMismatchError",
     "EffectStatusError",
