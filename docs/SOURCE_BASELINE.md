@@ -42,7 +42,7 @@ reset, or other source-tree write was performed.
 | RDKit | `2026.03.5` |
 | ORCA environment | `ORCADIR=E:\orca\` |
 | ORCA executable | `E:\orca\orca.exe` exists; not on PATH |
-| ORCA version | Unknown; executable file metadata exposed no version |
+| ORCA version | `6.1`; confirmed by the user on 2026-09-04. P0 did not run an ORCA calculation; the initial file-metadata-only probe could not expose the version. |
 
 Only executable/file metadata was inspected for ORCA. No ORCA process was
 started and no calculation was run. No LLM or PubChem call was made.
