@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 JsonPrimitive: TypeAlias = None | bool | int | float | str
-JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
-JsonObject: TypeAlias = dict[str, JsonValue]
+# The recursive shape is enforced by the canonicalizer at runtime. Keeping
+# the Pydantic-facing alias non-recursive preserves Python 3.11 support.
+JsonValue: TypeAlias = JsonPrimitive | list[Any] | dict[str, Any]
+JsonObject: TypeAlias = dict[str, Any]
