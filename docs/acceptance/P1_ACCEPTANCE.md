@@ -1,11 +1,11 @@
 # V2-P1 Acceptance
 
-- Status: CONDITIONAL PASS
+- Status: PASS
 - Date: 2026-09-04
-- Branch: `feat/v2-p1`
+- Branch: `main`
 - Reviewed implementation commit: `55f0373eee4395f5a6b4c4e555ca6c2c48788aaa`
 - Acceptance PR: `#1`
-- Latest verified workflow: `33868013206`
+- Latest verified workflow: `33868107459`
 - Python local: `3.14.6`
 - RDKit installed: `2026.03.5` (not imported by P1)
 - ORCA installed: `6.1`
@@ -69,6 +69,6 @@ it deliberately attempts to construct a socket.
 
 ## Decision
 
-Local P1 gates and the required GitHub Actions matrix pass. Final P1 status
-remains conditional until the PR is merged and the user completes acceptance.
-P2 must not start before that acceptance.
+Local P1 gates and the required GitHub Actions matrix pass. PR #1 is merged to
+`main` after the contract safety corrections. V2-P1 is formally PASS; P2 is
+not included in this change and must start only as a separate work package.
