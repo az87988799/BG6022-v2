@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from orca_agent.domain.ids import InterruptId, RunId
 
+from .codes import CancelReasonCode
+
 
 class KernelModel(BaseModel):
     """Strict immutable model base for the durable kernel."""
@@ -39,7 +41,7 @@ class KernelState(KernelModel):
     status: RunStatus
     pending_interrupt_id: InterruptId | None
     last_outcome_code: str | None
-    cancel_reason_code: str | None
+    cancel_reason_code: CancelReasonCode | None
 
     @classmethod
     def created(cls, run_id: RunId) -> KernelState:
