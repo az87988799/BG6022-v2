@@ -5,7 +5,7 @@
 - Branch: `codex/v2-p2-hardening`
 - Reviewed implementation commit: `0697d0783b4407055391068dbed28051fdad20ce`
 - Acceptance PR: `#3`
-- Latest verified workflow for reviewed implementation: `33900752277`
+- Latest verified workflow for reviewed implementation: `33900887391`
 - P2.8.2/P2.9 hardening status: implementation, 214-test suite, 80.28% coverage, and four-job CI complete; independent review and merge pending
 - Independent GitHub approval: Pending; PR #3 has no reviews
 - `main` merge: Pending; `main` remains `a001a31b6c0123a24e7e5d89774b0a1799024a27`
@@ -22,7 +22,7 @@ document intentionally does not refer to the commit that updates itself.
 
 | Gate | Result | Evidence |
 |---|---|---|
-| uv lock | PASS (CI) | `uv lock --check` in workflow `33900752277` |
+| uv lock | PASS (CI) | `uv lock --check` in workflow `33900887391` |
 | compileall | PASS (local/CI) | local `python -m compileall -q src tests`; CI uses `uv run --offline --no-sync python -m compileall -q src tests` |
 | pytest | PASS (local runnable suite) | `PYTHONPATH=src pytest -q --ignore=tests/test_offline.py -o addopts=''`: `213 passed`; CI complete suite: `214 passed` |
 | ruff check/format | PASS (local/CI) | `ruff check src tests`; `ruff format --check src tests`; `70 files already formatted` |
@@ -51,10 +51,10 @@ the complete suite with the locked development dependencies.
 
 | OS | Python | Result | Workflow URL |
 |---|---:|---|---|
-| Ubuntu | 3.11 | PASS | [run 33900752277](https://github.com/az87988799/BG6022-v2/actions/runs/33900752277) |
-| Ubuntu | 3.14 | PASS | [run 33900752277](https://github.com/az87988799/BG6022-v2/actions/runs/33900752277) |
-| Windows | 3.14 | PASS | [run 33900752277](https://github.com/az87988799/BG6022-v2/actions/runs/33900752277) |
-| Quality | 3.14 | PASS | [run 33900752277](https://github.com/az87988799/BG6022-v2/actions/runs/33900752277) |
+| Ubuntu | 3.11 | PASS | [run 33900887391](https://github.com/az87988799/BG6022-v2/actions/runs/33900887391) |
+| Ubuntu | 3.14 | PASS | [run 33900887391](https://github.com/az87988799/BG6022-v2/actions/runs/33900887391) |
+| Windows | 3.14 | PASS | [run 33900887391](https://github.com/az87988799/BG6022-v2/actions/runs/33900887391) |
+| Quality | 3.14 | PASS | [run 33900887391](https://github.com/az87988799/BG6022-v2/actions/runs/33900887391) |
 
 ## Durable-kernel invariants
 
