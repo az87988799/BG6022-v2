@@ -28,6 +28,8 @@ dist/
 *.sqlite
 *.sqlite3
 *.db
+*-wal
+*-shm
 
 # ORCA scratch and artifact roots
 scratch/

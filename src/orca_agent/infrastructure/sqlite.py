@@ -11,6 +11,8 @@ from orca_agent.application.errors import StorageBusyError
 def resolve_database_path(state_root: str | Path) -> Path:
     """Resolve a configured state root without embedding a machine-specific path."""
 
+    if str(state_root) == ":memory:":
+        return Path(":memory:")
     root = Path(state_root)
     if root.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
         return root
@@ -20,8 +22,19 @@ def resolve_database_path(state_root: str | Path) -> Path:
 class SQLiteConnectionFactory:
     """Create one independently configured connection per unit of work."""
 
-    def __init__(self, database_path: str | Path, *, timeout_seconds: float = 5.0) -> None:
-        self.database_path = resolve_database_path(database_path)
+    def __init__(
+        self,
+        database_path: str | Path | None = None,
+        *,
+        state_root: str | Path | None = None,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        if database_path is None and state_root is None:
+            raise ValueError("database_path or state_root is required")
+        if database_path is not None and state_root is not None:
+            raise ValueError("database_path and state_root are mutually exclusive")
+        configured_path = database_path if database_path is not None else state_root
+        self.database_path = resolve_database_path(configured_path)  # type: ignore[arg-type]
         self.timeout_seconds = timeout_seconds
 
     def connect(self) -> sqlite3.Connection:
@@ -52,11 +65,18 @@ class SQLiteConnectionFactory:
 
 
 def connect_sqlite(
-    database_path: str | Path, *, timeout_seconds: float = 5.0
+    database_path: str | Path | None = None,
+    *,
+    state_root: str | Path | None = None,
+    timeout_seconds: float = 5.0,
 ) -> sqlite3.Connection:
     """Convenience wrapper for callers that do not need to retain a factory."""
 
-    return SQLiteConnectionFactory(database_path, timeout_seconds=timeout_seconds).connect()
+    return SQLiteConnectionFactory(
+        database_path,
+        state_root=state_root,
+        timeout_seconds=timeout_seconds,
+    ).connect()
 
 
 def begin_immediate(connection: sqlite3.Connection) -> None:

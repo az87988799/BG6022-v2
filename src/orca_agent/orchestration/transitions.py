@@ -140,6 +140,8 @@ class Transition(KernelModel):
         if len(pending_ops) > 1:
             raise ValueError("a transition may create at most one pending interrupt")
         pending_id = self.next_state.pending_interrupt_id
+        if pending_id is None and pending_ops:
+            raise ValueError("pending projection operation must be reflected in next state")
         if pending_id is not None:
             if not pending_ops or pending_ops[0].interrupt_id != pending_id:
                 raise ValueError("state pending interrupt must match its projection operation")

@@ -23,6 +23,7 @@ from orca_agent.domain.ids import EventId, InterruptId, new_id
 from orca_agent.domain.json_types import JsonObject, thaw_json
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
 from orca_agent.infrastructure.repositories import RunSnapshot, StoredEvent
+from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.orchestration.commands import (
     CancelRun,
@@ -48,11 +49,16 @@ class KernelApplicationService:
 
     def __init__(
         self,
-        database_path: str | Path,
+        database_path: str | Path | None = None,
         *,
+        state_root: str | Path | None = None,
         clock: Clock | None = None,
     ) -> None:
-        self.database_path = database_path
+        if database_path is None and state_root is None:
+            raise ValueError("database_path or state_root is required")
+        if database_path is not None and state_root is not None:
+            raise ValueError("database_path and state_root are mutually exclusive")
+        self.database_path = resolve_database_path(database_path or state_root)  # type: ignore[arg-type]
         self.clock = clock or SystemClock()
 
     def execute(self, command: Command) -> ApplicationResult:

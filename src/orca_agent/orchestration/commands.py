@@ -480,11 +480,14 @@ Command: TypeAlias = (
     | RecordEffectFailed
 )
 
+CommandEnvelope = CommandBase
+
 
 __all__ = [
     "CancelRun",
     "Command",
     "CommandBase",
+    "CommandEnvelope",
     "CommandType",
     "CreateRun",
     "ExpireInterrupt",

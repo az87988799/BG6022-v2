@@ -139,4 +139,6 @@ class KernelEvent(KernelModel):
         verify_sha256(self.result, self.result_hash)
 
 
-__all__ = ["EventType", "KernelEvent"]
+EventEnvelope = KernelEvent
+
+__all__ = ["EventEnvelope", "EventType", "KernelEvent"]

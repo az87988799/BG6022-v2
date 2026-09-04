@@ -12,8 +12,10 @@ from orca_agent.domain.errors import HashMismatchError
 from orca_agent.domain.hashing import sha256_hex, verify_sha256
 from orca_agent.domain.ids import EffectId, EventId, RunId, WorkerId, effect_id_for
 from orca_agent.domain.json_types import FrozenJsonObject, freeze_json_object
+from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import KernelEvent
+from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import format_utc, parse_utc
 from .repositories import json_text, json_value
@@ -73,6 +75,8 @@ class OutboxRepository:
             payload_hash = str(row[9])
             verify_sha256(payload, payload_hash)
             status = OutboxStatus(str(row[10]))
+            if int(row[6]) != CURRENT_SCHEMA_VERSION or str(row[7]) != ENGINE_VERSION:
+                raise StateIntegrityError("stored outbox version is unsupported")
             lease_owner = None if row[13] is None else WorkerId(str(row[13]))
             lease_expires = None if row[14] is None else parse_utc(str(row[14]))
             completed = None if row[15] is None else parse_utc(str(row[15]))
@@ -132,6 +136,9 @@ class OutboxRepository:
         created_at_utc: datetime | None = None,
     ) -> tuple[EffectId, ...]:
         created_at = created_at_utc or available_at_utc
+        indexes = tuple(effect.effect_index for effect in effects)
+        if indexes != tuple(range(len(indexes))):
+            raise StateIntegrityError("effect indexes must be contiguous and ordered")
         effect_ids: list[EffectId] = []
         for effect in effects:
             effect_id = effect.effect_id(event.event_id)
@@ -216,9 +223,13 @@ class OutboxRepository:
     ) -> tuple[OutboxRecord, ...]:
         """Claim due or expired-lease effects in one writer transaction."""
 
-        if limit < 1 or lease_duration.total_seconds() <= 0:
+        if limit < 1:
             return ()
+        if lease_duration <= timedelta(0):
+            raise ValueError("lease_duration must be positive")
         owner = WorkerId(str(worker_id))
+        if lease_duration <= timedelta(0):
+            raise ValueError("lease_duration must be positive")
         now_text = format_utc(now)
         lease_expires_text = format_utc(now + lease_duration)
         claimed_ids: list[EffectId] = []
@@ -398,6 +409,8 @@ def backoff_for_attempt(attempt_count: int, *, initial_seconds: int = 1) -> time
 
     if type(attempt_count) is not int or attempt_count < 1:
         raise ValueError("attempt_count must be positive")
+    if type(initial_seconds) is not int or initial_seconds < 1:
+        raise ValueError("initial_seconds must be positive")
     return timedelta(seconds=min(60, initial_seconds * (2 ** (attempt_count - 1))))
 
 

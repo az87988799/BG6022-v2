@@ -12,6 +12,7 @@ from orca_agent.domain.ids import EffectId, WorkerId, new_id
 
 from .clock import Clock, SystemClock
 from .outbox import LeasedEffect, OutboxStatus
+from .sqlite import resolve_database_path
 from .unit_of_work import SQLiteUnitOfWork
 
 
@@ -37,9 +38,10 @@ class OutboxWorker:
 
     def __init__(
         self,
-        database_path: str | Path,
-        handler: Handler,
+        database_path: str | Path | None = None,
+        handler: Handler | None = None,
         *,
+        state_root: str | Path | None = None,
         clock: Clock | None = None,
         worker_id: WorkerId | None = None,
         lease_duration: timedelta = timedelta(seconds=30),
@@ -49,7 +51,13 @@ class OutboxWorker:
             raise ValueError("lease_duration must be positive")
         if max_attempts < 1:
             raise ValueError("max_attempts must be positive")
-        self.database_path = database_path
+        if database_path is None and state_root is None:
+            raise ValueError("database_path or state_root is required")
+        if database_path is not None and state_root is not None:
+            raise ValueError("database_path and state_root are mutually exclusive")
+        if handler is None:
+            raise ValueError("handler is required")
+        self.database_path = resolve_database_path(database_path or state_root)  # type: ignore[arg-type]
         self.handler = handler
         self.clock = clock or SystemClock()
         self.worker_id = worker_id or new_id(WorkerId)

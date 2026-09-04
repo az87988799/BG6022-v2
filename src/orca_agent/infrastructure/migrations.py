@@ -276,10 +276,27 @@ def migrate_database(
     return apply_migrations(connection, migrations=migrations, clock=clock)
 
 
+class MigrationRunner:
+    """Reusable migration runner object for application startup and tests."""
+
+    def __init__(
+        self,
+        migrations: Iterable[Migration] = DEFAULT_MIGRATIONS,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
+        self.migrations = tuple(migrations)
+        self.clock = clock
+
+    def run(self, connection: sqlite3.Connection) -> int:
+        return apply_migrations(connection, migrations=self.migrations, clock=self.clock)
+
+
 __all__ = [
     "DEFAULT_MIGRATIONS",
     "INITIAL_SCHEMA_STATEMENTS",
     "Migration",
+    "MigrationRunner",
     "SCHEMA_MIGRATIONS_SQL",
     "apply_migrations",
     "migrate_database",

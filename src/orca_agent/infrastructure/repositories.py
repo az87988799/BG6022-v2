@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -19,6 +20,8 @@ from orca_agent.orchestration.state import KernelState
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import format_utc, parse_utc
+
+_HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def json_text(value: object) -> str:
@@ -201,6 +204,13 @@ class EventRepository:
                     ensure_ascii=False,
                 )
             )
+            if (
+                event.schema_version != CURRENT_SCHEMA_VERSION
+                or event.engine_version != ENGINE_VERSION
+            ):
+                raise StateIntegrityError("stored event version is unsupported")
+            if _HASH_PATTERN.fullmatch(str(row[3])) is None:
+                raise StateIntegrityError("stored command hash is invalid")
         except (ValidationError, TypeError, ValueError) as error:
             raise StateIntegrityError("stored event is invalid") from error
         return StoredEvent(event=event, command_hash=str(row[3]))

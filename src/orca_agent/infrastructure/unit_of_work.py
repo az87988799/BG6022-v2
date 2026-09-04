@@ -19,13 +19,17 @@ class SQLiteUnitOfWork:
 
     def __init__(
         self,
-        database_path: str | Path,
+        database_path: str | Path | None = None,
         *,
+        state_root: str | Path | None = None,
         clock: Clock | None = None,
         connection_factory: SQLiteConnectionFactory | None = None,
     ) -> None:
         self.clock = clock or SystemClock()
-        self.connection_factory = connection_factory or SQLiteConnectionFactory(database_path)
+        self.connection_factory = connection_factory or SQLiteConnectionFactory(
+            database_path,
+            state_root=state_root,
+        )
         self.connection: sqlite3.Connection | None = None
         self.runs: RunRepository | None = None
         self.events: EventRepository | None = None

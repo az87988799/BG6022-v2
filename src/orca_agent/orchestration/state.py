@@ -41,6 +41,16 @@ class KernelState(KernelModel):
     last_outcome_code: str | None
     cancel_reason_code: str | None
 
+    @classmethod
+    def created(cls, run_id: RunId) -> KernelState:
+        return cls(
+            run_id=run_id,
+            status=RunStatus.CREATED,
+            pending_interrupt_id=None,
+            last_outcome_code="run_created",
+            cancel_reason_code=None,
+        )
+
     @field_validator("last_outcome_code", "cancel_reason_code")
     @classmethod
     def _blank_codes_are_not_valid(cls, value: str | None) -> str | None:
@@ -49,4 +59,6 @@ class KernelState(KernelModel):
         return value
 
 
-__all__ = ["KernelModel", "KernelState", "RunStatus"]
+RunState = KernelState
+
+__all__ = ["KernelModel", "KernelState", "RunState", "RunStatus"]

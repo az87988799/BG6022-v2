@@ -8,7 +8,8 @@ from datetime import datetime
 from pydantic import ValidationError
 
 from orca_agent.application.errors import InvalidTransitionError
-from orca_agent.domain.ids import InterruptId, RunId
+from orca_agent.domain.errors import InvalidIdentifierError
+from orca_agent.domain.ids import EffectId, InterruptId, RunId
 
 from .effects import EffectSpec
 from .events import EventType, KernelEvent
@@ -49,7 +50,7 @@ def _text(payload: Mapping[str, object], key: str, *, event: KernelEvent) -> str
 def _run_id(payload: Mapping[str, object], key: str, *, event: KernelEvent) -> RunId:
     try:
         value = RunId(str(_value(payload, key, event=event)))
-    except (TypeError, ValueError) as error:
+    except (InvalidIdentifierError, TypeError, ValueError) as error:
         raise _invalid(f"event payload field {key} is invalid", event=event) from error
     return value
 
@@ -57,7 +58,7 @@ def _run_id(payload: Mapping[str, object], key: str, *, event: KernelEvent) -> R
 def _interrupt_id(payload: Mapping[str, object], key: str, *, event: KernelEvent) -> InterruptId:
     try:
         value = InterruptId(str(_value(payload, key, event=event)))
-    except (TypeError, ValueError) as error:
+    except (InvalidIdentifierError, TypeError, ValueError) as error:
         raise _invalid(f"event payload field {key} is invalid", event=event) from error
     return value
 
@@ -73,6 +74,13 @@ def _utc_timestamp(payload: Mapping[str, object], key: str, *, event: KernelEven
     if parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0:
         raise _invalid(f"event payload field {key} is not UTC", event=event)
     return parsed
+
+
+def _effect_id(payload: Mapping[str, object], key: str, *, event: KernelEvent) -> EffectId:
+    try:
+        return EffectId(str(_value(payload, key, event=event)))
+    except (InvalidIdentifierError, TypeError, ValueError) as error:
+        raise _invalid(f"event payload field {key} is invalid", event=event) from error
 
 
 def _effects(payload: Mapping[str, object], *, event: KernelEvent) -> tuple[EffectSpec, ...]:
@@ -370,7 +378,7 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
         )
 
     if event.event_type is EventType.EFFECT_SUCCEEDED:
-        _text(payload, "effect_id", event=event)
+        _effect_id(payload, "effect_id", event=event)
         state = _state(
             run_id=current.run_id,
             status=current.status,
@@ -387,8 +395,17 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
         )
 
     if event.event_type is EventType.EFFECT_DEAD_LETTERED:
-        _text(payload, "effect_id", event=event)
+        _effect_id(payload, "effect_id", event=event)
         _text(payload, "error_code", event=event)
+        operations: tuple[InterruptProjectionOp, ...] = ()
+        if current.pending_interrupt_id is not None:
+            operations = (
+                _finalize(
+                    event=event,
+                    interrupt_id=current.pending_interrupt_id,
+                    status=InterruptStatus.CANCELLED,
+                ),
+            )
         state = _state(
             run_id=current.run_id,
             status=RunStatus.FAILED,
@@ -400,7 +417,7 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
             next_status=RunStatus.FAILED,
             next_state=state,
             effects=effects,
-            interrupt_operations=(),
+            interrupt_operations=operations,
             outcome=_outcome("effect_dead_lettered"),
         )
 
