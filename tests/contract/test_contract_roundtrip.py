@@ -22,7 +22,7 @@ from orca_agent.domain.models import (
 
 
 def _primitive() -> PrimitiveSpec:
-    return PrimitiveSpec(
+    return PrimitiveSpec.create(
         kind=PrimitiveKind.SP,
         molecule_ref="water",
         method_profile_id="baseline.r2scan3c.v1",
@@ -31,7 +31,7 @@ def _primitive() -> PrimitiveSpec:
 
 
 def test_six_contracts_construct_and_round_trip_through_json() -> None:
-    problem = ProblemSpec(
+    problem = ProblemSpec.create(
         goal="Compute a gas-phase energy",
         molecule_ref="water",
         charge=0,
@@ -40,7 +40,7 @@ def test_six_contracts_construct_and_round_trip_through_json() -> None:
         target_properties=("electronic_energy", "electronic_energy"),
     )
     primitive = _primitive()
-    proposal = PlanProposal(
+    proposal = PlanProposal.create(
         problem_spec_id=problem.record_id,
         problem_spec_hash=sha256_hex(problem),
         steps=(primitive,),

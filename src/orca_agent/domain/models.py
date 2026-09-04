@@ -9,8 +9,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from .canonical import canonical_json_bytes
-from .errors import CanonicalizationError, ContractInvariantError
+from .errors import ContractInvariantError, HashMismatchError
 from .hashing import sha256_hex, verify_sha256
 from .ids import (
     ActionId,
@@ -22,7 +21,14 @@ from .ids import (
     ProblemSpecId,
     new_id,
 )
-from .json_types import JsonObject, JsonValue
+from .json_types import (
+    FrozenJsonObject,
+    FrozenJsonValue,
+    JsonObject,
+    JsonValue,
+    freeze_json_object,
+    freeze_json_value,
+)
 from .versions import CURRENT_SCHEMA_VERSION, validate_schema_version
 
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -131,23 +137,23 @@ def _safe_json_object(value: JsonObject, field_name: str) -> JsonObject:
     """Reject execution-shaped keys from proposal/config JSON."""
 
     try:
-        canonical_json_bytes(value)
-    except CanonicalizationError as error:
+        frozen = freeze_json_object(value)
+    except ValueError as error:
         raise ValueError(f"{field_name} must contain only JSON values") from error
 
     def visit(current: JsonValue, location: str) -> None:
-        if isinstance(current, dict):
+        if hasattr(current, "items"):
             for key, child in current.items():
                 normalized = key.casefold().replace("-", "_")
                 if any(part in normalized for part in _UNSAFE_KEY_PARTS):
                     raise ValueError(f"{field_name} contains a forbidden key")
                 visit(child, f"{location}.{key}")
-        elif isinstance(current, list):
+        elif isinstance(current, (list, tuple)):
             for index, child in enumerate(current):
                 visit(child, f"{location}[{index}]")
 
-    visit(value, field_name)
-    return value
+    visit(frozen, field_name)
+    return frozen
 
 
 def _registry_id(value: str, field_name: str) -> str:
@@ -173,15 +179,40 @@ def _unique(values: tuple[ValueT, ...], field_name: str) -> tuple[ValueT, ...]:
 
 
 class ProblemSpec(StrictDomainModel):
-    record_id: ProblemSpecId = Field(default_factory=lambda: new_id(ProblemSpecId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    record_id: ProblemSpecId
+    schema_version: int
     goal: str
     molecule_ref: str
     charge: int
     multiplicity: int = Field(ge=1)
     environment: Environment = Environment.UNSPECIFIED
     target_properties: tuple[str, ...]
-    constraints: JsonObject = Field(default_factory=dict)
+    constraints: FrozenJsonObject
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        goal: str,
+        molecule_ref: str,
+        charge: int,
+        multiplicity: int,
+        target_properties: tuple[str, ...],
+        environment: Environment = Environment.UNSPECIFIED,
+        constraints: JsonObject | None = None,
+        record_id: ProblemSpecId | None = None,
+    ) -> ProblemSpec:
+        return cls(
+            record_id=record_id or new_id(ProblemSpecId),
+            schema_version=CURRENT_SCHEMA_VERSION,
+            goal=goal,
+            molecule_ref=molecule_ref,
+            charge=charge,
+            multiplicity=multiplicity,
+            environment=environment,
+            target_properties=target_properties,
+            constraints={} if constraints is None else constraints,
+        )
 
     @field_validator("schema_version")
     @classmethod
@@ -213,13 +244,34 @@ class ProblemSpec(StrictDomainModel):
 
 
 class PrimitiveSpec(StrictDomainModel):
-    primitive_id: PrimitiveId = Field(default_factory=lambda: new_id(PrimitiveId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    primitive_id: PrimitiveId
+    schema_version: int
     kind: PrimitiveKind
     molecule_ref: str
     method_profile_id: str
     depends_on: tuple[PrimitiveId, ...] = ()
-    parameters: JsonObject = Field(default_factory=dict)
+    parameters: FrozenJsonObject
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        kind: PrimitiveKind,
+        molecule_ref: str,
+        method_profile_id: str,
+        depends_on: tuple[PrimitiveId, ...] = (),
+        parameters: JsonObject | None = None,
+        primitive_id: PrimitiveId | None = None,
+    ) -> PrimitiveSpec:
+        return cls(
+            primitive_id=primitive_id or new_id(PrimitiveId),
+            schema_version=CURRENT_SCHEMA_VERSION,
+            kind=kind,
+            molecule_ref=molecule_ref,
+            method_profile_id=method_profile_id,
+            depends_on=depends_on,
+            parameters={} if parameters is None else parameters,
+        )
 
     @field_validator("schema_version")
     @classmethod
@@ -248,13 +300,34 @@ class PrimitiveSpec(StrictDomainModel):
 
 
 class PlanProposal(StrictDomainModel):
-    proposal_id: PlanProposalId = Field(default_factory=lambda: new_id(PlanProposalId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    proposal_id: PlanProposalId
+    schema_version: int
     problem_spec_id: ProblemSpecId
     problem_spec_hash: str
     steps: tuple[PrimitiveSpec, ...]
     rationale: str
     planner_id: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        problem_spec_id: ProblemSpecId,
+        problem_spec_hash: str,
+        steps: tuple[PrimitiveSpec, ...],
+        rationale: str,
+        planner_id: str,
+        proposal_id: PlanProposalId | None = None,
+    ) -> PlanProposal:
+        return cls(
+            proposal_id=proposal_id or new_id(PlanProposalId),
+            schema_version=CURRENT_SCHEMA_VERSION,
+            problem_spec_id=problem_spec_id,
+            problem_spec_hash=problem_spec_hash,
+            steps=steps,
+            rationale=rationale,
+            planner_id=planner_id,
+        )
 
     @field_validator("schema_version")
     @classmethod
@@ -282,8 +355,8 @@ class PlanProposal(StrictDomainModel):
 
 
 class ValidatedAction(StrictDomainModel):
-    action_id: ActionId = Field(default_factory=lambda: new_id(ActionId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    action_id: ActionId
+    schema_version: int
     proposal_hash: str
     primitive: PrimitiveSpec
     execution_envelope: ExecutionEnvelope
@@ -299,6 +372,14 @@ class ValidatedAction(StrictDomainModel):
     @classmethod
     def _hashes(cls, value: str) -> str:
         return _hash_field(value)
+
+    @model_validator(mode="after")
+    def _action_hash_matches(self) -> ValidatedAction:
+        try:
+            self.verify_action_hash()
+        except HashMismatchError as error:
+            raise ValueError("action_hash does not match canonical action content") from error
+        return self
 
     def _hash_payload(self) -> JsonObject:
         return self.model_dump(mode="json", exclude={"action_hash"})
@@ -337,11 +418,11 @@ class ValidatedAction(StrictDomainModel):
 
 
 class EvidenceRecord(StrictDomainModel):
-    evidence_id: EvidenceId = Field(default_factory=lambda: new_id(EvidenceId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    evidence_id: EvidenceId
+    schema_version: int
     action_id: ActionId
     evidence_type: EvidenceType
-    payload: JsonObject
+    payload: FrozenJsonObject
     artifact_refs: tuple[ArtifactId, ...] = ()
     provenance: Provenance
     payload_hash: str
@@ -366,6 +447,14 @@ class EvidenceRecord(StrictDomainModel):
     def _payload_hash(cls, value: str) -> str:
         return _hash_field(value)
 
+    @model_validator(mode="after")
+    def _payload_hash_matches(self) -> EvidenceRecord:
+        try:
+            self.verify_payload_hash()
+        except HashMismatchError as error:
+            raise ValueError("payload_hash does not match payload content") from error
+        return self
+
     def _hash_payload(self) -> JsonObject:
         return self.payload
 
@@ -382,6 +471,7 @@ class EvidenceRecord(StrictDomainModel):
     ) -> EvidenceRecord:
         return cls(
             evidence_id=evidence_id or new_id(EvidenceId),
+            schema_version=CURRENT_SCHEMA_VERSION,
             action_id=action_id,
             evidence_type=evidence_type,
             payload=payload,
@@ -395,10 +485,10 @@ class EvidenceRecord(StrictDomainModel):
 
 
 class ValidatedClaim(StrictDomainModel):
-    claim_id: ClaimId = Field(default_factory=lambda: new_id(ClaimId))
-    schema_version: int = CURRENT_SCHEMA_VERSION
+    claim_id: ClaimId
+    schema_version: int
     claim_type: ClaimType
-    value: JsonValue
+    value: FrozenJsonValue
     unit: str | None = None
     evidence_ids: tuple[EvidenceId, ...]
     status: ClaimStatus
@@ -421,10 +511,9 @@ class ValidatedClaim(StrictDomainModel):
     @classmethod
     def _value_is_json(cls, value: JsonValue) -> JsonValue:
         try:
-            canonical_json_bytes(value)
-        except CanonicalizationError as error:
+            return freeze_json_value(value)
+        except ValueError as error:
             raise ValueError("value must contain only JSON values") from error
-        return value
 
     @field_validator("limitations")
     @classmethod
@@ -438,6 +527,14 @@ class ValidatedClaim(StrictDomainModel):
             raise ContractInvariantError(
                 "qualified or rejected claims require limitations",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _claim_hash_matches(self) -> ValidatedClaim:
+        try:
+            self.verify_claim_hash()
+        except HashMismatchError as error:
+            raise ValueError("claim_hash does not match claim content") from error
         return self
 
     def _hash_payload(self) -> JsonObject:

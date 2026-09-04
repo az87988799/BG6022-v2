@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import BaseModel
 
 from .errors import CanonicalizationError
-from .json_types import JsonValue
+from .json_types import FrozenList, JsonValue
 
 
 def _normalize(value: Any) -> JsonValue:
@@ -19,9 +20,13 @@ def _normalize(value: Any) -> JsonValue:
         if not math.isfinite(value):
             raise CanonicalizationError("non-finite numeric values are not allowed")
         return value
+    if isinstance(value, FrozenList):
+        return [_normalize(item) for item in value]
+    if isinstance(value, tuple):
+        raise CanonicalizationError("tuples are not JSON arrays")
     if isinstance(value, list):
         return [_normalize(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise CanonicalizationError("JSON object keys must be strings")
         return {key: _normalize(value[key]) for key in sorted(value)}

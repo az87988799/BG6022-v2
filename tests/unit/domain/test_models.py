@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from orca_agent.domain.ids import ProblemSpecId, new_id
 from orca_agent.domain.models import (
     Environment,
     PlanProposal,
@@ -18,11 +19,11 @@ def _primitive(**overrides: object) -> PrimitiveSpec:
         "parameters": {"charge": 0},
     }
     values.update(overrides)
-    return PrimitiveSpec(**values)
+    return PrimitiveSpec.create(**values)
 
 
 def test_problem_spec_deduplicates_targets_in_stable_order() -> None:
-    model = ProblemSpec(
+    model = ProblemSpec.create(
         goal="  Compute energy  ",
         molecule_ref="water",
         charge=0,
@@ -38,28 +39,34 @@ def test_problem_spec_deduplicates_targets_in_stable_order() -> None:
 def test_models_are_strict_and_forbid_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         ProblemSpec(
+            record_id=new_id(ProblemSpecId),
+            schema_version=1,
             goal="Compute energy",
             molecule_ref="water",
             charge="0",
             multiplicity=1,
             environment=Environment.GAS,
             target_properties=("energy",),
+            constraints={},
         )
     with pytest.raises(ValidationError):
         ProblemSpec(
+            record_id=new_id(ProblemSpecId),
+            schema_version=1,
             goal="Compute energy",
             molecule_ref="water",
             charge=0,
             multiplicity=1,
             environment=Environment.GAS,
             target_properties=("energy",),
+            constraints={},
             unexpected="reject",
         )
 
 
 def test_empty_steps_and_duplicate_step_ids_are_rejected() -> None:
     with pytest.raises(ValidationError):
-        PlanProposal(
+        PlanProposal.create(
             problem_spec_id="problem_" + "0" * 32,
             problem_spec_hash="0" * 64,
             steps=(),
@@ -69,7 +76,7 @@ def test_empty_steps_and_duplicate_step_ids_are_rejected() -> None:
 
     primitive = _primitive()
     with pytest.raises(ValidationError):
-        PlanProposal(
+        PlanProposal.create(
             problem_spec_id="problem_" + "0" * 32,
             problem_spec_hash="0" * 64,
             steps=(primitive, primitive),
