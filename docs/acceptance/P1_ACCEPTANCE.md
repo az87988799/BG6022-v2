@@ -3,7 +3,7 @@
 - Status: CONDITIONAL PASS
 - Date: 2026-09-04
 - Branch: `feat/v2-p1`
-- Commit: `6bf8018ece7ac7fdfeb7064f30b544bf883661d1`
+- Commit: `0d3689e5e84fe40b1f917e71deff6b410bba2847`
 - Python local: `3.14.6`
 - RDKit installed: `2026.03.5` (not imported by P1)
 - ORCA installed: `6.1`
@@ -34,9 +34,9 @@ it deliberately attempts to construct a socket.
 
 | OS | Python | Result | Workflow URL |
 |---|---:|---|---|
-| Ubuntu | 3.11 | Pending branch push/CI | |
-| Ubuntu | 3.14 | Pending branch push/CI | |
-| Windows | 3.14 | Pending branch push/CI | |
+| Ubuntu | 3.11 | PASS | [run 33861893974](https://github.com/az87988799/BG6022-v2/actions/runs/33861893974) |
+| Ubuntu | 3.14 | PASS | [run 33861893974](https://github.com/az87988799/BG6022-v2/actions/runs/33861893974) |
+| Windows | 3.14 | PASS | [run 33861893974](https://github.com/az87988799/BG6022-v2/actions/runs/33861893974) |
 
 ## Delivered contracts
 
@@ -56,6 +56,6 @@ it deliberately attempts to construct a socket.
 
 ## Decision
 
-Local P1 gates pass. Final P1 status remains conditional until the feature
-branch is pushed, the required GitHub Actions matrix passes, the PR is merged,
-and the user completes acceptance. P2 must not start before that acceptance.
+Local P1 gates and the required GitHub Actions matrix pass. Final P1 status
+remains conditional until the PR is merged and the user completes acceptance.
+P2 must not start before that acceptance.
