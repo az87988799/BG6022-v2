@@ -76,6 +76,39 @@ class ArtifactId(PrefixedId):
     _pattern = re.compile(r"^artifact_[0-9a-f]{32}$")
 
 
+class RunId(PrefixedId):
+    prefix = "run"
+    _pattern = re.compile(r"^run_[0-9a-f]{32}$")
+
+
+class CommandId(PrefixedId):
+    prefix = "command"
+    _pattern = re.compile(r"^command_[0-9a-f]{32}$")
+
+
+class EventId(PrefixedId):
+    prefix = "event"
+    _pattern = re.compile(r"^event_[0-9a-f]{32}$")
+
+
+class EffectId(PrefixedId):
+    prefix = "effect"
+    _pattern = re.compile(r"^effect_[0-9a-f]{32}$")
+
+
+class InterruptId(PrefixedId):
+    prefix = "interrupt"
+    _pattern = re.compile(r"^interrupt_[0-9a-f]{32}$")
+
+
+class WorkerId(PrefixedId):
+    prefix = "worker"
+    _pattern = re.compile(r"^worker_[0-9a-f]{32}$")
+
+
+EFFECT_NAMESPACE = uuid.UUID("9d5c0f3e-3b24-4f3f-9bde-7f07bb3f9473")
+
+
 IdT = TypeVar("IdT", bound=PrefixedId)
 
 
@@ -83,3 +116,12 @@ def new_id(identifier_type: type[IdT]) -> IdT:
     """Create a new UUID4 ID for the requested typed entity."""
 
     return identifier_type(f"{identifier_type.prefix}_{uuid.uuid4().hex}")
+
+
+def effect_id_for(event_id: EventId, index: int) -> EffectId:
+    """Create the stable effect ID for an event and zero-based effect index."""
+
+    if type(index) is not int or index < 0:
+        raise ValueError("effect index must be a non-negative integer")
+    value = uuid.uuid5(EFFECT_NAMESPACE, f"{event_id}:{index}")
+    return EffectId(f"effect_{value.hex}")
