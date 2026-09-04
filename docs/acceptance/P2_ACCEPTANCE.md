@@ -1,11 +1,11 @@
 # V2-P2 Acceptance
 
-- Status: CONDITIONAL PASS
+- Status: PASS
 - Date: 2026-09-04
-- Branch: `feat/v2-p2`
+- Branch: `main`
 - Reviewed implementation commit: `8433872d8b5a6ec59446f8efb2595ed3ecfb60fa`
 - Acceptance PR: `#2`
-- Latest verified workflow: `33872788422`
+- Latest verified workflow: `33873115361`
 - Python local: `3.14.6`
 - SQLite local: `3.53.2`
 - ORCA installed: `6.1`
@@ -63,6 +63,6 @@ deliberately attempts to construct a socket.
 
 ## Decision
 
-The P2 implementation, local gates, and implementation-commit GitHub Actions
-matrix pass. P2 remains `CONDITIONAL PASS` on `feat/v2-p2` until PR #2 is
-merged to `main` and the resulting `main` CI is green. P3 may not start.
+The P2 implementation, local gates, PR #2, and the resulting `main` GitHub
+Actions matrix pass. V2-P2 is formally `PASS` on `main`. P3 has not started
+and may not start under this work package.
