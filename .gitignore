@@ -21,6 +21,8 @@ htmlcov/
 .tmp/
 tmp/
 agent_output/
+build/
+dist/
 
 # Local databases
 *.sqlite
