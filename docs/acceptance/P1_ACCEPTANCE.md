@@ -3,7 +3,7 @@
 - Status: CONDITIONAL PASS
 - Date: 2026-09-04
 - Branch: `feat/v2-p1`
-- Commit: `0d3689e5e84fe40b1f917e71deff6b410bba2847`
+- Commit: `13b7ac6a46a676df6012b6926699e31d99933f1f`
 - Python local: `3.14.6`
 - RDKit installed: `2026.03.5` (not imported by P1)
 - ORCA installed: `6.1`
