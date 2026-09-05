@@ -19,9 +19,16 @@ P2 registers immutable effect specifications in the `outbox` table in the
 same transaction as the source Event and Run snapshot. An effect ID is a
 deterministic UUID5 derived from the source Event ID and zero-based effect
 index. `(source_event_id, effect_index)` is unique. The v2 and v3 migration
-identities and callbacks are frozen; migration v4 adds dispatch permits,
+SQL identities/checksums are frozen; schema-1 read compatibility is version-fixed.
+Migration v4 adds dispatch permits,
 command receipts, and the stronger constraints without rewriting v1-v3
 checksums.
+
+The user approved correcting v4 receipt interpolation and updating its checksum
+on 2026-09-05; its callback identity is now
+`p2-dispatch-permits-atomic-completion-v2`. Old-v4 development databases require
+backup/recreation, not edits to schema_migrations. Migration v5 separately freezes
+terminal attempt count and available/created/updated timestamps.
 
 The v4 outbox records the complete effect specification hash, including the
 effect identity, Run and source Event ownership, routing type/class, versions,
@@ -42,6 +49,10 @@ There are three durable linearization points:
    Run snapshot, and appends the command receipt in one transaction.
 
 Claim and authorization use the same exact, fail-closed effect registry.
+Application, worker and completion share a fixed immutable policy configuration;
+`KernelApplicationService.create_worker()` is their common creation entry.
+P2 policy versions 1 and 2 are a closed map with regression-frozen digests.
+Claim scans with a stable keyset cursor; only successful claims count toward limit.
 Unknown types and class/type mismatches are blocked. External effects are
 blocked while a Run waits for input; only explicitly registered safe internal
 effects may continue. A permit is rechecked immediately before completion, so
@@ -55,12 +66,22 @@ failures use a closed `HandlerErrorCode` set with fixed public messages.
 Successful effects persist only the bounded versioned
 `effect-success/v1` receipt. Free-form error text, paths, tokens, tracebacks,
 and arbitrary success JSON are not part of the completion contract.
+Historical schema-1 records retain their published JSON and text semantics in
+internal read objects with their original hashes and audit binding checked.
+Historical diagnostics are stripped from the handler view; the worker retains
+the original permit for completion fencing. Completion protocol alone does not
+identify the payload schema. The only accepted receipt conversion is v4's exact
+empty-object conversion with verified hash and audit identity.
 
 Command receipts are append-only. The authoritative event receipt is created
 for every Event. A new Effect audit command ID creates an alias receipt for
 the existing authoritative audit Event without creating another Event or
 revision. Conflicting command ID/hash/type/Run bindings are typed conflicts;
 damaged bindings are state-integrity errors.
+New external command IDs require UUID4, after checking historical idempotency.
+Internal completion IDs remain deterministic UUID5. Upgrade and claim checks
+reject detected historical namespace collisions without replacing receipts;
+every imminent generation is rechecked because UUID5 IDs cannot be reversed.
 
 Before every state-changing command and worker dispatch, the repositories
 verify the event count, sequence and revision chain, last Event, Event result
@@ -74,6 +95,10 @@ completion transaction fails before commit, the same effect ID may be
 delivered again after lease expiry. Exactly-once physical side effects require
 the idempotency contract of the later Gateway/adapter package and are not
 claimed here.
+Database busy after handler execution returns a retry-later delivery report and
+does not call the handler again within that run_once invocation. Fencing a late
+result does not prevent an already-authorized handler from later starting;
+physical execution/cancellation coordination remains a P3 Gateway gate.
 
 ## Consequences
 

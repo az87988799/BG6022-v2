@@ -1,6 +1,6 @@
 # P2 minimal repair — implementation evidence
 
-Status: IN PROGRESS; independent review and user acceptance remain required.
+Status: PATCH VERIFIED; independent review and user acceptance remain required.
 
 ## Historical reads and the approved v4 correction
 
@@ -28,6 +28,31 @@ eight historical cases pass, including both empty-summary cases and rollback
 after hash/integer corruption. A fixed test rejects unexpanded SQL placeholders.
 Locked offline suite after this repair: 223 passed. This is intermediate evidence,
 not the acceptance result for the remaining minimal repairs.
+
+## Final implementation evidence
+
+Implementation: `e12de3e10d4b33df098899e3474ac1fef80138f2`.
+Workflow [33937447424](https://github.com/az87988799/BG6022-v2/actions/runs/33937447424)
+passed all four jobs. Final local locked offline suite: **253 passed, 80.71%**
+branch coverage. Lock, compileall, Ruff/format, build and diff checks passed.
+
+| Commit | Repair |
+|---|---|
+| c55928b | Historical schema-1 reads and approved v4 interpolation/checksum |
+| 6fc94ec | Stable cursor pagination past blocked candidates |
+| 73594a9 | Immutable shared policies and typed worker contention |
+| f58ae3a | External UUID4/internal UUID5 separation and collision detection |
+| 59913b4 | v5 terminal metadata immutability and upgrade validation |
+| e12de3e | Historical diagnostics excluded from handler input |
+
+v5 checksum: `1cdafd5008f195a6ec6063edba9c86f5c974fb106a229511aa379b9b2dd85a11`.
+The original eight historical cases remain; an additional published-main retry
+case checks diagnostic isolation. The pre-v3 unaudited success API did not store
+a success summary; upgrade preserves that fact rather than fabricating a value.
+
+Namespace validation covers observed and imminent generations and runs again
+before each claim. It cannot reverse a UUID5 to discover arbitrary future
+generation preimages. Conflicts are reported with Effect ID, never overwritten.
 
 P2 provides at-least-once delivery and database completion fencing, not physical
 exactly-once execution or a guarantee of no side effect after cancellation.
