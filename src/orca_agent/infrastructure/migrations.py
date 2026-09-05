@@ -1166,6 +1166,46 @@ def _post_apply_v3(connection: sqlite3.Connection) -> None:
     _install_v3_triggers(connection)
 
 
+V5_TERMINAL_METADATA_STATEMENTS = (
+    "DROP TRIGGER outbox_terminal_metadata_immutable",
+    """
+    CREATE TRIGGER outbox_terminal_metadata_immutable
+    BEFORE UPDATE ON outbox
+    WHEN OLD.status IN ('succeeded', 'dead_letter', 'cancelled')
+         AND (
+             NEW.completed_at_utc IS NOT OLD.completed_at_utc
+             OR NEW.completed_by_worker_id IS NOT OLD.completed_by_worker_id
+             OR NEW.terminal_generation IS NOT OLD.terminal_generation
+             OR NEW.audit_event_id IS NOT OLD.audit_event_id
+             OR NEW.result_summary_json IS NOT OLD.result_summary_json
+             OR NEW.result_summary_hash IS NOT OLD.result_summary_hash
+             OR NEW.completion_protocol IS NOT OLD.completion_protocol
+             OR NEW.last_error_code IS NOT OLD.last_error_code
+             OR NEW.last_error_message IS NOT OLD.last_error_message
+             OR NEW.attempt_count IS NOT OLD.attempt_count
+             OR NEW.available_at_utc IS NOT OLD.available_at_utc
+             OR NEW.created_at_utc IS NOT OLD.created_at_utc
+             OR NEW.updated_at_utc IS NOT OLD.updated_at_utc
+         )
+    BEGIN
+        SELECT RAISE(ABORT, 'outbox terminal receipt is immutable');
+    END;
+    """.strip(),
+)
+
+
+def _post_apply_v5(connection: sqlite3.Connection) -> None:
+    """Validate existing projections and identify historical completion collisions."""
+    _post_apply_v4(connection)
+    from .outbox import OutboxRepository
+    from .repositories import RunRepository
+
+    outbox = OutboxRepository(connection)
+    for run_id in RunRepository(connection).list_ids():
+        for record in outbox.list_for_run(run_id):
+            outbox.verify_completion_namespace(record)
+
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
@@ -1191,6 +1231,13 @@ DEFAULT_MIGRATIONS = (
         statements=V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS,
         post_apply=_post_apply_v4,
         post_apply_id="p2-dispatch-permits-atomic-completion-v2",
+    ),
+    Migration(
+        version=5,
+        name="p2_freeze_all_terminal_metadata",
+        statements=V5_TERMINAL_METADATA_STATEMENTS,
+        post_apply=_post_apply_v5,
+        post_apply_id="p2-terminal-metadata-and-namespace-v1",
     ),
 )
 
