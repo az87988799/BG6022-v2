@@ -403,14 +403,17 @@ class ActionRepository:
         now: datetime,
         approval_grant_id: ApprovalGrantId | None = None,
         execution_id: ExecutionId | None = None,
+        expected_state: LedgerState | None = None,
     ) -> StoredAction:
         if not isinstance(state, LedgerState):
             raise ValueError("ledger state must be a LedgerState")
         current = self.get(action_id)
         if current is None:
             raise StateIntegrityError("action ledger row was not found")
+        if expected_state is not None and current.ledger_state is not expected_state:
+            raise StateIntegrityError("action ledger expected state differs")
         allowed = {
-            LedgerState.PLANNED: {LedgerState.APPROVED, LedgerState.CANCELLED},
+            LedgerState.PLANNED: {LedgerState.APPROVED, LedgerState.CANCELLED, LedgerState.FAILED},
             LedgerState.APPROVED: {
                 LedgerState.SUBMITTING,
                 LedgerState.SUBMITTED,
@@ -444,13 +447,15 @@ class ActionRepository:
         cursor = self.connection.execute(
             "UPDATE actions SET ledger_state = ?, "
             "approval_grant_id = COALESCE(?, approval_grant_id), "
-            "execution_id = COALESCE(?, execution_id), updated_at_utc = ? WHERE action_id = ?",
+            "execution_id = COALESCE(?, execution_id), updated_at_utc = ? WHERE action_id = ? "
+            "AND ledger_state = ?",
             (
                 state.value,
                 None if approval_grant_id is None else str(approval_grant_id),
                 None if execution_id is None else str(execution_id),
                 format_utc(now),
                 str(action_id),
+                current.ledger_state.value,
             ),
         )
         if cursor.rowcount != 1:

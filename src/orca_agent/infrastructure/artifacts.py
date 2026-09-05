@@ -7,7 +7,7 @@ import os
 import tempfile
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from orca_agent.application.errors import StateIntegrityError
 from orca_agent.domain.ids import ActionId, ArtifactId, ExecutionId, RunId
@@ -103,9 +103,18 @@ class ArtifactStore:
         return self._safe_path(relative_path)
 
     def _safe_path(self, relative: str | Path) -> Path:
-        candidate = Path(relative)
-        if candidate.is_absolute() or ".." in candidate.parts:
+        text = relative.as_posix() if isinstance(relative, Path) else relative
+        posix = PurePosixPath(text)
+        windows = PureWindowsPath(text)
+        if (
+            posix.is_absolute()
+            or windows.drive
+            or windows.root
+            or ".." in posix.parts
+            or "\\" in text
+        ):
             raise StateIntegrityError("artifact path traversal is not allowed")
+        candidate = Path(posix)
         cursor = self.root
         for part in candidate.parts:
             cursor /= part

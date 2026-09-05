@@ -640,6 +640,8 @@ def test_cli_cancel_and_incomplete_report_are_safe_errors(tmp_path, capsys) -> N
                 "--state-root",
                 str(state_root),
                 "verify-report",
+                "--run",
+                started["run_id"],
                 "--report",
                 str(report_path),
                 "--json",

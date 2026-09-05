@@ -198,6 +198,7 @@ class P3ReportRenderer:
             ):
                 raise StateIntegrityError("report claim is not bound to evidence")
             evidence_artifact = evidence_artifacts[0][1]
+            self.verify_raw_input(uow, snapshot, evidence_artifact)
             report_json_value = {
                 "report_schema": "p3-report/v1",
                 "data_origin": "fake_fixture",
@@ -335,261 +336,273 @@ class P3ReportRenderer:
                 or snapshot.state.phase is not WorkflowPhase.COMPLETED
             ):
                 raise StateIntegrityError("report is not an acknowledged completed result")
-            records = P3RecordRepository(uow.connection)
-            manifest_entry = records.latest(
-                run_id=run_id,
-                record_type="report_manifest",
-                model_type=ReportManifestV1,
-            )
-            claim_entry = records.latest_any(
-                run_id=run_id,
-                record_type="claim",
-                model_type=ValidatedClaim,
-                schema_version=1,
-                engine_version="p1-domain-v1",
-            )
-            assessment_entry = records.latest(
-                run_id=run_id,
-                record_type="assessment",
-                model_type=FixtureScientificAssessment,
-            )
-            action = ActionRepository(uow.connection).get_by_run(run_id)
-            if (
-                manifest_entry is None
-                or claim_entry is None
-                or assessment_entry is None
-                or action is None
-            ):
-                raise StateIntegrityError("report traceability records are incomplete")
-            manifest = manifest_entry[1]
-            claim = claim_entry[1]
-            assessment = assessment_entry[1]
-            fixture = load_water_fixture()
-            if (
-                snapshot.state.report_manifest_id != manifest.report_manifest_id
-                or manifest.run_id != run_id
-                or manifest.action_id != action.action.action_id
-                or manifest.execution_id != snapshot.state.execution_id
-                or manifest.claim_id != claim.claim_id
-                or manifest.evidence_ids != assessment.evidence_ids
-                or assessment.claim_id != claim.claim_id
-                or assessment.action_id != action.action.action_id
-                or assessment.execution_id != manifest.execution_id
-                or not assessment.accepted
-                or not assessment.fixture_verified_only
-                or claim.claim_type.value != "energy"
-                or claim.status.value != "qualified"
-                or claim.value != fixture.energy
-                or claim.unit != fixture.unit
-                or claim.limitations
-                != ("Synthetic fixture only; this is not a real quantum-chemistry calculation.",)
-                or assessment.limitations
-                != ("Synthetic fixture only; no real ORCA execution was performed.",)
-            ):
-                raise StateIntegrityError("report manifest binding is invalid")
-            if (
-                action.run_id != run_id
-                or action.conversation_id != snapshot.state.conversation_id
-                or action.action.action_hash != snapshot.state.action_hash
-                or sha256_hex(action.action.execution_envelope) != snapshot.state.envelope_hash
-                or sha256_hex(action.action.budget) != snapshot.state.budget_hash
-            ):
-                raise StateIntegrityError("report action identity is invalid")
-            artifact_records = ArtifactRecordRepository(uow.connection)
-            markdown_record = artifact_records.get(manifest.markdown_artifact_id)
-            json_record = artifact_records.get(manifest.json_artifact_id)
-            if markdown_record is None or json_record is None:
-                raise StateIntegrityError("report artifacts are missing")
-            _assert_report_artifact_owner(
-                markdown_record, run_id, action.action.action_id, manifest.execution_id
-            )
-            _assert_report_artifact_owner(
-                json_record, run_id, action.action.action_id, manifest.execution_id
-            )
-            markdown_bytes = self.artifacts.read(markdown_record)
-            json_bytes = self.artifacts.read(json_record)
-            if (
-                hashlib.sha256(markdown_bytes).hexdigest() != manifest.markdown_hash
-                or hashlib.sha256(json_bytes).hexdigest() != manifest.json_hash
-            ):
-                raise StateIntegrityError("report artifact hash does not match manifest")
-            stored_report_evidence = EvidenceRepository(uow.connection).get_with_binding(
-                assessment.evidence_ids[0]
-            )
-            if stored_report_evidence is None:
-                raise StateIntegrityError("report evidence is missing")
-            report_evidence_artifact = artifact_records.get(stored_report_evidence.artifact_id)
-            if report_evidence_artifact is None:
-                raise StateIntegrityError("report evidence artifact is missing")
-            accepted_artifacts = set(snapshot.state.accepted_artifact_ids)
-            report_input_artifacts = accepted_artifacts - {
-                manifest.markdown_artifact_id,
-                manifest.json_artifact_id,
-                stored_report_evidence.artifact_id,
-            }
-            if len(report_input_artifacts) != 1:
-                raise StateIntegrityError("report accepted artifact set is invalid")
-            assessment_artifact_id = next(iter(report_input_artifacts))
-            assessment_artifact = artifact_records.get(assessment_artifact_id)
-            if assessment_artifact is None:
-                raise StateIntegrityError("report assessment artifact is missing")
-            _assert_report_artifact_owner(
-                assessment_artifact, run_id, action.action.action_id, manifest.execution_id
-            )
-            if self.artifacts.read(assessment_artifact) != canonical_json_bytes(assessment):
-                raise StateIntegrityError("report assessment artifact is invalid")
-            _assert_report_artifact_owner(
-                report_evidence_artifact,
-                run_id,
-                action.action.action_id,
-                manifest.execution_id,
-            )
-            raw_result = self.artifacts.read(report_evidence_artifact)
-            _verify_report_raw_result(
-                raw_result,
-                action_id=action.action.action_id,
-                action_hash=action.action.action_hash,
-                execution_id=manifest.execution_id,
-            )
-            job = JobRepository(uow.connection).get_by_execution(manifest.execution_id)
-            if (
-                job is None
-                or job.run_id != run_id
-                or job.action_id != action.action.action_id
-                or job.status != "succeeded"
-                or job.raw_result_artifact_id != report_evidence_artifact.artifact_id
-                or job.fixture_id != "water_sp_v1"
-                or job.fixture_version != "1"
-                or job.fixture_hash != fixture.fixture_hash
-                or job.input_hash
-                != sha256_hex(
-                    {
-                        "action_hash": action.action.action_hash,
-                        "execution_id": str(manifest.execution_id),
-                        "fixture_hash": fixture.fixture_hash,
-                    }
-                )
-            ):
-                raise StateIntegrityError("report job binding is invalid")
-            expected_evidence_payload = {
-                "execution_id": str(manifest.execution_id),
-                "fixture_id": "water_sp_v1",
-                "fixture_version": "1",
-                "fixture_hash": fixture.fixture_hash,
-                "energy": fixture.energy,
-                "unit": fixture.unit,
-                "source": fixture.source,
-            }
-            if (
-                stored_report_evidence.record.action_id != action.action.action_id
-                or stored_report_evidence.record.artifact_refs
-                != (report_evidence_artifact.artifact_id,)
-                or dict(stored_report_evidence.record.payload) != expected_evidence_payload
-            ):
-                raise StateIntegrityError("report evidence content is not fixture-bound")
-            try:
-                report_json = json.loads(json_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise StateIntegrityError("report JSON is invalid") from error
-            expected_report_keys = {
-                "report_schema",
-                "data_origin",
-                "real_scientific_result",
-                "backend",
-                "fake_marker",
-                "run_id",
-                "action_id",
-                "execution_id",
-                "action_hash",
-                "envelope_hash",
-                "budget_hash",
-                "fixture",
-                "planner_version",
-                "validator_version",
-                "assessment_version",
-                "renderer_version",
-                "execution_status",
-                "assessment_status",
-                "claim_status",
-                "scientific_result",
-                "claim",
-                "assessment",
-                "evidence",
-                "evidence_artifact",
-                "assessment_artifact_id",
-                "limitations",
-                "integrity",
-            }
-            expected_scientific_result = {
-                "value": claim.value,
-                "unit": claim.unit,
-                "claim_id": str(claim.claim_id),
-                "evidence_id": str(assessment.evidence_ids[0]),
-                "artifact_id": str(report_evidence_artifact.artifact_id),
-                "artifact_hash": report_evidence_artifact.content_hash,
-            }
-            if (
-                not isinstance(report_json, dict)
-                or set(report_json) != expected_report_keys
-                or canonical_json_bytes(report_json) != json_bytes
-                or report_json.get("report_schema") != "p3-report/v1"
-                or report_json.get("fake_marker") != "fake_fixture_only"
-                or report_json.get("data_origin") != "fake_fixture"
-                or report_json.get("real_scientific_result") is not False
-                or report_json.get("backend") != "fake"
-                or report_json.get("run_id") != str(run_id)
-                or report_json.get("action_id") != str(action.action.action_id)
-                or report_json.get("execution_id") != str(manifest.execution_id)
-                or report_json.get("action_hash") != action.action.action_hash
-                or report_json.get("envelope_hash") != snapshot.state.envelope_hash
-                or report_json.get("budget_hash") != snapshot.state.budget_hash
-                or report_json.get("fixture")
-                != {"id": "water_sp_v1", "version": "1", "source": "fake_fixture"}
-                or report_json.get("planner_version") != "p3.water.fixture.planner.v1"
-                or report_json.get("validator_version") != "p3.water.fixture.validator.v1"
-                or report_json.get("assessment_version") != "p3-evidence-v1"
-                or report_json.get("renderer_version") != "p3-renderer-v1"
-                or report_json.get("execution_status") != "succeeded"
-                or report_json.get("assessment_status") != "fixture_verified_only"
-                or report_json.get("claim_status") != claim.status.value
-                or report_json.get("scientific_result") != expected_scientific_result
-                or report_json.get("claim") != claim.model_dump(mode="json")
-                or report_json.get("assessment") != assessment.model_dump(mode="json")
-                or report_json.get("evidence")
-                != [stored_report_evidence.record.model_dump(mode="json")]
-                or report_json.get("evidence_artifact")
-                != {
-                    "artifact_id": str(report_evidence_artifact.artifact_id),
-                    "content_hash": report_evidence_artifact.content_hash,
-                }
-                or report_json.get("assessment_artifact_id") != str(assessment_artifact_id)
-                or report_json.get("limitations") != list(assessment.limitations)
-                or report_json.get("integrity")
-                != {"traceability_verified": True, "artifact_hashes_verified": True}
-            ):
-                raise StateIntegrityError("report JSON content is not the acknowledged model")
-            evidence_repository = EvidenceRepository(uow.connection)
-            for evidence_id in assessment.evidence_ids:
-                stored_evidence = evidence_repository.get_with_binding(evidence_id)
-                if (
-                    stored_evidence is None
-                    or stored_evidence.run_id != run_id
-                    or stored_evidence.action_id != action.action.action_id
-                    or stored_evidence.execution_id != manifest.execution_id
-                ):
-                    raise StateIntegrityError("report evidence binding is invalid")
-                evidence_artifact = artifact_records.get(stored_evidence.artifact_id)
-                if evidence_artifact is None:
-                    raise StateIntegrityError("report evidence artifact is missing")
-                _assert_report_artifact_owner(
-                    evidence_artifact, run_id, action.action.action_id, manifest.execution_id
-                )
-                self.artifacts.read(evidence_artifact)
-                if evidence_artifact.artifact_id != report_evidence_artifact.artifact_id:
-                    raise StateIntegrityError("report manifest is missing evidence artifact")
-            if b"FAKE FIXTURE ONLY" not in markdown_bytes:
-                raise StateIntegrityError("report Markdown fake marker is missing")
+            result = self.verify_in_transaction(uow, snapshot)
             uow.commit()
+            return result
+
+    def verify_in_transaction(self, uow, snapshot):
+        """Verify staged or accepted report bytes against the current verified snapshot."""
+        run_id = snapshot.run_id
+        if snapshot.state.phase not in (WorkflowPhase.REPORT_PENDING, WorkflowPhase.COMPLETED):
+            raise StateIntegrityError("report phase does not allow acceptance")
+        records = P3RecordRepository(uow.connection)
+        manifest_entry = records.latest(
+            run_id=run_id,
+            record_type="report_manifest",
+            model_type=ReportManifestV1,
+        )
+        claim_entry = records.latest_any(
+            run_id=run_id,
+            record_type="claim",
+            model_type=ValidatedClaim,
+            schema_version=1,
+            engine_version="p1-domain-v1",
+        )
+        assessment_entry = records.latest(
+            run_id=run_id,
+            record_type="assessment",
+            model_type=FixtureScientificAssessment,
+        )
+        action = ActionRepository(uow.connection).get_by_run(run_id)
+        if (
+            manifest_entry is None
+            or claim_entry is None
+            or assessment_entry is None
+            or action is None
+        ):
+            raise StateIntegrityError("report traceability records are incomplete")
+        manifest = manifest_entry[1]
+        claim = claim_entry[1]
+        assessment = assessment_entry[1]
+        fixture = load_water_fixture()
+        if (
+            (
+                snapshot.state.phase is WorkflowPhase.COMPLETED
+                and snapshot.state.report_manifest_id != manifest.report_manifest_id
+            )
+            or manifest.run_id != run_id
+            or manifest.action_id != action.action.action_id
+            or manifest.execution_id != snapshot.state.execution_id
+            or manifest.claim_id != claim.claim_id
+            or manifest.evidence_ids != assessment.evidence_ids
+            or assessment.claim_id != claim.claim_id
+            or assessment.action_id != action.action.action_id
+            or assessment.execution_id != manifest.execution_id
+            or not assessment.accepted
+            or not assessment.fixture_verified_only
+            or claim.claim_type.value != "energy"
+            or claim.status.value != "qualified"
+            or claim.value != fixture.energy
+            or claim.unit != fixture.unit
+            or claim.limitations
+            != ("Synthetic fixture only; this is not a real quantum-chemistry calculation.",)
+            or assessment.limitations
+            != ("Synthetic fixture only; no real ORCA execution was performed.",)
+        ):
+            raise StateIntegrityError("report manifest binding is invalid")
+        if (
+            action.run_id != run_id
+            or action.conversation_id != snapshot.state.conversation_id
+            or action.action.action_hash != snapshot.state.action_hash
+            or sha256_hex(action.action.execution_envelope) != snapshot.state.envelope_hash
+            or sha256_hex(action.action.budget) != snapshot.state.budget_hash
+        ):
+            raise StateIntegrityError("report action identity is invalid")
+        artifact_records = ArtifactRecordRepository(uow.connection)
+        markdown_record = artifact_records.get(manifest.markdown_artifact_id)
+        json_record = artifact_records.get(manifest.json_artifact_id)
+        if markdown_record is None or json_record is None:
+            raise StateIntegrityError("report artifacts are missing")
+        _assert_report_artifact_owner(
+            markdown_record, run_id, action.action.action_id, manifest.execution_id
+        )
+        _assert_report_artifact_owner(
+            json_record, run_id, action.action.action_id, manifest.execution_id
+        )
+        markdown_bytes = self.artifacts.read(markdown_record)
+        json_bytes = self.artifacts.read(json_record)
+        if (
+            hashlib.sha256(markdown_bytes).hexdigest() != manifest.markdown_hash
+            or hashlib.sha256(json_bytes).hexdigest() != manifest.json_hash
+        ):
+            raise StateIntegrityError("report artifact hash does not match manifest")
+        stored_report_evidence = EvidenceRepository(uow.connection).get_with_binding(
+            assessment.evidence_ids[0]
+        )
+        if stored_report_evidence is None:
+            raise StateIntegrityError("report evidence is missing")
+        report_evidence_artifact = artifact_records.get(stored_report_evidence.artifact_id)
+        if report_evidence_artifact is None:
+            raise StateIntegrityError("report evidence artifact is missing")
+        accepted_artifacts = set(snapshot.state.accepted_artifact_ids)
+        report_input_artifacts = accepted_artifacts - {
+            manifest.markdown_artifact_id,
+            manifest.json_artifact_id,
+            stored_report_evidence.artifact_id,
+        }
+        if len(report_input_artifacts) != 1:
+            raise StateIntegrityError("report accepted artifact set is invalid")
+        assessment_artifact_id = next(iter(report_input_artifacts))
+        assessment_artifact = artifact_records.get(assessment_artifact_id)
+        if assessment_artifact is None:
+            raise StateIntegrityError("report assessment artifact is missing")
+        _assert_report_artifact_owner(
+            assessment_artifact, run_id, action.action.action_id, manifest.execution_id
+        )
+        if self.artifacts.read(assessment_artifact) != canonical_json_bytes(assessment):
+            raise StateIntegrityError("report assessment artifact is invalid")
+        _assert_report_artifact_owner(
+            report_evidence_artifact,
+            run_id,
+            action.action.action_id,
+            manifest.execution_id,
+        )
+        raw_result = self.artifacts.read(report_evidence_artifact)
+        self.verify_raw_input(uow, snapshot, report_evidence_artifact)
+        _verify_report_raw_result(
+            raw_result,
+            action_id=action.action.action_id,
+            action_hash=action.action.action_hash,
+            execution_id=manifest.execution_id,
+        )
+        job = JobRepository(uow.connection).get_by_execution(manifest.execution_id)
+        if (
+            job is None
+            or job.run_id != run_id
+            or job.action_id != action.action.action_id
+            or job.status != "succeeded"
+            or job.raw_result_artifact_id != report_evidence_artifact.artifact_id
+            or job.fixture_id != "water_sp_v1"
+            or job.fixture_version != "1"
+            or job.fixture_hash != fixture.fixture_hash
+            or job.input_hash
+            != sha256_hex(
+                {
+                    "action_hash": action.action.action_hash,
+                    "execution_id": str(manifest.execution_id),
+                    "fixture_hash": fixture.fixture_hash,
+                }
+            )
+        ):
+            raise StateIntegrityError("report job binding is invalid")
+        expected_evidence_payload = {
+            "execution_id": str(manifest.execution_id),
+            "fixture_id": "water_sp_v1",
+            "fixture_version": "1",
+            "fixture_hash": fixture.fixture_hash,
+            "energy": fixture.energy,
+            "unit": fixture.unit,
+            "source": fixture.source,
+        }
+        if (
+            stored_report_evidence.record.action_id != action.action.action_id
+            or stored_report_evidence.record.artifact_refs
+            != (report_evidence_artifact.artifact_id,)
+            or dict(stored_report_evidence.record.payload) != expected_evidence_payload
+        ):
+            raise StateIntegrityError("report evidence content is not fixture-bound")
+        try:
+            report_json = json.loads(json_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise StateIntegrityError("report JSON is invalid") from error
+        expected_report_keys = {
+            "report_schema",
+            "data_origin",
+            "real_scientific_result",
+            "backend",
+            "fake_marker",
+            "run_id",
+            "action_id",
+            "execution_id",
+            "action_hash",
+            "envelope_hash",
+            "budget_hash",
+            "fixture",
+            "planner_version",
+            "validator_version",
+            "assessment_version",
+            "renderer_version",
+            "execution_status",
+            "assessment_status",
+            "claim_status",
+            "scientific_result",
+            "claim",
+            "assessment",
+            "evidence",
+            "evidence_artifact",
+            "assessment_artifact_id",
+            "limitations",
+            "integrity",
+        }
+        expected_scientific_result = {
+            "value": claim.value,
+            "unit": claim.unit,
+            "claim_id": str(claim.claim_id),
+            "evidence_id": str(assessment.evidence_ids[0]),
+            "artifact_id": str(report_evidence_artifact.artifact_id),
+            "artifact_hash": report_evidence_artifact.content_hash,
+        }
+        if (
+            not isinstance(report_json, dict)
+            or set(report_json) != expected_report_keys
+            or canonical_json_bytes(report_json) != json_bytes
+            or report_json.get("report_schema") != "p3-report/v1"
+            or report_json.get("fake_marker") != "fake_fixture_only"
+            or report_json.get("data_origin") != "fake_fixture"
+            or report_json.get("real_scientific_result") is not False
+            or report_json.get("backend") != "fake"
+            or report_json.get("run_id") != str(run_id)
+            or report_json.get("action_id") != str(action.action.action_id)
+            or report_json.get("execution_id") != str(manifest.execution_id)
+            or report_json.get("action_hash") != action.action.action_hash
+            or report_json.get("envelope_hash") != snapshot.state.envelope_hash
+            or report_json.get("budget_hash") != snapshot.state.budget_hash
+            or report_json.get("fixture")
+            != {"id": "water_sp_v1", "version": "1", "source": "fake_fixture"}
+            or report_json.get("planner_version") != "p3.water.fixture.planner.v1"
+            or report_json.get("validator_version") != "p3.water.fixture.validator.v1"
+            or report_json.get("assessment_version") != "p3-evidence-v1"
+            or report_json.get("renderer_version") != "p3-renderer-v1"
+            or report_json.get("execution_status") != "succeeded"
+            or report_json.get("assessment_status") != "fixture_verified_only"
+            or report_json.get("claim_status") != claim.status.value
+            or report_json.get("scientific_result") != expected_scientific_result
+            or report_json.get("claim") != claim.model_dump(mode="json")
+            or report_json.get("assessment") != assessment.model_dump(mode="json")
+            or report_json.get("evidence")
+            != [stored_report_evidence.record.model_dump(mode="json")]
+            or report_json.get("evidence_artifact")
+            != {
+                "artifact_id": str(report_evidence_artifact.artifact_id),
+                "content_hash": report_evidence_artifact.content_hash,
+            }
+            or report_json.get("assessment_artifact_id") != str(assessment_artifact_id)
+            or report_json.get("limitations") != list(assessment.limitations)
+            or report_json.get("integrity")
+            != {"traceability_verified": True, "artifact_hashes_verified": True}
+        ):
+            raise StateIntegrityError("report JSON content is not the acknowledged model")
+        evidence_repository = EvidenceRepository(uow.connection)
+        for evidence_id in assessment.evidence_ids:
+            stored_evidence = evidence_repository.get_with_binding(evidence_id)
+            if (
+                stored_evidence is None
+                or stored_evidence.run_id != run_id
+                or stored_evidence.action_id != action.action.action_id
+                or stored_evidence.execution_id != manifest.execution_id
+            ):
+                raise StateIntegrityError("report evidence binding is invalid")
+            evidence_artifact = artifact_records.get(stored_evidence.artifact_id)
+            if evidence_artifact is None:
+                raise StateIntegrityError("report evidence artifact is missing")
+            _assert_report_artifact_owner(
+                evidence_artifact, run_id, action.action.action_id, manifest.execution_id
+            )
+            self.artifacts.read(evidence_artifact)
+            if evidence_artifact.artifact_id != report_evidence_artifact.artifact_id:
+                raise StateIntegrityError("report manifest is missing evidence artifact")
+        if b"FAKE FIXTURE ONLY" not in markdown_bytes:
+            raise StateIntegrityError("report Markdown fake marker is missing")
         return {
             "valid": True,
             "run_id": str(run_id),
@@ -597,6 +610,32 @@ class P3ReportRenderer:
             "markdown_artifact_id": str(manifest.markdown_artifact_id),
             "json_artifact_id": str(manifest.json_artifact_id),
         }
+
+    def verify_raw_input(self, uow, snapshot, artifact):
+        """Read the raw bytes bound to the accepted job and workflow, in the caller UoW."""
+        state = snapshot.state
+        job = JobRepository(uow.connection).get_by_execution(state.execution_id)
+        fixture = load_water_fixture()
+        if (
+            job is None
+            or job.job_id != state.job_id
+            or job.run_id != snapshot.run_id
+            or job.action_id != state.action_id
+            or job.status != "succeeded"
+            or job.raw_result_artifact_id != artifact.artifact_id
+            or artifact.artifact_id not in state.accepted_artifact_ids
+            or job.fixture_hash != fixture.fixture_hash
+        ):
+            raise StateIntegrityError("report raw input is not the accepted job")
+        _assert_report_artifact_owner(
+            artifact, snapshot.run_id, state.action_id, state.execution_id
+        )
+        _verify_report_raw_result(
+            self.artifacts.read(artifact),
+            action_id=state.action_id,
+            action_hash=state.action_hash,
+            execution_id=state.execution_id,
+        )
 
     @staticmethod
     def _markdown(

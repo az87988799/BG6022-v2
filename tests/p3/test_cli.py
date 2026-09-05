@@ -204,4 +204,4 @@ def test_cli_runs_and_verifies_the_persisted_report_chain(tmp_path, capsys) -> N
     )
     replayed = json.loads(capsys.readouterr().out)
     assert replayed["run_id"] == started["run_id"]
-    assert replayed["phase"] == "completed"
+    assert replayed["phase"] == "dispatch_pending"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
 
@@ -1097,6 +1097,16 @@ class OutboxRepository:
         except Exception:
             _rollback(self.connection)
             raise
+
+    def validate_handler_permit(self, *, permit: DispatchPermit, now: datetime) -> OutboxRecord:
+        """Restore only Worker-stripped diagnostics before strict authorization validation."""
+        if not isinstance(permit, DispatchPermit):
+            raise StateIntegrityError("handler dispatch permit is invalid")
+        current = self.get_required(permit.effect.effect_id)
+        sanitized = replace(current, last_error_code=None, last_error_message=None)
+        if permit.effect not in (current, sanitized):
+            raise StateIntegrityError("handler effect differs from authoritative outbox")
+        return self.validate_dispatch_permit(permit=replace(permit, effect=current), now=now)
 
     def validate_dispatch_permit(
         self,
