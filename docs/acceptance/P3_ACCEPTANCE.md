@@ -1,6 +1,6 @@
 # V2-P3 Acceptance
 
-- Status: REPAIR_CI_VERIFIED — repair merge, main CI and Owner acceptance pending.
+- Status: PASS
 - Scope: offline Water `water_sp_v1` FakeBackend only.
 - Original implementation: `05825373b3c279322a9a0539484d2e247d83cad0`.
 - Original publication: already present on main at `e13e8db0f1644a7267f7b29e0c408cc0bf8e002b`.
@@ -9,8 +9,9 @@
 - Reviewed repair implementation: `6bdfd90e0cbe556791ae912d1b3090d90ed1c48c`.
 - Repair PR: [#4](https://github.com/az87988799/BG6022-v2/pull/4).
 - Implementation verification CI: [33968501146](https://github.com/az87988799/BG6022-v2/actions/runs/33968501146), four jobs green, tested head `447466888c64dd8313279016448de33e6db2ee7b`; Ubuntu branch coverage 80.35%, 315 tests passed.
-- Repair merge SHA / post-merge main CI: pending.
-- Owner acceptance of repaired P3: pending.
+- Repair merge SHA: `aa49f2119f1e4d7e9b9ee4b6cf94380f3c6336a8`.
+- Post-merge main CI: [33980786466](https://github.com/az87988799/BG6022-v2/actions/runs/33980786466), four jobs green, head SHA `aa49f2119f1e4d7e9b9ee4b6cf94380f3c6336a8`.
+- Owner acceptance: PASS — single-maintainer Owner self-acceptance on 2026-09-06.
 
 The previous implementation SHA was an invalid concatenation. The original
 implementation and the repair publication are recorded separately above;
@@ -52,12 +53,13 @@ Environment: Windows 11 (10.0.26200), Python 3.14.6, uv 0.12.9.
 
 `-AutoApprove` only approves the temporary fake workflow, not this release.
 
-## Remaining acceptance and limitations
+## Final acceptance and limitations
 
 Single-maintainer Owner acceptance is permitted. Independent GitHub Approval
-is waived; no synthetic Review or Approval is claimed. PR CI has passed for
-the implementation above. The repair must still merge, pass CI for the actual main merge SHA, and receive explicit
-Owner acceptance before final P3 PASS and P4 entry.
+is waived; no synthetic Review or Approval is claimed. PR CI passed for the
+implementation above, the repair was merged, and the actual main merge SHA
+passed all four post-merge CI jobs. P3 is accepted as PASS; P4 may begin from
+the recorded main merge SHA after this closeout.
 
 An unknown execution retains SUBMITTING; verified submitted facts are also
 preserved on workflow failure. The derived
