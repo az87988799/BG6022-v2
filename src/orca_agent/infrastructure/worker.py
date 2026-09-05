@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -169,7 +169,17 @@ class OutboxWorker:
                 continue
 
             try:
-                normalized = _normalize_handler_result(self.handler(permit))
+                # Historical diagnostics are internal read data, not handler input.
+                # Keep the original authoritative permit for fenced completion.
+                handler_view = replace(
+                    permit,
+                    effect=replace(
+                        permit.effect,
+                        last_error_code=None,
+                        last_error_message=None,
+                    ),
+                )
+                normalized = _normalize_handler_result(self.handler(handler_view))
             except Exception:
                 normalized = HandlerResult(
                     success=False,
