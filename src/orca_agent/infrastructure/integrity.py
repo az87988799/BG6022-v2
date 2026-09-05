@@ -11,7 +11,7 @@ from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import effect_spec_hash, sha256_hex
 from orca_agent.domain.ids import EffectId, EventId, InterruptId
 from orca_agent.orchestration.events import KernelEvent
-from orca_agent.orchestration.reducer import reduce_event
+from orca_agent.orchestration.schema1_read import reduce_event
 from orca_agent.orchestration.state import KernelState, RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
 

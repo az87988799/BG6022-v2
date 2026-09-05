@@ -12,8 +12,8 @@ from orca_agent.domain.ids import EventId, RunId
 from orca_agent.domain.json_types import thaw_json
 
 from .events import KernelEvent
-from .reducer import reduce_event
 from .result_contract import expected_application_result
+from .schema1_read import reduce_event
 from .state import KernelState
 
 

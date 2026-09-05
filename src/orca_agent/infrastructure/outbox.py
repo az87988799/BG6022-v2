@@ -43,6 +43,7 @@ from orca_agent.orchestration.effect_receipts import (
 )
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import EventType, KernelEvent
+from orca_agent.orchestration.schema1_read import read_error_text
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
 from .clock import format_utc, parse_utc
@@ -87,7 +88,7 @@ class OutboxRecord:
     completed_by_worker_id: WorkerId | None
     terminal_generation: int | None
     audit_event_id: EventId | None
-    result_summary: EffectSuccessReceiptV1 | None
+    result_summary: EffectSuccessReceiptV1 | FrozenJsonObject | None
     result_summary_hash: str | None
     completion_protocol: int
     last_error_code: str | None
@@ -186,14 +187,14 @@ class OutboxRepository:
             completed = None if row[19] is None else parse_utc(str(row[19]))
             completed_by = None if row[20] is None else WorkerId(str(row[20]))
             audit_event_id = None if row[22] is None else EventId(str(row[22]))
-            result_summary: EffectSuccessReceiptV1 | None = None
+            result_summary: FrozenJsonObject | None = None
             result_summary_hash = None if row[24] is None else str(row[24])
             if row[23] is not None:
                 raw_summary = json_value(str(row[23]), what="outbox result summary")
-                result_summary = parse_effect_success_receipt(raw_summary)
+                result_summary = freeze_json_object(raw_summary)
                 if result_summary_hash is None:
                     raise StateIntegrityError("outbox result summary hash is missing")
-                if json_text(freeze_json_object(receipt_json(result_summary))) != str(row[23]):
+                if json_text(result_summary) != str(row[23]):
                     raise StateIntegrityError("outbox result summary is not canonical JSON")
                 verify_sha256(result_summary, result_summary_hash)
             elif result_summary_hash is not None:
@@ -292,9 +293,9 @@ class OutboxRepository:
                 payload=payload,
                 payload_hash=payload_hash,
             )
-            last_error_code = None if row[26] is None else _safe_error_text(row[26], "error_code")
+            last_error_code = None if row[26] is None else read_error_text(row[26], "error_code")
             last_error_message = (
-                None if row[27] is None else _safe_error_text(row[27], "error_message")
+                None if row[27] is None else read_error_text(row[27], "error_message")
             )
             if status is OutboxStatus.DEAD_LETTER and (
                 last_error_code is None or last_error_message is None
@@ -308,13 +309,6 @@ class OutboxRepository:
                     or last_error_message != "The run is terminal; the effect was not dispatched."
                 ):
                     raise StateIntegrityError("cancelled effect has an invalid cancellation reason")
-            elif last_error_code is not None:
-                try:
-                    error_code = HandlerErrorCode(last_error_code)
-                except ValueError as error:
-                    raise StateIntegrityError("outbox error code is not allowlisted") from error
-                if last_error_message != handler_error_message(error_code):
-                    raise StateIntegrityError("outbox error message is not fixed for its code")
             record = OutboxRecord(
                 effect_id=effect_id,
                 run_id=run_id,
@@ -365,9 +359,9 @@ class OutboxRepository:
         """Read a v3 row without applying v4-only receipt semantics."""
 
         try:
-            effect_index = int(row[3])
-            schema_version = int(row[6])
-            attempt_count = int(row[12])
+            effect_index = stored_int(row[3], what="outbox effect_index", minimum=0)
+            schema_version = stored_int(row[6], what="outbox schema_version", minimum=1)
+            attempt_count = stored_int(row[12], what="outbox attempt_count", minimum=0)
             effect_id = EffectId(str(row[0]))
             run_id = RunId(str(row[1]))
             source_event_id = EventId(str(row[2]))
@@ -391,7 +385,11 @@ class OutboxRepository:
             elif row[21] is not None:
                 raise StateIntegrityError("stored outbox result summary is missing")
             completed_by = None if row[17] is None else WorkerId(str(row[17]))
-            terminal_generation = None if row[18] is None else int(row[18])
+            terminal_generation = (
+                None
+                if row[18] is None
+                else stored_int(row[18], what="outbox terminal_generation", minimum=0)
+            )
             audit_event_id = None if row[19] is None else EventId(str(row[19]))
             record = OutboxRecord(
                 effect_id=effect_id,
@@ -417,7 +415,7 @@ class OutboxRepository:
                 completed_by_worker_id=completed_by,
                 terminal_generation=terminal_generation,
                 audit_event_id=audit_event_id,
-                result_summary=raw_summary,  # type: ignore[arg-type]
+                result_summary=raw_summary,
                 result_summary_hash=None if row[21] is None else str(row[21]),
                 completion_protocol=3,
                 last_error_code=None if row[22] is None else str(row[22]),
@@ -451,6 +449,7 @@ class OutboxRepository:
                 payload=payload,
                 payload_hash=payload_hash,
             )
+            self._verify_audit_event(record)
             return record
         except StateIntegrityError:
             raise
@@ -530,10 +529,20 @@ class OutboxRepository:
                 raise StateIntegrityError("success receipt has an invalid event type")
             raw_summary = payload.get("result_summary")
             try:
-                summary = parse_effect_success_receipt(raw_summary)
+                summary = freeze_json_object(raw_summary)
             except ValueError as error:
                 raise StateIntegrityError("success receipt summary is invalid") from error
-            if record.result_summary != summary:
+            # Published v4 rewrote exactly {} to this empty receipt. No other
+            # mismatch is a compatibility case; both stored hashes are checked.
+            from .migrations import _V4_LEGACY_EMPTY_RECEIPT_JSON
+
+            converted_empty = (
+                self._v4
+                and summary == freeze_json_object({})
+                and record.result_summary
+                == freeze_json_object(json.loads(_V4_LEGACY_EMPTY_RECEIPT_JSON))
+            )
+            if record.result_summary != summary and not converted_empty:
                 raise StateIntegrityError("success receipt summary does not match outbox")
         elif record.status is OutboxStatus.DEAD_LETTER:
             if event.event_type is not EventType.EFFECT_DEAD_LETTERED:

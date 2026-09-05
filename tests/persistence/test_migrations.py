@@ -152,11 +152,20 @@ def test_default_migration_checksum_is_stable() -> None:
 
 
 def test_historical_migration_checksums_are_frozen() -> None:
-    assert tuple(migration.checksum for migration in DEFAULT_MIGRATIONS[:3]) == (
+    assert tuple(migration.checksum for migration in DEFAULT_MIGRATIONS[:4]) == (
         "6f1ff16b97b9e45c286097b1b8de8adeef5ac483c3e08bb02793a156943c9463",
         "3df844dc355db2dc9e8c95e96678233397bf947387f2bc74d358a574fd161a42",
         "21353d3f1dd37b5237b588056457cde33bd6138849266328bd08033a391dc998",
+        "36ad3bff16d21bdaca3f56fb6b545147e6deb008adb67cabea5a6e02e5ed8eab",
     )
+
+
+def test_v4_sql_has_no_unexpanded_receipt_placeholders() -> None:
+    migration = DEFAULT_MIGRATIONS[3]
+    assert migration.post_apply_id == "p2-dispatch-permits-atomic-completion-v2"
+    sql = "\n".join(migration.statements)
+    assert "{_V4_LEGACY_EMPTY_RECEIPT_JSON}" not in sql
+    assert "{_V4_LEGACY_EMPTY_RECEIPT_HASH}" not in sql
 
 
 def test_post_apply_identity_is_part_of_new_migration_checksum() -> None:

@@ -636,7 +636,7 @@ V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS = (
         )
     )
     """.strip(),
-    """
+    f"""
     INSERT INTO outbox(
         effect_id, run_id, source_event_id, effect_index, effect_type, effect_class,
         schema_version, engine_version, payload_json, payload_hash, spec_hash, status,
@@ -653,12 +653,12 @@ V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS = (
         NULL, NULL, NULL, completed_at_utc, completed_by_worker_id, terminal_generation,
         audit_event_id,
         CASE
-            WHEN status = 'succeeded' AND result_summary_json = '{}'
+            WHEN status = 'succeeded' AND result_summary_json = '{{}}'
             THEN '{_V4_LEGACY_EMPTY_RECEIPT_JSON}'
             ELSE result_summary_json
         END,
         CASE
-            WHEN status = 'succeeded' AND result_summary_json = '{}'
+            WHEN status = 'succeeded' AND result_summary_json = '{{}}'
             THEN '{_V4_LEGACY_EMPTY_RECEIPT_HASH}'
             ELSE result_summary_hash
         END,
@@ -1190,7 +1190,7 @@ DEFAULT_MIGRATIONS = (
         name="p2_dispatch_permits_atomic_completion_and_command_receipts",
         statements=V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS,
         post_apply=_post_apply_v4,
-        post_apply_id="p2-dispatch-permits-atomic-completion-v1",
+        post_apply_id="p2-dispatch-permits-atomic-completion-v2",
     ),
 )
 

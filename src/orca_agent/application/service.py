@@ -32,7 +32,7 @@ from orca_agent.application.errors import (
 from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import GENESIS_EVENT_HASH
 from orca_agent.domain.ids import EventId, InterruptId, new_id
-from orca_agent.domain.json_types import JsonObject, thaw_json
+from orca_agent.domain.json_types import JsonObject, freeze_json_object, thaw_json
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
 from orca_agent.infrastructure.command_receipts import CommandBindingKind, CommandReceipt
 from orca_agent.infrastructure.outbox import OutboxRecord, OutboxStatus
@@ -453,7 +453,9 @@ class KernelApplicationService:
                 effect_id=command.effect_id,
                 expected_status=OutboxStatus.SUCCEEDED,
             )
-            if effect.result_summary != command.result_summary:
+            if effect.result_summary != freeze_json_object(
+                command.result_summary.model_dump(mode="json")
+            ):
                 raise EffectAuditConflictError("success audit conflicts with persisted receipt")
             event_type = EventType.EFFECT_SUCCEEDED
             payload = {
@@ -564,7 +566,9 @@ class KernelApplicationService:
         if audit_event is None or audit_event.run_id != command.run_id:
             raise StateIntegrityError("effect audit event is missing or belongs to another run")
         if isinstance(command, RecordEffectSucceeded):
-            if effect.result_summary != command.result_summary:
+            if effect.result_summary != freeze_json_object(
+                command.result_summary.model_dump(mode="json")
+            ):
                 raise EffectAuditConflictError("success audit conflicts with persisted receipt")
         elif (
             effect.last_error_code != command.error_code
