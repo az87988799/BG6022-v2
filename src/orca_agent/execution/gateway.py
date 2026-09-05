@@ -119,6 +119,7 @@ class FakeExecutionGateway:
             ):
                 raise StateIntegrityError("fake effect fixture or workflow version is invalid")
             action, approval, intent, fixture = self._load_binding(
+                permit=permit,
                 run_id=run_id,
                 effect_id=EffectId(str(effect.effect_id)),
                 source_event_id=effect.source_event_id,
@@ -133,6 +134,7 @@ class FakeExecutionGateway:
             )
             result = self.backend.submit_or_get(intent=intent, action=action, fixture=fixture)
             job = self._persist_result(
+                permit=permit,
                 run_id=run_id,
                 action=action,
                 approval=approval,
@@ -151,6 +153,7 @@ class FakeExecutionGateway:
     def _load_binding(
         self,
         *,
+        permit,
         run_id: RunId,
         effect_id: EffectId,
         source_event_id: EventId,
@@ -167,6 +170,7 @@ class FakeExecutionGateway:
             uow.begin()
             if any(item is None for item in (uow.runs, uow.events, uow.interrupts, uow.outbox)):
                 raise StateIntegrityError("fake gateway kernel repositories are unavailable")
+            uow.outbox.validate_handler_permit(permit=permit, now=self.clock.now_utc())
             snapshot = uow.runs.get_verified(
                 run_id,
                 uow.events,
@@ -225,7 +229,10 @@ class FakeExecutionGateway:
             if approval_entry is None or approval_entry[1].approval_grant_id != approval_id:
                 raise StateIntegrityError("approval grant is missing")
             approval = approval_entry[1]
-            if self.clock.now_utc() >= approval.expires_at_utc:
+            if (
+                stored.ledger_state is LedgerState.APPROVED
+                and self.clock.now_utc() >= approval.expires_at_utc
+            ):
                 raise StateIntegrityError("approval grant has expired")
             if (
                 approval.run_id != run_id
@@ -244,13 +251,13 @@ class FakeExecutionGateway:
                 LedgerState.APPROVED,
                 LedgerState.SUBMITTING,
                 LedgerState.SUBMITTED,
-                LedgerState.SUCCEEDED,
             ):
                 raise StateIntegrityError("action is not executable")
             if stored.ledger_state is LedgerState.APPROVED:
                 actions.update_ledger(
                     action_id=action_id,
                     state=LedgerState.SUBMITTING,
+                    expected_state=LedgerState.APPROVED,
                     now=self.clock.now_utc(),
                 )
             intent = ExecutionIntent.create(
@@ -290,6 +297,7 @@ class FakeExecutionGateway:
     def _persist_result(
         self,
         *,
+        permit,
         run_id: RunId,
         action: ValidatedAction,
         approval: ApprovalGrantV1,
@@ -300,6 +308,24 @@ class FakeExecutionGateway:
     ) -> FakeJobResult:
         with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
             uow.begin()
+            uow.outbox.validate_handler_permit(permit=permit, now=self.clock.now_utc())
+            snapshot = uow.runs.get_verified(
+                run_id,
+                uow.events,
+                interrupts=uow.interrupts,
+                outbox=uow.outbox,
+            )
+            if (
+                not isinstance(snapshot.state, P3WorkflowState)
+                or snapshot.state.phase is not WorkflowPhase.DISPATCH_PENDING
+                or snapshot.state.dispatch_effect_id != permit.effect.effect_id
+                or snapshot.state.action_id != action.action_id
+                or snapshot.state.action_hash != action.action_hash
+                or snapshot.state.approval_grant_id != approval.approval_grant_id
+                or snapshot.state.execution_id != intent.execution_id
+                or source_event_id != permit.effect.source_event_id
+            ):
+                raise StateIntegrityError("result is no longer the current dispatch")
             actions = ActionRepository(uow.connection)
             stored = actions.get(action.action_id)
             if (
@@ -308,6 +334,9 @@ class FakeExecutionGateway:
                 or stored.conversation_id != approval.conversation_id
                 or stored.approval_grant_id != approval.approval_grant_id
                 or stored.execution_id != intent.execution_id
+                or stored.action != action
+                or stored.idempotency_key != intent.idempotency_key
+                or stored.ledger_state not in (LedgerState.SUBMITTING, LedgerState.SUBMITTED)
             ):
                 raise StateIntegrityError("action disappeared before result persistence")
             expected_input_hash = sha256_hex(
@@ -426,6 +455,7 @@ class FakeExecutionGateway:
             actions.update_ledger(
                 action_id=action.action_id,
                 state=LedgerState.SUBMITTED,
+                expected_state=LedgerState.SUBMITTING,
                 now=self.clock.now_utc(),
             )
             P3RecordRepository(uow.connection).append(

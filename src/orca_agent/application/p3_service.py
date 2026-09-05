@@ -114,6 +114,7 @@ class P3RunView(P3Model):
     action: ValidatedAction
     ledger_state: LedgerState
     outbox: tuple[dict[str, object], ...]
+    diagnostics: tuple[str, ...] = ()
 
 
 class P3ApplicationService:
@@ -562,6 +563,14 @@ class P3ApplicationService:
                     raise InvalidTransitionError("conversation does not own the workflow")
                 if uow.outbox.has_dispatching_effect(command.run_id):
                     raise EffectInFlightError("cancellation is blocked during dispatch")
+                action = ActionRepository(uow.connection).get_by_run(command.run_id)
+                if action is None:
+                    raise StateIntegrityError("cancellation action is missing")
+                if action.ledger_state is LedgerState.SUBMITTING or (
+                    action.ledger_state is LedgerState.SUBMITTED
+                    and snapshot.state.phase is WorkflowPhase.DISPATCH_PENDING
+                ):
+                    raise EffectInFlightError("execution submission requires reconciliation")
                 result, transition, event = self._persist_p3_event(
                     uow=uow,
                     current=snapshot,
@@ -623,6 +632,16 @@ class P3ApplicationService:
                 state=snapshot.state,
                 action=action.action,
                 ledger_state=action.ledger_state,
+                diagnostics=(
+                    ("execution_reconciliation_required",)
+                    if action.ledger_state is LedgerState.SUBMITTING
+                    or (
+                        action.ledger_state is LedgerState.SUBMITTED
+                        and snapshot.state.phase
+                        in (WorkflowPhase.DISPATCH_PENDING, WorkflowPhase.FAILED)
+                    )
+                    else ()
+                ),
                 outbox=tuple(
                     {
                         "effect_id": str(item.effect_id),
@@ -807,6 +826,8 @@ class P3ApplicationService:
             if action is None:
                 raise StateIntegrityError("P3 action is missing during completion")
             if not completion.success:
+                if action.ledger_state in (LedgerState.SUBMITTING, LedgerState.SUBMITTED):
+                    return
                 next_ledger = LedgerState.FAILED
             elif permit.effect.effect_type == "internal.p3.render_report":
                 next_ledger = LedgerState.SUCCEEDED
