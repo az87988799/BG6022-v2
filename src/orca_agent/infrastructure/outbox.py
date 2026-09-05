@@ -751,55 +751,64 @@ class OutboxRepository:
                 )
                 for run_id in runs.list_ids()
             }
-            rows = self.connection.execute(
-                f"{self._select_sql()} WHERE "
-                "(status = 'pending' AND available_at_utc <= ?) "
-                "OR (status IN ('leased', 'dispatching') AND lease_expires_at_utc <= ?) "
-                "ORDER BY available_at_utc, created_at_utc, effect_id LIMIT ?",
-                (now_text, now_text, limit),
-            ).fetchall()
             claimed_ids: list[EffectId] = []
-            for row in rows:
-                record = self._load(row)
-                snapshot = snapshots.get(record.run_id)
-                if snapshot is None:
-                    raise StateIntegrityError("outbox effect references an unknown run")
-                decision = evaluate_dispatch(snapshot.state, record, registry)
-                if decision is DispatchDecision.CANCEL:
-                    if record.status is OutboxStatus.PENDING or (
-                        record.status is OutboxStatus.LEASED
-                        and record.lease_expires_at_utc is not None
-                        and record.lease_expires_at_utc <= now
-                    ):
-                        self._cancel_effect(record.effect_id, now_text=now_text)
-                    continue
-                if decision is DispatchDecision.BLOCK:
-                    continue
-                existing_dispatch = self.connection.execute(
-                    "SELECT effect_id FROM outbox WHERE run_id = ? AND status = 'dispatching' "
-                    "AND effect_id <> ?",
-                    (str(record.run_id), str(record.effect_id)),
-                ).fetchone()
-                if existing_dispatch is not None:
-                    continue
-                cursor = self.connection.execute(
-                    "UPDATE outbox SET status = 'leased', lease_owner = ?, "
-                    "lease_expires_at_utc = ?, attempt_count = attempt_count + 1, "
-                    "dispatch_authorized_at_utc = NULL, dispatch_run_revision = NULL, "
-                    "dispatch_policy_version = NULL, updated_at_utc = ? WHERE effect_id = ? AND "
+            after = ("", "", "")
+            while len(claimed_ids) < limit:
+                rows = self.connection.execute(
+                    f"{self._select_sql()} WHERE "
                     "((status = 'pending' AND available_at_utc <= ?) "
-                    "OR (status IN ('leased', 'dispatching') AND lease_expires_at_utc <= ?))",
-                    (
-                        str(owner),
-                        lease_expires_text,
-                        now_text,
-                        str(record.effect_id),
-                        now_text,
-                        now_text,
-                    ),
-                )
-                if cursor.rowcount == 1:
-                    claimed_ids.append(record.effect_id)
+                    "OR (status IN ('leased', 'dispatching') AND lease_expires_at_utc <= ?)) "
+                    "AND (available_at_utc, created_at_utc, effect_id) > (?, ?, ?) "
+                    "ORDER BY available_at_utc, created_at_utc, effect_id LIMIT 64",
+                    (now_text, now_text, *after),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    after = (str(row[13]), str(row[28]), str(row[0]))
+                    record = self._load(row)
+                    snapshot = snapshots.get(record.run_id)
+                    if snapshot is None:
+                        raise StateIntegrityError("outbox effect references an unknown run")
+                    decision = evaluate_dispatch(snapshot.state, record, registry)
+                    if decision is DispatchDecision.CANCEL:
+                        if record.status is OutboxStatus.PENDING or (
+                            record.status is OutboxStatus.LEASED
+                            and record.lease_expires_at_utc is not None
+                            and record.lease_expires_at_utc <= now
+                        ):
+                            self._cancel_effect(record.effect_id, now_text=now_text)
+                        continue
+                    if decision is DispatchDecision.BLOCK:
+                        continue
+                    existing_dispatch = self.connection.execute(
+                        "SELECT effect_id FROM outbox WHERE run_id = ? AND status = 'dispatching' "
+                        "AND effect_id <> ?",
+                        (str(record.run_id), str(record.effect_id)),
+                    ).fetchone()
+                    if existing_dispatch is not None:
+                        continue
+                    cursor = self.connection.execute(
+                        "UPDATE outbox SET status = 'leased', lease_owner = ?, "
+                        "lease_expires_at_utc = ?, attempt_count = attempt_count + 1, "
+                        "dispatch_authorized_at_utc = NULL, dispatch_run_revision = NULL, "
+                        "dispatch_policy_version = NULL, updated_at_utc = ? "
+                        "WHERE effect_id = ? AND "
+                        "((status = 'pending' AND available_at_utc <= ?) "
+                        "OR (status IN ('leased', 'dispatching') AND lease_expires_at_utc <= ?))",
+                        (
+                            str(owner),
+                            lease_expires_text,
+                            now_text,
+                            str(record.effect_id),
+                            now_text,
+                            now_text,
+                        ),
+                    )
+                    if cursor.rowcount == 1:
+                        claimed_ids.append(record.effect_id)
+                        if len(claimed_ids) == limit:
+                            break
             records = tuple(self.get(effect_id) for effect_id in claimed_ids)
             if any(record is None for record in records):
                 raise StateIntegrityError("claimed effect disappeared")
