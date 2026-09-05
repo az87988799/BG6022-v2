@@ -1,75 +1,66 @@
 # V2-P3 Acceptance
 
-- Status: TECHNICALLY_VERIFIED
-- Branch: `codex/v2-p3-fake-vertical-slice`
-- P3 implementation base: `5d899d4a03bc4600115f4a47c26f8544b9324bcd`
-- Reviewed implementation commit: `0582537d0a5b19282433a45560208b1351906fda`
-- P2 implementation: `eaf48277c106ec4486cad1785bff1de8e779a887`
-- P2 merge: PR #3, merge commit `5d899d4a03bc4600115f4a47c26f8544b9324bcd`
-- P2 main CI: [33952574495](https://github.com/az87988799/BG6022-v2/actions/runs/33952574495), four jobs green
-- P2 governance: single-maintainer owner acceptance; independent GitHub review waived and not fabricated
-- P3 PR: pending
-- P3 review: Owner self-acceptance; independent GitHub approval waived and not fabricated
-- P3 merge: pending
-- P3 post-merge main CI: pending
-- P3 Owner acceptance: pending
-- P3 scope: offline Water `water_sp_v1` FakeBackend vertical slice only
-- ORCA / LLM / PubChem / RDKit / network business calls: NOT RUN — out of P3 scope
+- Status: LOCAL_REPAIR_VERIFIED — PR CI, repair merge, main CI and Owner acceptance pending.
+- Scope: offline Water `water_sp_v1` FakeBackend only.
+- Original implementation: `05825373b3c279322a9a0539484d2e247d83cad0`.
+- Original publication: already present on main at `e13e8db0f1644a7267f7b29e0c408cc0bf8e002b`.
+- Original main CI: [33966056353](https://github.com/az87988799/BG6022-v2/actions/runs/33966056353), FAILURE; the former blanket technical-pass statement is withdrawn.
+- Repair branch: `codex/v2-p3-minimal-fix`.
+- Reviewed repair implementation: `6bdfd90e0cbe556791ae912d1b3090d90ed1c48c`.
+- Repair PR / CI: pending.
+- Repair merge SHA / post-merge main CI: pending.
+- Owner acceptance of repaired P3: pending.
 
-## P3-0 baseline
+The previous implementation SHA was an invalid concatenation. The original
+implementation and the repair publication are recorded separately above;
+this document does not refer to its own HEAD as the reviewed implementation.
 
-P3 reuses the P2 runs/events/outbox/interrupts/command-receipt kernel and its
-transaction boundaries. P2 schema versions, engine rules, migrations v1-v5 and
-policy v1/v2 remain historical contracts. P3 adds explicit workflow schema 2,
-engine `p3-water-v1`, policy v3 and migration v6; it does not globally change
-the P1 domain schema constant or rewrite old records.
+## Repair evidence
 
-The reviewed implementation adds only the fixed Water planning, validation,
-exact approval, persistent fake execution, artifact/evidence/claim/report path
-and thin CLI required by the approved P3 plan. Real ORCA execution, external
-identity services, network retrieval and active legacy-state migration remain
-outside scope.
+M1–M4 are implemented using the existing Worker, outbox, event replay,
+command receipts, UoW and ArtifactStore. No table, column or migration was
+added. Migrations v1–v6, their checksums, historical policies, engine/schema
+identities and the existing CI matrix are unchanged.
 
-## Interface gap recorded at P3-0
+| Gate | Regression evidence |
+| --- | --- |
+| T01 portable paths | Seven invalid POSIX/Windows path forms plus existing artifact put/read tests |
+| T02–T04 permit fencing | Reclaimed generation blocked before backend; reclaim during backend blocks old result write; diagnosed retry recovers through sanitized Handler permit |
+| T05–T08 recovery | Unknown submission blocks cancel; both concurrent cancel/submit transaction winners; expired grant permits recovery of original execution, but not first submission; dead-letter preserves unknown execution and exposes reconciliation diagnostic |
+| T09–T10 report integrity | Damage before render and raw/MD/JSON damage before completion; no completed revision; restored bytes allow report-only retry with one execution |
+| T11–T12 CLI | Real socket-disabled child processes reject marker-only, other-run, missing and unknown-format files; exact MD/JSON exports pass; missing --run creates no state root |
+| T13–T14 commands | Expiry at the boundary is durable and replayable; changed bindings rejected; completed Start/Approve replay returns the original full public result in new CLI processes; Cancel full-result replay |
+| T15 rollback | Exceptions after approval/expiry workflow-record write and after completion receipt write roll back all transactional writes; prior atomicity regressions retained |
 
-- Existing `KernelState`, `KernelEvent` and P2 command unions are schema-1
-  contracts; P3 needs explicit schema-2 workflow types and routing.
-- Existing P2 migrations stop at v5; P3 needs a new migration for business
-  records, action/job/artifact/evidence indexes and completed workflow support.
-- Existing policy v1/v2 registers only test/audit effects; P3 needs a closed
-  v3 registry for the three named fake-pipeline effects.
-- Existing completion persists P2 effect receipts but does not persist P3
-  successor business projections; P3 will add a controlled completion path,
-  retaining permit fencing and the shared worker.
-- The CLI, package fixture, artifact store, fake backend, evidence pipeline and
-  report renderer were the bounded P3 additions delivered in the reviewed
-  implementation commit.
+The ordinary pytest suite includes these cases in
+`tests/p3/test_minimal_repair.py`. Concurrency tests use separate connections,
+threads and explicit synchronization events. CLI child processes install their
+own socket blocker; they do not rely on inheritance of pytest's socket plugin.
 
-## Local technical verification
+## Local verification
 
-- Full test suite: `289 passed`, one expected `pytest_socket` warning.
-- Coverage: `80.16%` with branch coverage and `--cov-fail-under=80`.
-- `python -m uv sync --locked`: PASS.
-- `python -m uv lock --check`: PASS.
-- Ruff check and format check: PASS.
-- `python -m compileall -q src tests`: PASS.
-- `python -m uv build`: PASS.
-- Wheel fixture smoke: PASS with the built wheel installed using `--no-deps`
-  against the already validated locked project runtime. A fresh fully isolated
-  offline dependency-resolution smoke was unavailable because `pydantic-core`
-  was not present in the local package cache.
-- `scripts/verify_p3.ps1 -AutoApprove`: PASS; `execution_count=1`,
-  `stage_count=3`, `report_verified=true`, stale-approval exit code `2`, and
-  conversation isolation `true`.
-- Migration v6 frozen checksum: `e334e8a88a95deb43baabfa33946aa30d793f74ea15bea0b1cf540056787fc0a`;
-  migrations v1-v5 remain unchanged.
-- `git diff --check`: PASS.
+Environment: Windows 11 (10.0.26200), Python 3.14.6, uv 0.12.9.
 
-## Governance and final acceptance
+- Locked sync and lock check: PASS.
+- Compileall, Ruff, format check: PASS.
+- Full offline suite with branch coverage: **315 passed**, one expected socket-block warning; **80.35%**, threshold remains 80%.
+- Wheel/sdist build and packaged Water fixture smoke: PASS.
+- Working, staged and confirmed-baseline whitespace checks: PASS.
+- Updated `scripts/verify_p3.ps1 -StateRoot <fresh temporary root> -AutoApprove`: PASS; execution count 1, stage count 3, report verified, stale approval exit 2, conversation isolation true.
+- ORCA, LLM, PubChem, RDKit and external business network calls: NOT RUN.
 
-This is a single-maintainer project. The Owner may perform the final P3
-acceptance; independent GitHub approval is waived, and no synthetic review or
-approval is claimed. Technical verification is complete for the reviewed
-implementation commit above. P3 remains pending its PR, merge, post-merge
-`main` CI and explicit Owner acceptance, so this file does not claim final
-`PASS` and P4 has not started.
+`-AutoApprove` only approves the temporary fake workflow, not this release.
+
+## Remaining acceptance and limitations
+
+Single-maintainer Owner acceptance is permitted. Independent GitHub Approval
+is waived; no synthetic Review or Approval is claimed. The repair must still
+have green PR CI, merge, green CI for the actual main merge SHA, and explicit
+Owner acceptance before final P3 PASS and P4 entry.
+
+An unknown execution retains SUBMITTING; verified submitted facts are also
+preserved on workflow failure. The derived
+`execution_reconciliation_required` diagnostic does not automatically resume
+dead-letter work. Recovery promises one persistent execution with the original
+ID/key, not one invocation of the backend method. No terminal reopening or
+automatic recovery scheduler was added.
