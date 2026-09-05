@@ -10,7 +10,9 @@ from pathlib import Path
 from orca_agent.application.effect_completion import EffectCompletionService
 from orca_agent.application.errors import (
     EffectDispatchBlockedError,
+    EffectInFlightError,
     LeaseLostError,
+    StorageBusyError,
     StorageError,
 )
 from orca_agent.domain.ids import EffectId, WorkerId, new_id
@@ -42,7 +44,7 @@ class HandlerResult:
 
 @dataclass(frozen=True)
 class DeliveryReport:
-    effect_id: EffectId
+    effect_id: EffectId | None
     outcome: str
     attempt_count: int
 
@@ -92,24 +94,28 @@ class OutboxWorker:
         reports: list[DeliveryReport] = []
         for _ in range(limit):
             now = self.clock.now_utc()
-            with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
-                if (
-                    uow.runs is None
-                    or uow.events is None
-                    or uow.interrupts is None
-                    or uow.outbox is None
-                ):
-                    raise StorageError("kernel repositories are unavailable")
-                claimed = uow.outbox.claim_due_verified(
-                    runs=uow.runs,
-                    events=uow.events,
-                    interrupts=uow.interrupts,
-                    worker_id=self.worker_id,
-                    now=now,
-                    lease_duration=self.lease_duration,
-                    limit=1,
-                    registry=self.registry,
-                )
+            try:
+                with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
+                    if (
+                        uow.runs is None
+                        or uow.events is None
+                        or uow.interrupts is None
+                        or uow.outbox is None
+                    ):
+                        raise StorageError("kernel repositories are unavailable")
+                    claimed = uow.outbox.claim_due_verified(
+                        runs=uow.runs,
+                        events=uow.events,
+                        interrupts=uow.interrupts,
+                        worker_id=self.worker_id,
+                        now=now,
+                        lease_duration=self.lease_duration,
+                        limit=1,
+                        registry=self.registry,
+                    )
+            except StorageBusyError:
+                reports.append(DeliveryReport(None, "storage_busy", 0))
+                return tuple(reports)
             if not claimed:
                 break
             claimed_effect = claimed[0]
@@ -141,14 +147,16 @@ class OutboxWorker:
                     )
                 )
                 continue
-            except EffectDispatchBlockedError:
+            except (EffectDispatchBlockedError, EffectInFlightError, StorageBusyError) as error:
                 reports.append(
                     DeliveryReport(
                         claimed_effect.effect_id,
-                        "blocked",
+                        "storage_busy" if isinstance(error, StorageBusyError) else "blocked",
                         claimed_effect.attempt_count,
                     )
                 )
+                if isinstance(error, StorageBusyError):
+                    return tuple(reports)
                 continue
             if permit is None:
                 reports.append(
@@ -179,6 +187,16 @@ class OutboxWorker:
                     DeliveryReport(permit.effect.effect_id, "lease_lost", permit.generation)
                 )
                 continue
+            except (EffectDispatchBlockedError, EffectInFlightError, StorageBusyError) as error:
+                reports.append(
+                    DeliveryReport(
+                        permit.effect.effect_id,
+                        "storage_busy" if isinstance(error, StorageBusyError) else "blocked",
+                        permit.generation,
+                    )
+                )
+                # Handler already ran. Never re-enter it during this invocation.
+                return tuple(reports)
             reports.append(
                 DeliveryReport(
                     permit.effect.effect_id,

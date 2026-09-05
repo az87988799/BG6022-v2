@@ -54,6 +54,7 @@ from orca_agent.orchestration.commands import (
 from orca_agent.orchestration.dispatch_policy import (
     DEFAULT_EFFECT_REGISTRY,
     DispatchDecision,
+    EffectRegistry,
     evaluate_dispatch,
 )
 from orca_agent.orchestration.events import EventType, KernelEvent
@@ -74,6 +75,7 @@ class KernelApplicationService:
         *,
         state_root: str | Path | None = None,
         clock: Clock | None = None,
+        registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
     ) -> None:
         if database_path is None and state_root is None:
             raise ValueError("database_path or state_root is required")
@@ -81,6 +83,15 @@ class KernelApplicationService:
             raise ValueError("database_path and state_root are mutually exclusive")
         self.database_path = resolve_database_path(database_path or state_root)  # type: ignore[arg-type]
         self.clock = clock or SystemClock()
+        self.registry = registry
+
+    def create_worker(self, handler, **options):
+        """Create the worker/completion path with this service's fixed policy."""
+        from orca_agent.infrastructure.worker import OutboxWorker
+
+        return OutboxWorker(
+            self.database_path, handler, clock=self.clock, registry=self.registry, **options
+        )
 
     def execute(self, command: Command) -> ApplicationResult:
         """Execute a command, converting expected failures to safe results."""
@@ -248,7 +259,7 @@ class KernelApplicationService:
         )
         return any(
             effect.status.value == "dispatching"
-            and evaluate_dispatch(waiting_state, effect, DEFAULT_EFFECT_REGISTRY)
+            and evaluate_dispatch(waiting_state, effect, self.registry)
             is not DispatchDecision.ALLOW
             for effect in uow.outbox.list_for_run(command.run_id)
         )

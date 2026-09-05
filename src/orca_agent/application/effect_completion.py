@@ -252,13 +252,15 @@ class EffectCompletionService:
         current: object,
         now: datetime,
     ) -> None:
-        if snapshot.revision < permit.run_revision:
-            raise LeaseLostError("dispatch permit run revision is stale")
-        if evaluate_dispatch(snapshot.state, current, self.registry) is not DispatchDecision.ALLOW:
-            raise EffectDispatchBlockedError("effect is no longer allowed by dispatch policy")
         if uow.outbox is None:
             raise StorageError("outbox repository is unavailable")
         uow.outbox.validate_dispatch_permit(permit=permit, now=now)
+        if snapshot.revision < permit.run_revision:
+            raise LeaseLostError("dispatch permit run revision is stale")
+        if permit.policy_version != self.registry.policy_version:
+            raise EffectDispatchBlockedError("dispatch policy version changed")
+        if evaluate_dispatch(snapshot.state, current, self.registry) is not DispatchDecision.ALLOW:
+            raise EffectDispatchBlockedError("effect is no longer allowed by dispatch policy")
 
     def _return_existing_terminal(
         self,
@@ -311,6 +313,10 @@ class EffectCompletionService:
 
 
 def _normalize_completion_input(value: object) -> _CompletionInput:
+    from orca_agent.infrastructure.worker import HandlerResult
+
+    if not isinstance(value, HandlerResult):
+        return _CompletionInput(False, None, HandlerErrorCode.INVALID_HANDLER_RESULT)
     success = getattr(value, "success", None)
     if type(success) is not bool:
         return _CompletionInput(False, None, HandlerErrorCode.INVALID_HANDLER_RESULT)

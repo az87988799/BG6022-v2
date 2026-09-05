@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from types import MappingProxyType
+
+from orca_agent.domain.hashing import sha256_hex
 
 from .effects import EffectClass
 from .state import KernelState, RunStatus
@@ -27,17 +30,26 @@ class EffectRegistration:
     receipt_schema: str = "effect-success/v1"
 
 
+@dataclass(frozen=True, init=False)
 class EffectRegistry:
     """Exact effect-type registry used by both claim and authorization."""
 
+    _registrations: Mapping[str, EffectRegistration]
+    policy_version: int
+
     def __init__(
         self,
-        registrations: Iterable[EffectRegistration] = (),
+        registrations: Iterable[EffectRegistration] | None = None,
         *,
         policy_version: int = 1,
     ) -> None:
         if type(policy_version) is not int or policy_version < 1:
             raise ValueError("policy_version must be a positive integer")
+        expected = P2_POLICY_RULES.get(policy_version)
+        if expected is None:
+            raise ValueError("unknown fixed P2 policy version")
+        if registrations is None:
+            registrations = expected
         values: dict[str, EffectRegistration] = {}
         for registration in registrations:
             if registration.effect_type in values:
@@ -48,9 +60,28 @@ class EffectRegistry:
                 raise ValueError("effect registration must allow at least one run status")
             if registration.receipt_schema != "effect-success/v1":
                 raise ValueError("effect registration has an unsupported receipt schema")
-            values[registration.effect_type] = registration
-        self._registrations = values
-        self.policy_version = policy_version
+            values[registration.effect_type] = replace(
+                registration, allowed_statuses=frozenset(registration.allowed_statuses)
+            )
+        if values != {item.effect_type: item for item in expected}:
+            raise ValueError("policy version is bound to different rules")
+        object.__setattr__(self, "_registrations", MappingProxyType(values))
+        object.__setattr__(self, "policy_version", policy_version)
+
+    @property
+    def configuration_hash(self) -> str:
+        return sha256_hex(
+            [
+                {
+                    "type": key,
+                    "class": value.effect_class.value,
+                    "statuses": sorted(status.value for status in value.allowed_statuses),
+                    "safe_while_waiting": value.safe_while_waiting,
+                    "receipt_schema": value.receipt_schema,
+                }
+                for key, value in sorted(self._registrations.items())
+            ]
+        )
 
     def get(self, effect_type: str) -> EffectRegistration | None:
         return self._registrations.get(effect_type)
@@ -65,33 +96,50 @@ class EffectRegistry:
         return self._registrations.items()
 
 
-DEFAULT_EFFECT_REGISTRY = EffectRegistry(
-    (
-        EffectRegistration(
-            effect_type="external.test",
-            effect_class=EffectClass.EXTERNAL,
-            allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
+_V1_RULES = (
+    EffectRegistration(
+        effect_type="external.test",
+        effect_class=EffectClass.EXTERNAL,
+        allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
+    ),
+    EffectRegistration(
+        effect_type="external.audit",
+        effect_class=EffectClass.EXTERNAL,
+        allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
+    ),
+    EffectRegistration(
+        effect_type="internal.test",
+        effect_class=EffectClass.INTERNAL,
+        allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
+    ),
+    EffectRegistration(
+        effect_type="internal.audit",
+        effect_class=EffectClass.INTERNAL,
+        allowed_statuses=frozenset(
+            {RunStatus.CREATED, RunStatus.WAITING_FOR_INPUT, RunStatus.READY}
         ),
-        EffectRegistration(
-            effect_type="external.audit",
-            effect_class=EffectClass.EXTERNAL,
-            allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
-        ),
-        EffectRegistration(
-            effect_type="internal.test",
-            effect_class=EffectClass.INTERNAL,
-            allowed_statuses=frozenset({RunStatus.CREATED, RunStatus.READY}),
-        ),
-        EffectRegistration(
-            effect_type="internal.audit",
-            effect_class=EffectClass.INTERNAL,
-            allowed_statuses=frozenset(
-                {RunStatus.CREATED, RunStatus.WAITING_FOR_INPUT, RunStatus.READY}
-            ),
-            safe_while_waiting=True,
-        ),
-    )
+        safe_while_waiting=True,
+    ),
 )
+
+# Closed P2 configurations, not a hot-reload or plugin mechanism. Version 2
+# explicitly permits internal.test while waiting; external dispatch stays blocked.
+P2_POLICY_RULES = MappingProxyType(
+    {
+        1: _V1_RULES,
+        2: tuple(
+            replace(
+                item,
+                safe_while_waiting=True,
+                allowed_statuses=item.allowed_statuses | {RunStatus.WAITING_FOR_INPUT},
+            )
+            if item.effect_type == "internal.test"
+            else item
+            for item in _V1_RULES
+        ),
+    }
+)
+DEFAULT_EFFECT_REGISTRY = EffectRegistry()
 
 
 def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, object]):
