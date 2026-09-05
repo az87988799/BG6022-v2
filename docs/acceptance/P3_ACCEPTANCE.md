@@ -1,13 +1,14 @@
 # V2-P3 Acceptance
 
-- Status: LOCAL_REPAIR_VERIFIED — PR CI, repair merge, main CI and Owner acceptance pending.
+- Status: REPAIR_CI_VERIFIED — repair merge, main CI and Owner acceptance pending.
 - Scope: offline Water `water_sp_v1` FakeBackend only.
 - Original implementation: `05825373b3c279322a9a0539484d2e247d83cad0`.
 - Original publication: already present on main at `e13e8db0f1644a7267f7b29e0c408cc0bf8e002b`.
 - Original main CI: [33966056353](https://github.com/az87988799/BG6022-v2/actions/runs/33966056353), FAILURE; the former blanket technical-pass statement is withdrawn.
 - Repair branch: `codex/v2-p3-minimal-fix`.
 - Reviewed repair implementation: `6bdfd90e0cbe556791ae912d1b3090d90ed1c48c`.
-- Repair PR / CI: pending.
+- Repair PR: [#4](https://github.com/az87988799/BG6022-v2/pull/4).
+- Implementation verification CI: [33968501146](https://github.com/az87988799/BG6022-v2/actions/runs/33968501146), four jobs green, tested head `447466888c64dd8313279016448de33e6db2ee7b`; Ubuntu branch coverage 80.35%, 315 tests passed.
 - Repair merge SHA / post-merge main CI: pending.
 - Owner acceptance of repaired P3: pending.
 
@@ -54,8 +55,8 @@ Environment: Windows 11 (10.0.26200), Python 3.14.6, uv 0.12.9.
 ## Remaining acceptance and limitations
 
 Single-maintainer Owner acceptance is permitted. Independent GitHub Approval
-is waived; no synthetic Review or Approval is claimed. The repair must still
-have green PR CI, merge, green CI for the actual main merge SHA, and explicit
+is waived; no synthetic Review or Approval is claimed. PR CI has passed for
+the implementation above. The repair must still merge, pass CI for the actual main merge SHA, and receive explicit
 Owner acceptance before final P3 PASS and P4 entry.
 
 An unknown execution retains SUBMITTING; verified submitted facts are also
