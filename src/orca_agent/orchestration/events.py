@@ -10,7 +10,12 @@ from pydantic import Field, field_validator, model_validator
 
 from orca_agent.application.results import ApplicationResult
 from orca_agent.domain.errors import HashMismatchError
-from orca_agent.domain.hashing import sha256_hex, verify_sha256
+from orca_agent.domain.hashing import (
+    GENESIS_EVENT_HASH,
+    event_envelope_hash,
+    sha256_hex,
+    verify_sha256,
+)
 from orca_agent.domain.ids import CommandId, EventId, RunId, new_id
 from orca_agent.domain.json_types import FrozenJsonObject, JsonObject, freeze_json_object
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION, validate_schema_version
@@ -40,6 +45,7 @@ class KernelEvent(KernelModel):
     event_id: EventId
     command_id: CommandId
     command_type: CommandType
+    command_hash: str
     run_id: RunId
     sequence_no: int = Field(ge=1)
     expected_revision: int = Field(ge=0)
@@ -53,6 +59,8 @@ class KernelEvent(KernelModel):
     result_hash: str
     occurred_at_utc: datetime
     recorded_at_utc: datetime
+    previous_event_hash: str
+    event_hash: str
 
     @field_validator("schema_version")
     @classmethod
@@ -67,7 +75,9 @@ class KernelEvent(KernelModel):
         except ValueError as error:
             raise ValueError("event payload and result must be JSON objects") from error
 
-    @field_validator("payload_hash", "result_hash")
+    @field_validator(
+        "command_hash", "payload_hash", "result_hash", "previous_event_hash", "event_hash"
+    )
     @classmethod
     def _hashes_are_canonical_shape(cls, value: str) -> str:
         if _HASH_PATTERN.fullmatch(value) is None:
@@ -85,11 +95,48 @@ class KernelEvent(KernelModel):
             raise ValueError("new_revision must equal expected_revision + 1")
         if self.sequence_no != self.new_revision:
             raise ValueError("sequence_no must equal new_revision")
+        allowed_commands = {
+            EventType.RUN_CREATED: {CommandType.CREATE_RUN},
+            EventType.INTERRUPT_REQUESTED: {CommandType.REQUEST_INTERRUPT},
+            EventType.INTERRUPT_REPLACED: {CommandType.REPLACE_INTERRUPT},
+            EventType.INTERRUPT_RESOLVED: {CommandType.RESOLVE_INTERRUPT},
+            EventType.INTERRUPT_EXPIRED: {
+                CommandType.EXPIRE_INTERRUPT,
+                CommandType.RESOLVE_INTERRUPT,
+            },
+            EventType.RUN_CANCELLED: {CommandType.CANCEL_RUN},
+            EventType.EFFECT_SUCCEEDED: {CommandType.RECORD_EFFECT_SUCCEEDED},
+            EventType.EFFECT_DEAD_LETTERED: {CommandType.RECORD_EFFECT_FAILED},
+        }
+        if self.command_type not in allowed_commands[self.event_type]:
+            raise ValueError("event type is not valid for its command type")
         try:
             verify_sha256(self.payload, self.payload_hash)
             verify_sha256(self.result, self.result_hash)
         except HashMismatchError as error:
             raise ValueError("event content hash does not match") from error
+        expected_event_hash = event_envelope_hash(
+            event_id=str(self.event_id),
+            previous_event_hash=self.previous_event_hash,
+            command_id=str(self.command_id),
+            command_type=self.command_type.value,
+            command_hash=self.command_hash,
+            run_id=str(self.run_id),
+            sequence_no=self.sequence_no,
+            expected_revision=self.expected_revision,
+            new_revision=self.new_revision,
+            event_type=self.event_type.value,
+            schema_version=self.schema_version,
+            engine_version=self.engine_version,
+            payload=self.payload,
+            payload_hash=self.payload_hash,
+            result=self.result,
+            result_hash=self.result_hash,
+            occurred_at_utc=_utc_text(self.occurred_at_utc),
+            recorded_at_utc=_utc_text(self.recorded_at_utc),
+        )
+        if self.event_hash != expected_event_hash:
+            raise ValueError("event envelope hash does not match")
         return self
 
     @classmethod
@@ -107,16 +154,43 @@ class KernelEvent(KernelModel):
         occurred_at_utc: datetime,
         recorded_at_utc: datetime | None = None,
         event_id: EventId | None = None,
+        command_hash: str,
+        previous_event_hash: str = GENESIS_EVENT_HASH,
         engine_version: str = ENGINE_VERSION,
         schema_version: int = CURRENT_SCHEMA_VERSION,
     ) -> KernelEvent:
+        actual_event_id = event_id or new_id(EventId)
+        actual_recorded_at = recorded_at_utc or occurred_at_utc
         result_value = (
             result.model_dump(mode="json") if isinstance(result, ApplicationResult) else result
         )
+        payload_hash = sha256_hex(payload)
+        result_hash = sha256_hex(result_value)
+        event_hash = event_envelope_hash(
+            event_id=str(actual_event_id),
+            previous_event_hash=previous_event_hash,
+            command_id=str(command_id),
+            command_type=command_type.value,
+            command_hash=command_hash,
+            run_id=str(run_id),
+            sequence_no=sequence_no,
+            expected_revision=expected_revision,
+            new_revision=sequence_no,
+            event_type=event_type.value,
+            schema_version=schema_version,
+            engine_version=engine_version,
+            payload=payload,
+            payload_hash=payload_hash,
+            result=result_value,
+            result_hash=result_hash,
+            occurred_at_utc=_utc_text(occurred_at_utc),
+            recorded_at_utc=_utc_text(actual_recorded_at),
+        )
         return cls(
-            event_id=event_id or new_id(EventId),
+            event_id=actual_event_id,
             command_id=command_id,
             command_type=command_type,
+            command_hash=command_hash,
             run_id=run_id,
             sequence_no=sequence_no,
             expected_revision=expected_revision,
@@ -125,11 +199,13 @@ class KernelEvent(KernelModel):
             schema_version=schema_version,
             engine_version=engine_version,
             payload=payload,
-            payload_hash=sha256_hex(payload),
+            payload_hash=payload_hash,
             result=result_value,
-            result_hash=sha256_hex(result_value),
+            result_hash=result_hash,
             occurred_at_utc=occurred_at_utc,
-            recorded_at_utc=recorded_at_utc or occurred_at_utc,
+            recorded_at_utc=actual_recorded_at,
+            previous_event_hash=previous_event_hash,
+            event_hash=event_hash,
         )
 
     def verify_payload_hash(self) -> None:
@@ -141,4 +217,9 @@ class KernelEvent(KernelModel):
 
 EventEnvelope = KernelEvent
 
-__all__ = ["EventEnvelope", "EventType", "KernelEvent"]
+
+def _utc_text(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
+__all__ = ["EventEnvelope", "EventType", "GENESIS_EVENT_HASH", "KernelEvent"]

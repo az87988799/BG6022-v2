@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock
 
 import pytest
 
@@ -28,7 +27,13 @@ def test_failure_after_event_append_and_projection_rolls_back_everything(tmp_pat
         with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
             uow.begin()
             assert uow.interrupts is not None
-            uow.interrupts.apply_operations = Mock(side_effect=RuntimeError("projection crash"))
+            apply_operations = uow.interrupts.apply_operations
+
+            def fail_after_projection(*args, **kwargs):
+                apply_operations(*args, **kwargs)
+                raise RuntimeError("projection crash")
+
+            uow.interrupts.apply_operations = fail_after_projection  # type: ignore[method-assign]
             service._update_run(
                 uow, command, command.command_hash(), uow.runs.require(created.run_id)
             )
@@ -57,7 +62,13 @@ def test_failure_after_event_append_and_outbox_registration_rolls_back_everythin
         with SQLiteUnitOfWork(tmp_path / "state.sqlite3", clock=clock) as uow:
             uow.begin()
             assert uow.outbox is not None
-            uow.outbox.register_effects = Mock(side_effect=RuntimeError("outbox crash"))
+            register_effects = uow.outbox.register_effects
+
+            def fail_after_outbox(*args, **kwargs):
+                register_effects(*args, **kwargs)
+                raise RuntimeError("outbox crash")
+
+            uow.outbox.register_effects = fail_after_outbox  # type: ignore[method-assign]
             service._create_run(uow, command, command.command_hash())
 
     with SQLiteUnitOfWork(tmp_path / "state.sqlite3") as uow:

@@ -39,6 +39,7 @@ class KernelState(KernelModel):
     status: RunStatus
     pending_interrupt_id: InterruptId | None
     last_outcome_code: str | None
+    # Durable schema 1 permits historical reasons; commands enforce current codes.
     cancel_reason_code: str | None
 
     @classmethod

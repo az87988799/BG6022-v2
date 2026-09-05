@@ -58,6 +58,11 @@ class SQLiteConnectionFactory:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute("PRAGMA busy_timeout = 5000")
+        except sqlite3.OperationalError as error:
+            connection.close()
+            if "locked" in str(error).casefold() or "busy" in str(error).casefold():
+                raise StorageBusyError("database is busy") from error
+            raise
         except sqlite3.Error:
             connection.close()
             raise

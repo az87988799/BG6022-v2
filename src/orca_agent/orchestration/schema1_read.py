@@ -1,4 +1,7 @@
-"""Pure event reducer for the small P2 kernel state machine."""
+"""Frozen schema-1 read rules. Never use this module to validate new commands.
+
+Historical free text stays in internal read objects; preserve original hashes.
+"""
 
 from __future__ import annotations
 
@@ -10,9 +13,8 @@ from pydantic import ValidationError
 from orca_agent.application.errors import InvalidTransitionError
 from orca_agent.domain.errors import InvalidIdentifierError
 from orca_agent.domain.ids import EffectId, InterruptId, RunId
+from orca_agent.domain.json_types import freeze_json_object
 
-from .codes import CancelReasonCode, HandlerErrorCode, handler_error_message
-from .effect_receipts import parse_effect_success_receipt
 from .effects import EffectSpec
 from .events import EventType, KernelEvent
 from .state import KernelState, RunStatus
@@ -23,6 +25,13 @@ from .transitions import (
     InterruptStatus,
     Transition,
 )
+
+
+def read_error_text(value: object, field_name: str) -> str:
+    """Published schema-1 diagnostics, for internal reads only (never logs)."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 256 or "\x00" in value:
+        raise ValueError(f"invalid historical {field_name}")
+    return value
 
 
 def _invalid(reason: str, *, event: KernelEvent) -> InvalidTransitionError:
@@ -109,7 +118,7 @@ def _state(
     status: RunStatus,
     pending_interrupt_id: InterruptId | None,
     last_outcome_code: str | None,
-    cancel_reason_code: CancelReasonCode | None,
+    cancel_reason_code: str | None,
 ) -> KernelState:
     return KernelState(
         run_id=run_id,
@@ -356,11 +365,7 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
         )
 
     if event.event_type is EventType.RUN_CANCELLED:
-        raw_reason = _text(payload, "reason_code", event=event)
-        try:
-            reason = CancelReasonCode(raw_reason)
-        except ValueError as error:
-            raise _invalid("event payload reason_code is not allowed", event=event) from error
+        reason = _text(payload, "reason_code", event=event)
         operations: tuple[InterruptProjectionOp, ...] = ()
         if current.pending_interrupt_id is not None:
             operations = (
@@ -388,7 +393,7 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
     if event.event_type is EventType.EFFECT_SUCCEEDED:
         _effect_id(payload, "effect_id", event=event)
         try:
-            parse_effect_success_receipt(_value(payload, "result_summary", event=event))
+            freeze_json_object(_value(payload, "result_summary", event=event))
         except ValueError as error:
             raise _invalid("event success receipt is invalid", event=event) from error
         state = _state(
@@ -408,13 +413,7 @@ def reduce_event(current: KernelState | None, event: KernelEvent) -> Transition:
 
     if event.event_type is EventType.EFFECT_DEAD_LETTERED:
         _effect_id(payload, "effect_id", event=event)
-        raw_error_code = _text(payload, "error_code", event=event)
-        try:
-            error_code = HandlerErrorCode(raw_error_code)
-        except ValueError as error:
-            raise _invalid("event payload error_code is not allowed", event=event) from error
-        if payload.get("error_message") != handler_error_message(error_code):
-            raise _invalid("event payload error_message is not allowed", event=event)
+        _text(payload, "error_code", event=event)
         operations: tuple[InterruptProjectionOp, ...] = ()
         if current.pending_interrupt_id is not None:
             operations = (

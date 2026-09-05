@@ -25,6 +25,8 @@ from orca_agent.domain.json_types import (
 )
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION, validate_schema_version
 
+from .codes import CancelReasonCode, HandlerErrorCode, handler_error_message
+from .effect_receipts import EffectSuccessReceiptV1, parse_effect_success_receipt, receipt_json
 from .effects import EffectSpec
 from .state import KernelModel
 from .temporal import ensure_utc
@@ -353,15 +355,10 @@ class ExpireInterrupt(CommandBase):
 class CancelRun(CommandBase):
     command_type: Literal[CommandType.CANCEL_RUN] = CommandType.CANCEL_RUN
     expected_revision: int = Field(ge=1)
-    reason_code: str
-
-    @field_validator("reason_code")
-    @classmethod
-    def _reason_is_safe(cls, value: str) -> str:
-        return _non_blank(value, "reason_code")
+    reason_code: CancelReasonCode
 
     def event_payload(self) -> JsonObject:
-        return {"reason_code": self.reason_code}
+        return {"reason_code": self.reason_code.value}
 
     @classmethod
     def create(
@@ -380,7 +377,7 @@ class CancelRun(CommandBase):
             run_id=run_id,
             expected_revision=expected_revision,
             requested_at_utc=requested_at_utc or datetime.now(UTC),
-            reason_code=reason_code,
+            reason_code=CancelReasonCode(reason_code),
         )
 
 
@@ -388,15 +385,21 @@ class RecordEffectSucceeded(CommandBase):
     command_type: Literal[CommandType.RECORD_EFFECT_SUCCEEDED] = CommandType.RECORD_EFFECT_SUCCEEDED
     expected_revision: int = Field(ge=1)
     effect_id: EffectId
-    result_summary: FrozenJsonObject
+    result_summary: EffectSuccessReceiptV1
 
     @field_validator("result_summary", mode="before")
     @classmethod
-    def _summary_is_safe(cls, value: object) -> FrozenJsonObject:
-        return _safe_object(value, "result_summary")
+    def _summary_is_typed(cls, value: object) -> EffectSuccessReceiptV1:
+        try:
+            return parse_effect_success_receipt(value)
+        except ValueError as error:
+            raise ValueError("result_summary must be an effect-success/v1 receipt") from error
 
     def event_payload(self) -> JsonObject:
-        return {"effect_id": str(self.effect_id), "result_summary": self.result_summary}
+        return {
+            "effect_id": str(self.effect_id),
+            "result_summary": receipt_json(self.result_summary),
+        }
 
     @classmethod
     def create(
@@ -425,23 +428,28 @@ class RecordEffectFailed(CommandBase):
     command_type: Literal[CommandType.RECORD_EFFECT_FAILED] = CommandType.RECORD_EFFECT_FAILED
     expected_revision: int = Field(ge=1)
     effect_id: EffectId
-    error_code: str
-    error_message: str
+    error_code: HandlerErrorCode
+    error_message: str | None = None
 
-    @field_validator("error_code", "error_message")
+    @model_validator(mode="after")
+    def _error_message_is_fixed(self) -> RecordEffectFailed:
+        expected = handler_error_message(self.error_code)
+        if self.error_message is not None and self.error_message != expected:
+            raise ValueError("error_message must use the fixed public message for error_code")
+        return self
+
+    @field_validator("error_message")
     @classmethod
-    def _error_text_is_safe(cls, value: str, info: object) -> str:
-        field_name = getattr(info, "field_name", "error")
-        value = _non_blank(value, field_name)
-        if len(value) > 256 or "\x00" in value:
-            raise ValueError(f"{field_name} is too long or contains NUL")
+    def _error_message_is_bounded(cls, value: str | None) -> str | None:
+        if value is not None and (len(value) > 256 or "\x00" in value):
+            raise ValueError("error_message is too long or contains NUL")
         return value
 
     def event_payload(self) -> JsonObject:
         return {
             "effect_id": str(self.effect_id),
-            "error_code": self.error_code,
-            "error_message": self.error_message,
+            "error_code": self.error_code.value,
+            "error_message": handler_error_message(self.error_code),
         }
 
     @classmethod
@@ -452,7 +460,7 @@ class RecordEffectFailed(CommandBase):
         expected_revision: int,
         effect_id: EffectId,
         error_code: str,
-        error_message: str,
+        error_message: str | None = None,
         command_id: CommandId | None = None,
         requested_at_utc: datetime | None = None,
     ) -> RecordEffectFailed:
@@ -464,7 +472,7 @@ class RecordEffectFailed(CommandBase):
             expected_revision=expected_revision,
             requested_at_utc=requested_at_utc or datetime.now(UTC),
             effect_id=effect_id,
-            error_code=error_code,
+            error_code=HandlerErrorCode(error_code),
             error_message=error_message,
         )
 

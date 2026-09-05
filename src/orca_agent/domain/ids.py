@@ -125,3 +125,44 @@ def effect_id_for(event_id: EventId, index: int) -> EffectId:
         raise ValueError("effect index must be a non-negative integer")
     value = uuid.uuid5(EFFECT_NAMESPACE, f"{event_id}:{index}")
     return EffectId(f"effect_{value.hex}")
+
+
+def completion_command_id(
+    effect_id: EffectId,
+    generation: int,
+    outcome: str,
+) -> CommandId:
+    """Derive the stable command ID for one terminal completion attempt."""
+
+    if type(generation) is not int or generation < 1:
+        raise ValueError("completion generation must be a positive integer")
+    if not isinstance(outcome, str) or not outcome.strip():
+        raise ValueError("completion outcome must not be blank")
+    value = uuid.uuid5(EFFECT_NAMESPACE, f"completion:{effect_id}:{generation}:{outcome}")
+    return CommandId(f"command_{value.hex}")
+
+
+def is_new_external_command_id(value: CommandId) -> bool:
+    """Only new external writes require UUID4; historical reads stay permissive."""
+    return uuid.UUID(hex=str(value).removeprefix("command_")).version == 4
+
+
+__all__ = [
+    "ActionId",
+    "ArtifactId",
+    "ClaimId",
+    "CommandId",
+    "EFFECT_NAMESPACE",
+    "EffectId",
+    "EvidenceId",
+    "EventId",
+    "InterruptId",
+    "PlanProposalId",
+    "PrimitiveId",
+    "ProblemSpecId",
+    "RunId",
+    "WorkerId",
+    "completion_command_id",
+    "effect_id_for",
+    "new_id",
+]

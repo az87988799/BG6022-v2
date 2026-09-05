@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from orca_agent.application.errors import StateIntegrityError
-from orca_agent.domain.hashing import sha256_hex
+from orca_agent.application.results import ApplicationResult
+from orca_agent.domain.hashing import GENESIS_EVENT_HASH, sha256_hex
 from orca_agent.domain.ids import EventId, RunId
+from orca_agent.domain.json_types import thaw_json
 
 from .events import KernelEvent
-from .reducer import reduce_event
+from .result_contract import expected_application_result
+from .schema1_read import reduce_event
 from .state import KernelState
 
 
@@ -20,6 +24,7 @@ def replay(events: Sequence[KernelEvent]) -> KernelState:
         raise StateIntegrityError("cannot replay an empty event stream")
     state: KernelState | None = None
     run_id: RunId | None = None
+    previous_event_hash = GENESIS_EVENT_HASH
     for expected_sequence, event in enumerate(events, start=1):
         if event.sequence_no != expected_sequence:
             raise StateIntegrityError("event sequence is not contiguous")
@@ -29,8 +34,24 @@ def replay(events: Sequence[KernelEvent]) -> KernelState:
             run_id = event.run_id
         elif event.run_id != run_id:
             raise StateIntegrityError("event stream contains multiple runs")
+        if event.previous_event_hash != previous_event_hash:
+            raise StateIntegrityError("event hash chain is not contiguous")
         try:
-            state = reduce_event(state, event).next_state
+            transition = reduce_event(state, event)
+            result = ApplicationResult.model_validate_json(
+                json.dumps(thaw_json(event.result), ensure_ascii=False)
+            )
+            expected_result = expected_application_result(
+                prior_state=state,
+                event=event,
+                transition=transition,
+            )
+            if result != expected_result:
+                raise StateIntegrityError("event result does not match its envelope")
+            state = transition.next_state
+            previous_event_hash = event.event_hash
+        except StateIntegrityError:
+            raise
         except Exception as error:
             if isinstance(error, StateIntegrityError):
                 raise

@@ -1,68 +1,83 @@
 # V2-P2 Acceptance
 
-- Status: PASS
-- Date: 2026-09-04
-- Branch: `main`
-- Reviewed implementation commit: `8433872d8b5a6ec59446f8efb2595ed3ecfb60fa`
-- Acceptance PR: `#2`
-- Latest verified workflow: `33873115361`
-- Python local: `3.14.6`
-- SQLite local: `3.53.2`
-- ORCA installed: `6.1`
-- ORCA executed in P2: No
-- LLM/PubChem/RDKit called in P2: No
+- Status: NO-GO — independent approval, merge/main CI and user acceptance pending
+- Date: 2026-09-05
+- Branch: `codex/v2-p2-hardening`
+- Implementation submitted for review: `e12de3e10d4b33df098899e3474ac1fef80138f2`
+- Acceptance PR: [#3](https://github.com/az87988799/BG6022-v2/pull/3)
+- Verified implementation workflow: [33937447424](https://github.com/az87988799/BG6022-v2/actions/runs/33937447424)
+- Independent GitHub approval: Pending; PR #3 has no reviews
+- Main merge: Pending; main remains `a001a31b6c0123a24e7e5d89774b0a1799024a27`
+- Local environment: Python 3.14.6, SQLite 3.53.2; locked uv environment
+- Real ORCA/LLM/PubChem/RDKit execution: None
+- P3: Not started
 
-## Local gates
+The implementation commit and CI above are fixed evidence, not a self-reference
+to this document's HEAD. Earlier 214-test/80.28% evidence is superseded.
+See [minimal-repair details](P2_MINIMAL_REPAIR.md) for the approved v4 checksum
+change, upgrade procedure, and separately committed repairs.
 
-| Gate | Result | Evidence |
-|---|---|---|
-| uv lock | PASS | `uv lock --check` |
-| compileall | PASS | `uv run --offline --no-sync python -m compileall -q src tests` |
-| pytest | PASS | `104 passed, 1 expected socket-blocking warning` |
-| ruff check/format | PASS | `ruff check .`; `67 files already formatted` |
-| package build | PASS | `uv build` produced sdist and wheel |
-| migration fresh/idempotent/drift/rollback | PASS | `tests/persistence/test_migrations.py` |
-| reducer purity/replay | PASS | `tests/unit/orchestration/test_reducer.py`; `tests/persistence/test_restart_replay.py` |
-| CAS concurrency | PASS | `tests/persistence/test_revision_cas.py` |
-| command idempotency | PASS | `tests/persistence/test_run_event_atomicity.py`; `tests/persistence/test_effect_commands.py` |
-| interrupt lifecycle | PASS | `tests/persistence/test_interrupt_lifecycle.py` |
-| outbox lease/retry/dead-letter | PASS | `tests/persistence/test_outbox_leases.py` |
-| crash/restart | PASS | `tests/persistence/test_atomic_failure_points.py`; `tests/persistence/test_restart_replay.py` |
-| no tracked SQLite artifacts | PASS | `git ls-files "*.sqlite" "*.sqlite3" "*.db" "*-wal" "*-shm"` returned no paths |
+## Local verification
 
-The local suite reports one expected warning because the offline socket test
-deliberately attempts to construct a socket.
+All commands ran successfully in E:\BG6022-v2. uv is installed but not on PATH,
+so the commands used `python -m uv` in place of `uv`.
 
-## CI gates
+| Gate | Result |
+|---|---|
+| git fetch origin | PASS |
+| uv sync --locked | PASS |
+| uv lock --check | PASS |
+| uv run --offline --no-sync python -m compileall -q src tests | PASS |
+| uv run --offline --no-sync pytest --cov=orca_agent --cov-branch --cov-report=term-missing --cov-fail-under=80 | PASS: 253 tests, 80.71% |
+| uv run --offline --no-sync ruff check . | PASS |
+| uv run --offline --no-sync ruff format --check . | PASS |
+| uv build | PASS: sdist and wheel |
+| git diff --check origin/main...HEAD | PASS |
+| git diff --check; git diff --cached --check | PASS |
+| tracked SQLite/artifact scan | No tracked database files |
 
-| OS | Python | Result | Workflow URL |
-|---|---:|---|---|
-| Ubuntu | 3.11 | PASS | [run 33872788422](https://github.com/az87988799/BG6022-v2/actions/runs/33872788422) |
-| Ubuntu | 3.14 | PASS | [run 33872788422](https://github.com/az87988799/BG6022-v2/actions/runs/33872788422) |
-| Windows | 3.14 | PASS | [run 33872788422](https://github.com/az87988799/BG6022-v2/actions/runs/33872788422) |
-| Quality | 3.14 | PASS | [run 33872788422](https://github.com/az87988799/BG6022-v2/actions/runs/33872788422) |
+The full locked suite includes pytest-socket. Its intentional socket-blocking
+test emits one expected warning; no business-network calls occur.
 
-## Durable-kernel invariants
+## Minimal repair regressions
 
-- One accepted event increments revision exactly once.
-- Duplicate command IDs do not duplicate events or effects.
-- State/event/outbox/interrupt projection commit atomically.
-- Every run has at most one pending interrupt.
-- Expired interrupt becomes durable state and typed result.
-- Event replay matches the stored snapshot hash.
-- Outbox delivery is documented as at-least-once.
-- Leased effects recover after expiry.
+| Requirement | Evidence |
+|---|---|
+| Original published-main historical regression | Original 8/8 PASS, including both previously failing empty summaries and migration rollback |
+| Historical error text stays internal | Additional old-main retry fixture verifies it never enters the handler view |
+| Immutable historical evidence | Original event IDs, JSON and payload/result hashes retained; strict integer and hash corruption rejected |
+| v4 interpolation/checksum | Both literal placeholder strings absent from executed SQL; v1–v5 checksums frozen |
+| Queue pagination | 140 candidates, waiting/unknown/in-flight sibling cases; later healthy run executes; all-blocked returns |
+| Fixed policy and worker races | Versions bound to immutable rules/digests; common service factory; real two-worker contention; old permit rejected; committed retry preserved; busy completion never reinvokes handler |
+| Command ID namespace | New external UUID5 rejected before writing; historical identical retry remains valid; conflicts reject; upgrade/claim reports observed or imminent-generation collisions |
+| Terminal metadata | Direct SQL changes to four columns rejected in all three terminal states; v5 collision failure restores the pre-migration database |
+| Prior atomic/crash gates | Existing tests retained: seven crash points, actual write-before-commit rollback, CAS/claim competition, replay and projection corruption |
 
-## Scope confirmation
+Historical schema 1 is read under its published contract. New commands and
+completion writes retain current closed enums and bounded typed receipts.
+Completion protocol 4 alone is not a payload schema discriminator.
 
-- No FakeBackend or ExecutionGateway.
-- No ORCA compiler/parser/subprocess.
-- No RDKit, PubChem, LLM, evidence, claim, report, API, or Slurm work.
-- No legacy active state migration.
-- P3 has not started.
+## Implementation CI
 
-## Decision
+All four jobs passed in workflow 33937447424 for the fixed implementation commit:
 
-The P2 implementation, local gates, PR #2, and the resulting `main` GitHub
-Actions matrix pass. V2-P2 is formally `PASS` on `main`. P3 has not started
-and may not start under this work package.
+- Ubuntu Python 3.11
+- Ubuntu Python 3.14, including branch coverage gate
+- Windows Python 3.14
+- Quality
+
+## Remaining acceptance gates
+
+1. Independent GitHub review/Approval.
+2. Merge PR #3 into main after approval.
+3. Verify post-merge main CI.
+4. Record actual merge SHA and CI, then obtain user acceptance before P2 completion.
+
+No production or legacy database was changed, deleted or rebuilt. Old-v4 P2
+development databases must be backed up before recreation; no manual edits to
+schema_migrations or hidden trigger workarounds are permitted.
+
+P2 promises at-least-once delivery and database completion fencing, not
+external exactly-once execution or prevention of every physical effect after
+cancellation. Real Gateway idempotency, long-running lease and cancellation
+coordination remain outside this patch and are required before real ORCA use.

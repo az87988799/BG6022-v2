@@ -65,6 +65,7 @@ def test_event_requires_content_hashes_to_match() -> None:
         payload=command.event_payload(),
         result=result,
         occurred_at_utc=command.requested_at_utc,
+        command_hash=command.command_hash(),
     )
     assert KernelEvent.model_validate_json(event.model_dump_json()) == event
 

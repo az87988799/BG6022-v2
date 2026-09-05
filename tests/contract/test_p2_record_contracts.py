@@ -30,6 +30,7 @@ def _event() -> KernelEvent:
         payload={"run_id": str(command.run_id), "effects": []},
         result=result,
         occurred_at_utc=datetime(2026, 9, 4, tzinfo=UTC),
+        command_hash=command.command_hash(),
     )
 
 

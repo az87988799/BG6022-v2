@@ -8,6 +8,7 @@ from pathlib import Path
 from orca_agent.infrastructure.migrations import apply_migrations
 
 from .clock import Clock, SystemClock
+from .command_receipts import CommandReceiptRepository
 from .interrupts import InterruptRepository
 from .outbox import OutboxRepository
 from .repositories import EventRepository, RunRepository
@@ -35,6 +36,7 @@ class SQLiteUnitOfWork:
         self.events: EventRepository | None = None
         self.interrupts: InterruptRepository | None = None
         self.outbox: OutboxRepository | None = None
+        self.command_receipts: CommandReceiptRepository | None = None
         self._closed = False
 
     def __enter__(self) -> SQLiteUnitOfWork:
@@ -44,6 +46,7 @@ class SQLiteUnitOfWork:
         self.events = EventRepository(self.connection)
         self.interrupts = InterruptRepository(self.connection)
         self.outbox = OutboxRepository(self.connection)
+        self.command_receipts = CommandReceiptRepository(self.connection)
         return self
 
     def begin(self) -> None:
