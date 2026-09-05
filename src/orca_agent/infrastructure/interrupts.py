@@ -25,6 +25,8 @@ from orca_agent.domain.json_types import (
 )
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.events import KernelEvent
+from orca_agent.orchestration.p3_kernel import P3KernelEvent
+from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from orca_agent.orchestration.transitions import (
     InterruptProjectionOp,
     InterruptProjectionOperation,
@@ -68,7 +70,7 @@ class InterruptRepository:
             run_id = RunId(str(row[1]))
             status = InterruptStatus(str(row[3]))
             schema_version = stored_int(row[4], what="interrupt schema_version", minimum=1)
-            if schema_version != CURRENT_SCHEMA_VERSION or str(row[5]) != ENGINE_VERSION:
+            if not _supported_version(schema_version, str(row[5])):
                 raise StateIntegrityError("stored interrupt version is unsupported")
             request_event_id = EventId(str(row[6]))
             terminal_event_id = None if row[7] is None else EventId(str(row[7]))
@@ -279,7 +281,7 @@ class InterruptRepository:
     def apply_operations(
         self,
         *,
-        event: KernelEvent,
+        event: KernelEvent | P3KernelEvent,
         operations: tuple[InterruptProjectionOp, ...],
     ) -> None:
         for operation in operations:
@@ -290,7 +292,9 @@ class InterruptRepository:
             else:
                 self._finalize(event=event, operation=operation)
 
-    def _insert_pending(self, *, event: KernelEvent, operation: InterruptProjectionOp) -> None:
+    def _insert_pending(
+        self, *, event: KernelEvent | P3KernelEvent, operation: InterruptProjectionOp
+    ) -> None:
         if operation.kind is None or operation.payload is None or operation.expires_at_utc is None:
             raise StateIntegrityError("pending interrupt projection is incomplete")
         payload_hash = sha256_hex(operation.payload)
@@ -321,7 +325,9 @@ class InterruptRepository:
                 details={"run_id": str(operation.run_id)},
             ) from error
 
-    def _finalize(self, *, event: KernelEvent, operation: InterruptProjectionOp) -> None:
+    def _finalize(
+        self, *, event: KernelEvent | P3KernelEvent, operation: InterruptProjectionOp
+    ) -> None:
         response_json = None
         response_hash = None
         if operation.response is not None:
@@ -366,6 +372,13 @@ def _event_timestamp(value: object) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset().total_seconds() != 0:
         raise StateIntegrityError("interrupt event timestamp is not UTC")
     return parsed
+
+
+def _supported_version(schema_version: int, engine_version: str) -> bool:
+    return (schema_version, engine_version) in {
+        (CURRENT_SCHEMA_VERSION, ENGINE_VERSION),
+        (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
+    }
 
 
 __all__ = ["InterruptRecord", "InterruptRepository"]

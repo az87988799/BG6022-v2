@@ -10,9 +10,11 @@ from orca_agent.application.errors import StateIntegrityError
 from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import effect_spec_hash, sha256_hex
 from orca_agent.domain.ids import EffectId, EventId, InterruptId
+from orca_agent.domain.p3 import P3WorkflowState
 from orca_agent.orchestration.events import KernelEvent
+from orca_agent.orchestration.p3_kernel import P3KernelEvent, reduce_p3_event
 from orca_agent.orchestration.schema1_read import reduce_event
-from orca_agent.orchestration.state import KernelState, RunStatus
+from orca_agent.orchestration.state import RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
 
 from .outbox import OutboxStatus
@@ -52,8 +54,12 @@ def verify_run_projections(
 ) -> None:
     """Require interrupt and outbox projections to be derivable from events."""
 
-    _verify_interrupts(snapshot=snapshot, events=events, actual=interrupts)
-    _verify_outbox(snapshot=snapshot, events=events, actual=outbox)
+    if isinstance(snapshot.state, P3WorkflowState):
+        reducer = reduce_p3_event
+    else:
+        reducer = reduce_event
+    _verify_interrupts(snapshot=snapshot, events=events, actual=interrupts, reducer=reducer)
+    _verify_outbox(snapshot=snapshot, events=events, actual=outbox, reducer=reducer)
 
 
 def _verify_interrupts(
@@ -61,8 +67,9 @@ def _verify_interrupts(
     snapshot: RunSnapshot,
     events: Sequence[KernelEvent],
     actual: Sequence[InterruptRecord],
+    reducer: object,
 ) -> None:
-    expected = _expected_interrupts(events)
+    expected = _expected_interrupts(events, reducer=reducer)
     actual_by_id: dict[InterruptId, InterruptRecord] = {}
     for record in actual:
         if record.interrupt_id in actual_by_id:
@@ -93,7 +100,8 @@ def _verify_interrupts(
             raise StateIntegrityError("interrupt projection does not match event history")
 
     pending = tuple(record for record in actual if record.status is InterruptStatus.PENDING)
-    if snapshot.state.status is RunStatus.WAITING_FOR_INPUT:
+    effective_status = RunStatus(snapshot.state.status.value)
+    if effective_status is RunStatus.WAITING_FOR_INPUT:
         if (
             len(pending) != 1
             or snapshot.state.pending_interrupt_id is None
@@ -104,11 +112,13 @@ def _verify_interrupts(
         raise StateIntegrityError("non-waiting run has a pending interrupt projection")
 
 
-def _expected_interrupts(events: Sequence[KernelEvent]) -> dict[InterruptId, _ExpectedInterrupt]:
+def _expected_interrupts(
+    events: Sequence[KernelEvent | P3KernelEvent], *, reducer: object
+) -> dict[InterruptId, _ExpectedInterrupt]:
     expected: dict[InterruptId, _ExpectedInterrupt] = {}
-    state: KernelState | None = None
+    state: object | None = None
     for event in events:
-        transition = reduce_event(state, event)
+        transition = reducer(state, event)  # type: ignore[operator]
         for operation in transition.interrupt_operations:
             if operation.operation is InterruptProjectionOperation.INSERT_PENDING:
                 if (
@@ -161,11 +171,12 @@ def _verify_outbox(
     snapshot: RunSnapshot,
     events: Sequence[KernelEvent],
     actual: Sequence[OutboxRecord],
+    reducer: object,
 ) -> None:
     expected: dict[EffectId, tuple[KernelEvent, object]] = {}
-    state: KernelState | None = None
+    state: object | None = None
     for event in events:
-        transition = reduce_event(state, event)
+        transition = reducer(state, event)  # type: ignore[operator]
         for effect in transition.effects:
             effect_id = effect.effect_id(event.event_id)
             if effect_id in expected:

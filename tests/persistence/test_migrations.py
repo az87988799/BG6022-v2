@@ -47,7 +47,7 @@ def test_connection_policy_and_fresh_schema(tmp_path) -> None:
                 connection,
                 clock=FrozenClock(datetime(2026, 9, 4, tzinfo=UTC)),
             )
-            == 5
+            == 6
         )
         tables = {
             row[0]
@@ -56,7 +56,7 @@ def test_connection_policy_and_fresh_schema(tmp_path) -> None:
             ).fetchall()
         }
         assert {"schema_migrations", "runs", "events", "interrupts", "outbox"} <= tables
-        assert not {"actions", "jobs", "evidence", "artifacts"} & tables
+        assert {"actions", "jobs", "evidence", "artifacts", "workflow_records"} <= tables
     finally:
         connection.close()
 
@@ -73,7 +73,7 @@ def test_migration_is_idempotent_across_close_and_reopen(tmp_path) -> None:
     reopened = _connection(tmp_path)
     try:
         clock.advance(timedelta(seconds=5))
-        assert apply_migrations(reopened, clock=clock) == 5
+        assert apply_migrations(reopened, clock=clock) == 6
         second = reopened.execute(
             "SELECT version, name, checksum, applied_at_utc FROM schema_migrations"
         ).fetchall()
@@ -115,7 +115,7 @@ def test_registry_gaps_and_future_database_versions_fail_closed(tmp_path) -> Non
         apply_migrations(connection)
         connection.execute(
             "INSERT INTO schema_migrations(version, name, checksum, applied_at_utc) "
-            "VALUES (6, 'future', ?, '2026-09-04T00:00:00.000000Z')",
+            "VALUES (7, 'future', ?, '2026-09-04T00:00:00.000000Z')",
             ("1" * 64,),
         )
         with pytest.raises(MigrationVersionError):
@@ -158,6 +158,7 @@ def test_historical_migration_checksums_are_frozen() -> None:
         "21353d3f1dd37b5237b588056457cde33bd6138849266328bd08033a391dc998",
         "36ad3bff16d21bdaca3f56fb6b545147e6deb008adb67cabea5a6e02e5ed8eab",
         "1cdafd5008f195a6ec6063edba9c86f5c974fb106a229511aa379b9b2dd85a11",
+        "e334e8a88a95deb43baabfa33946aa30d793f74ea15bea0b1cf540056787fc0a",
     )
 
 
@@ -311,7 +312,7 @@ def test_v2_upgrades_existing_v1_data_and_backfills_immutable_effect_metadata(tm
         ] == [1, 2, 3]
         foreign_keys = [tuple(row) for row in connection.execute("PRAGMA foreign_key_list(outbox)")]
         assert {row[2] for row in foreign_keys} >= {"events", "runs"}
-        assert apply_migrations(connection) == 5
+        assert apply_migrations(connection) == 6
         upgraded = OutboxRepository(connection).get(effect_id)
         assert upgraded is not None
         assert upgraded.completion_protocol == 4
@@ -321,7 +322,7 @@ def test_v2_upgrades_existing_v1_data_and_backfills_immutable_effect_metadata(tm
         assert [
             row[0]
             for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")
-        ] == [1, 2, 3, 4, 5]
+        ] == [1, 2, 3, 4, 5, 6]
         interrupt_foreign_keys = [
             tuple(row) for row in connection.execute("PRAGMA foreign_key_list(interrupts)")
         ]

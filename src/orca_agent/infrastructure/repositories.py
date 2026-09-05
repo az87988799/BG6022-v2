@@ -16,8 +16,12 @@ from orca_agent.domain.canonical import canonical_json_bytes
 from orca_agent.domain.errors import DomainError
 from orca_agent.domain.ids import EventId, RunId
 from orca_agent.domain.json_types import thaw_json
+from orca_agent.domain.p3 import P3WorkflowState
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.events import KernelEvent
+from orca_agent.orchestration.p3_kernel import P3KernelEvent
+from orca_agent.orchestration.p3_replay import verify_p3_snapshot
+from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from orca_agent.orchestration.replay import state_hash, verify_snapshot
 from orca_agent.orchestration.state import KernelState
 from orca_agent.orchestration.versions import ENGINE_VERSION
@@ -56,7 +60,7 @@ class RunSnapshot:
     schema_version: int
     engine_version: str
     revision: int
-    state: KernelState
+    state: KernelState | P3WorkflowState
     state_hash: str
     last_event_id: EventId
     created_at_utc: datetime
@@ -65,7 +69,7 @@ class RunSnapshot:
 
 @dataclass(frozen=True)
 class StoredEvent:
-    event: KernelEvent
+    event: KernelEvent | P3KernelEvent
     command_hash: str
 
 
@@ -88,14 +92,19 @@ class RunRepository:
             schema_version = stored_int(row[1], what="run schema_version", minimum=1)
             revision = stored_int(row[3], what="run revision", minimum=1)
             stored_run_id = RunId(str(row[0]))
-            state = KernelState.model_validate_json(str(row[5]))
+            engine_version = str(row[2])
+            if schema_version == CURRENT_SCHEMA_VERSION and engine_version == ENGINE_VERSION:
+                state = KernelState.model_validate_json(str(row[5]), strict=True)
+            elif schema_version == P3_SCHEMA_VERSION and engine_version == P3_ENGINE_VERSION:
+                state = P3WorkflowState.model_validate_json(str(row[5]), strict=True)
+            else:
+                raise StateIntegrityError("stored run version is unsupported")
             stored_hash = str(row[6])
             if (
                 stored_run_id != run_id
                 or state.run_id != run_id
                 or state.status.value != str(row[4])
-                or schema_version != CURRENT_SCHEMA_VERSION
-                or str(row[2]) != ENGINE_VERSION
+                or engine_version not in (ENGINE_VERSION, P3_ENGINE_VERSION)
             ):
                 raise StateIntegrityError("stored run state does not match run metadata")
             if state_hash(state) != stored_hash:
@@ -158,7 +167,7 @@ class RunRepository:
         *,
         run_id: RunId,
         expected_revision: int,
-        state: KernelState,
+        state: KernelState | P3WorkflowState,
         event_id: EventId,
         updated_at_utc: datetime,
     ) -> bool:
@@ -196,13 +205,26 @@ class RunRepository:
         stored_events = events.list_for_run(run_id)
         event_values = tuple(item.event for item in stored_events)
         try:
-            verify_snapshot(
-                snapshot=snapshot.state,
-                stored_state_hash=snapshot.state_hash,
-                stored_revision=snapshot.revision,
-                stored_last_event_id=snapshot.last_event_id,
-                events=event_values,
-            )
+            if isinstance(snapshot.state, P3WorkflowState):
+                if not all(isinstance(event, P3KernelEvent) for event in event_values):
+                    raise StateIntegrityError("P3 run contains a non-P3 event")
+                verify_p3_snapshot(
+                    snapshot=snapshot.state,
+                    stored_state_hash=snapshot.state_hash,
+                    stored_revision=snapshot.revision,
+                    stored_last_event_id=snapshot.last_event_id,
+                    events=event_values,  # type: ignore[arg-type]
+                )
+            else:
+                if not all(isinstance(event, KernelEvent) for event in event_values):
+                    raise StateIntegrityError("P2 run contains a non-P2 event")
+                verify_snapshot(
+                    snapshot=snapshot.state,
+                    stored_state_hash=snapshot.state_hash,
+                    stored_revision=snapshot.revision,
+                    stored_last_event_id=snapshot.last_event_id,
+                    events=event_values,  # type: ignore[arg-type]
+                )
             if interrupts is None:
                 from .interrupts import InterruptRepository
 
@@ -238,36 +260,36 @@ class EventRepository:
             expected_revision = stored_int(row[6], what="event expected_revision", minimum=0)
             new_revision = stored_int(row[7], what="event new_revision", minimum=1)
             schema_version = stored_int(row[9], what="event schema_version", minimum=1)
-            event = KernelEvent.model_validate_json(
-                json.dumps(
-                    {
-                        "event_id": str(row[0]),
-                        "command_id": str(row[1]),
-                        "command_type": str(row[2]),
-                        "command_hash": str(row[3]),
-                        "run_id": str(row[4]),
-                        "sequence_no": sequence_no,
-                        "expected_revision": expected_revision,
-                        "new_revision": new_revision,
-                        "event_type": str(row[8]),
-                        "schema_version": schema_version,
-                        "engine_version": str(row[10]),
-                        "payload": json_value(str(row[11]), what="event payload"),
-                        "payload_hash": str(row[12]),
-                        "result": json_value(str(row[13]), what="event result"),
-                        "result_hash": str(row[14]),
-                        "occurred_at_utc": str(row[15]),
-                        "recorded_at_utc": str(row[16]),
-                        "previous_event_hash": str(row[17]),
-                        "event_hash": str(row[18]),
-                    },
-                    ensure_ascii=False,
+            values = {
+                "event_id": str(row[0]),
+                "command_id": str(row[1]),
+                "command_type": str(row[2]),
+                "command_hash": str(row[3]),
+                "run_id": str(row[4]),
+                "sequence_no": sequence_no,
+                "expected_revision": expected_revision,
+                "new_revision": new_revision,
+                "event_type": str(row[8]),
+                "schema_version": schema_version,
+                "engine_version": str(row[10]),
+                "payload": json_value(str(row[11]), what="event payload"),
+                "payload_hash": str(row[12]),
+                "result": json_value(str(row[13]), what="event result"),
+                "result_hash": str(row[14]),
+                "occurred_at_utc": str(row[15]),
+                "recorded_at_utc": str(row[16]),
+                "previous_event_hash": str(row[17]),
+                "event_hash": str(row[18]),
+            }
+            if schema_version == CURRENT_SCHEMA_VERSION and str(row[10]) == ENGINE_VERSION:
+                event = KernelEvent.model_validate_json(
+                    json.dumps(values, ensure_ascii=False), strict=True
                 )
-            )
-            if (
-                event.schema_version != CURRENT_SCHEMA_VERSION
-                or event.engine_version != ENGINE_VERSION
-            ):
+            elif schema_version == P3_SCHEMA_VERSION and str(row[10]) == P3_ENGINE_VERSION:
+                event = P3KernelEvent.model_validate_json(
+                    json.dumps(values, ensure_ascii=False), strict=True
+                )
+            else:
                 raise StateIntegrityError("stored event version is unsupported")
             result = ApplicationResult.model_validate_json(
                 json.dumps(thaw_json(event.result), ensure_ascii=False)
@@ -297,7 +319,7 @@ class EventRepository:
         ).fetchone()
         return None if row is None else self._load(row)
 
-    def get(self, event_id: EventId) -> KernelEvent | None:
+    def get(self, event_id: EventId) -> KernelEvent | P3KernelEvent | None:
         row = self.connection.execute(
             "SELECT event_id, command_id, command_type, command_hash, run_id, sequence_no, "
             "expected_revision, new_revision, event_type, schema_version, engine_version, "
@@ -307,7 +329,7 @@ class EventRepository:
         ).fetchone()
         return None if row is None else self._load(row).event
 
-    def append(self, event: KernelEvent, *, command_hash: str) -> None:
+    def append(self, event: KernelEvent | P3KernelEvent, *, command_hash: str) -> None:
         if event.command_hash != command_hash:
             raise StateIntegrityError("event command hash does not match append envelope")
         self.connection.execute(

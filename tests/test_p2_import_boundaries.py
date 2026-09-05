@@ -45,8 +45,16 @@ def test_reducer_does_not_import_infrastructure_or_io() -> None:
     assert all(not module.startswith("orca_agent.infrastructure") for module in modules)
 
 
-def test_no_future_execution_package_was_created() -> None:
-    assert not (PACKAGE_ROOT / "execution").exists()
+def test_p3_execution_stages_keep_the_offline_boundary() -> None:
+    assert (PACKAGE_ROOT / "execution").exists()
+    assert (PACKAGE_ROOT / "evidence").exists()
+    assert (PACKAGE_ROOT / "reporting").exists()
     assert not (PACKAGE_ROOT / "orca").exists()
-    assert not (PACKAGE_ROOT / "evidence").exists()
-    assert not (PACKAGE_ROOT / "reporting").exists()
+    violations = [
+        f"{path.name}:{module}"
+        for stage in ("execution", "evidence", "reporting")
+        for path in (PACKAGE_ROOT / stage).rglob("*.py")
+        for module in _imports(path)
+        if _top_level(module) in {"subprocess", "socket", "requests", "httpx", "openai"}
+    ]
+    assert violations == []

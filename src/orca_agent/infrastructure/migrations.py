@@ -1206,6 +1206,170 @@ def _post_apply_v5(connection: sqlite3.Connection) -> None:
             outbox.verify_completion_namespace(record)
 
 
+# P3 adds only new append-oriented tables.  Migrations 1-5 and their checksums
+# are intentionally left untouched; the P2 kernel remains the durable event
+# and outbox owner while P3 records carry the version-2 workflow contracts.
+P3_WORKFLOW_STATEMENTS = (
+    """
+    CREATE TABLE workflow_records (
+        record_id       TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        record_type     TEXT NOT NULL,
+        schema_version  INTEGER NOT NULL CHECK (schema_version >= 1),
+        engine_version   TEXT NOT NULL,
+        record_json     TEXT NOT NULL,
+        record_hash     TEXT NOT NULL CHECK (length(record_hash) = 64),
+        source_event_id TEXT,
+        created_at_utc  TEXT NOT NULL,
+        FOREIGN KEY (run_id, source_event_id)
+            REFERENCES events(run_id, event_id)
+    )
+    """.strip(),
+    "CREATE INDEX workflow_records_run_type ON workflow_records("
+    "run_id, record_type, created_at_utc)",
+    """
+    CREATE TRIGGER workflow_records_no_update
+    BEFORE UPDATE ON workflow_records
+    BEGIN
+        SELECT RAISE(ABORT, 'workflow records are append-only');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER workflow_records_no_delete
+    BEFORE DELETE ON workflow_records
+    BEGIN
+        SELECT RAISE(ABORT, 'workflow records are append-only');
+    END;
+    """.strip(),
+    """
+    CREATE TABLE actions (
+        action_id       TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        conversation_id TEXT NOT NULL,
+        action_json     TEXT NOT NULL,
+        action_hash     TEXT NOT NULL CHECK (length(action_hash) = 64),
+        envelope_hash   TEXT NOT NULL CHECK (length(envelope_hash) = 64),
+        budget_hash     TEXT NOT NULL CHECK (length(budget_hash) = 64),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        approval_grant_id TEXT,
+        execution_id    TEXT UNIQUE,
+        ledger_state    TEXT NOT NULL CHECK (
+            ledger_state IN ('planned', 'approved', 'submitting', 'submitted',
+                             'succeeded', 'failed', 'cancelled')
+        ),
+        created_at_utc  TEXT NOT NULL,
+        updated_at_utc  TEXT NOT NULL
+    )
+    """.strip(),
+    "CREATE UNIQUE INDEX actions_run_action_unique ON actions(run_id, action_id)",
+    """
+    CREATE TRIGGER actions_identity_immutable
+    BEFORE UPDATE ON actions
+    WHEN NEW.action_id IS NOT OLD.action_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.conversation_id IS NOT OLD.conversation_id
+      OR NEW.action_json IS NOT OLD.action_json
+      OR NEW.action_hash IS NOT OLD.action_hash
+      OR NEW.envelope_hash IS NOT OLD.envelope_hash
+      OR NEW.budget_hash IS NOT OLD.budget_hash
+      OR NEW.idempotency_key IS NOT OLD.idempotency_key
+      OR NEW.created_at_utc IS NOT OLD.created_at_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'action identity is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TABLE jobs (
+        job_id          TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        action_id       TEXT NOT NULL REFERENCES actions(action_id),
+        execution_id    TEXT NOT NULL UNIQUE,
+        input_hash      TEXT NOT NULL CHECK (length(input_hash) = 64),
+        fixture_id      TEXT NOT NULL,
+        fixture_version TEXT NOT NULL,
+        fixture_hash    TEXT NOT NULL CHECK (length(fixture_hash) = 64),
+        status          TEXT NOT NULL CHECK (status IN ('submitted', 'succeeded', 'failed')),
+        raw_result_artifact_id TEXT,
+        result_hash     TEXT,
+        created_at_utc  TEXT NOT NULL,
+        updated_at_utc  TEXT NOT NULL,
+        FOREIGN KEY (run_id, action_id) REFERENCES actions(run_id, action_id)
+    )
+    """.strip(),
+    """
+    CREATE TRIGGER jobs_identity_immutable
+    BEFORE UPDATE ON jobs
+    WHEN NEW.job_id IS NOT OLD.job_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.action_id IS NOT OLD.action_id
+      OR NEW.execution_id IS NOT OLD.execution_id
+      OR NEW.input_hash IS NOT OLD.input_hash
+      OR NEW.fixture_id IS NOT OLD.fixture_id
+      OR NEW.fixture_version IS NOT OLD.fixture_version
+      OR NEW.fixture_hash IS NOT OLD.fixture_hash
+      OR NEW.created_at_utc IS NOT OLD.created_at_utc
+    BEGIN
+        SELECT RAISE(ABORT, 'job identity is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TABLE artifacts (
+        artifact_id     TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        action_id       TEXT,
+        execution_id    TEXT,
+        content_hash    TEXT NOT NULL CHECK (length(content_hash) = 64),
+        size_bytes      INTEGER NOT NULL CHECK (size_bytes >= 0),
+        media_type      TEXT NOT NULL,
+        relative_path   TEXT NOT NULL,
+        created_at_utc  TEXT NOT NULL,
+        UNIQUE (content_hash, relative_path)
+    )
+    """.strip(),
+    """
+    CREATE TRIGGER artifacts_no_update
+    BEFORE UPDATE ON artifacts
+    BEGIN
+        SELECT RAISE(ABORT, 'artifacts are immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER artifacts_no_delete
+    BEFORE DELETE ON artifacts
+    BEGIN
+        SELECT RAISE(ABORT, 'artifacts are immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TABLE evidence (
+        evidence_id     TEXT PRIMARY KEY,
+        run_id          TEXT NOT NULL REFERENCES runs(run_id),
+        action_id       TEXT NOT NULL REFERENCES actions(action_id),
+        execution_id    TEXT NOT NULL,
+        artifact_id     TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        evidence_json   TEXT NOT NULL,
+        evidence_hash   TEXT NOT NULL CHECK (length(evidence_hash) = 64),
+        created_at_utc  TEXT NOT NULL,
+        FOREIGN KEY (run_id, action_id) REFERENCES actions(run_id, action_id)
+    )
+    """.strip(),
+    """
+    CREATE TRIGGER evidence_no_update
+    BEFORE UPDATE ON evidence
+    BEGIN
+        SELECT RAISE(ABORT, 'evidence is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER evidence_no_delete
+    BEFORE DELETE ON evidence
+    BEGIN
+        SELECT RAISE(ABORT, 'evidence is immutable');
+    END;
+    """.strip(),
+)
+
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
@@ -1238,6 +1402,11 @@ DEFAULT_MIGRATIONS = (
         statements=V5_TERMINAL_METADATA_STATEMENTS,
         post_apply=_post_apply_v5,
         post_apply_id="p2-terminal-metadata-and-namespace-v1",
+    ),
+    Migration(
+        version=6,
+        name="p3_water_workflow_records_and_artifacts",
+        statements=P3_WORKFLOW_STATEMENTS,
     ),
 )
 
@@ -1362,6 +1531,7 @@ __all__ = [
     "V2_HARDENING_STATEMENTS",
     "V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS",
     "V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS",
+    "P3_WORKFLOW_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",

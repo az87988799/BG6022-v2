@@ -50,6 +50,8 @@ from orca_agent.orchestration.effect_receipts import (
 )
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import EventType, KernelEvent
+from orca_agent.orchestration.p3_kernel import P3KernelEvent
+from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from orca_agent.orchestration.schema1_read import read_error_text
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
@@ -184,7 +186,7 @@ class OutboxRepository:
             verify_sha256(payload, payload_hash)
             spec_hash = str(row[10])
             status = OutboxStatus(str(row[11]))
-            if schema_version != CURRENT_SCHEMA_VERSION or str(row[7]) != ENGINE_VERSION:
+            if not _supported_version(schema_version, str(row[7])):
                 raise StateIntegrityError("stored outbox version is unsupported")
             run_id = RunId(str(row[1]))
             effect_class = EffectClass(str(row[5]))
@@ -572,7 +574,7 @@ class OutboxRepository:
     def register_effects(
         self,
         *,
-        event: KernelEvent,
+        event: KernelEvent | P3KernelEvent,
         run_id: RunId,
         effects: tuple[EffectSpec, ...],
         available_at_utc: datetime,
@@ -1279,7 +1281,9 @@ class OutboxRepository:
             "direct outbox completion is disabled; use EffectCompletionService"
         )
 
-    def bind_audit_event(self, *, effect_id: EffectId, event: KernelEvent) -> OutboxRecord:
+    def bind_audit_event(
+        self, *, effect_id: EffectId, event: KernelEvent | P3KernelEvent
+    ) -> OutboxRecord:
         """Reject post-hoc binding; protocol-4 binding is one atomic UPDATE."""
 
         raise EffectAuditNotReadyError(
@@ -1292,7 +1296,9 @@ class OutboxRepository:
             raise StateIntegrityError("effect was not found")
         return record
 
-    def _verify_audit_candidate(self, record: OutboxRecord, event: KernelEvent) -> None:
+    def _verify_audit_candidate(
+        self, record: OutboxRecord, event: KernelEvent | P3KernelEvent
+    ) -> None:
         payload = event.payload
         if payload.get("effect_id") != str(record.effect_id):
             raise EffectAuditConflictError("audit event effect ID does not match effect")
@@ -1353,6 +1359,13 @@ def _policy_version(registry: object) -> int:
     if type(value) is not int or value < 1:
         raise ValueError("dispatch policy version must be a positive integer")
     return value
+
+
+def _supported_version(schema_version: int, engine_version: str) -> bool:
+    return (schema_version, engine_version) in {
+        (CURRENT_SCHEMA_VERSION, ENGINE_VERSION),
+        (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
+    }
 
 
 def _rollback(connection: sqlite3.Connection) -> None:

@@ -23,6 +23,9 @@ dev = [
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.setuptools.package-data]
+orca_agent = ["py.typed", "fixtures/*.json"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

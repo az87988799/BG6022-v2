@@ -1,0 +1,12 @@
+{
+  "fixture_id": "water_sp_v1",
+  "fixture_version": "1",
+  "molecule_ref": "water",
+  "charge": 0,
+  "multiplicity": 1,
+  "environment": "gas",
+  "method_profile_id": "fake.water.sp.v1",
+  "energy": -75.0,
+  "unit": "Hartree",
+  "source": "fake_fixture"
+}

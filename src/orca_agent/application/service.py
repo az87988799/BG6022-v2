@@ -61,7 +61,7 @@ from orca_agent.orchestration.events import EventType, KernelEvent
 from orca_agent.orchestration.reducer import reduce_event
 from orca_agent.orchestration.replay import state_hash
 from orca_agent.orchestration.result_contract import expected_application_result
-from orca_agent.orchestration.state import RunStatus
+from orca_agent.orchestration.state import KernelState, RunStatus
 
 from .results import ApplicationResult
 
@@ -211,6 +211,8 @@ class KernelApplicationService:
             interrupts=uow.interrupts,
             outbox=uow.outbox,
         )
+        if not isinstance(current.state, KernelState):
+            raise InvalidTransitionError("schema-2 P3 runs require the P3 application service")
         if isinstance(command, CancelRun) and uow.outbox.has_dispatching_effect(command.run_id):
             raise EffectInFlightError(
                 "run cancellation is blocked by an in-flight effect",

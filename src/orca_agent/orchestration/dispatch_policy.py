@@ -8,8 +8,10 @@ from enum import StrEnum
 from types import MappingProxyType
 
 from orca_agent.domain.hashing import sha256_hex
+from orca_agent.domain.p3 import P3WorkflowState, WorkflowPhase
 
 from .effects import EffectClass
+from .p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from .state import KernelState, RunStatus
 
 
@@ -45,9 +47,9 @@ class EffectRegistry:
     ) -> None:
         if type(policy_version) is not int or policy_version < 1:
             raise ValueError("policy_version must be a positive integer")
-        expected = P2_POLICY_RULES.get(policy_version)
+        expected = ALL_FIXED_POLICY_RULES.get(policy_version)
         if expected is None:
-            raise ValueError("unknown fixed P2 policy version")
+            raise ValueError("unknown fixed dispatch policy version")
         if registrations is None:
             registrations = expected
         values: dict[str, EffectRegistration] = {}
@@ -139,7 +141,34 @@ P2_POLICY_RULES = MappingProxyType(
         ),
     }
 )
+
+# P3 owns a separate fixed policy version.  It deliberately reuses the P2
+# kernel status machine and outbox protocol; P3 phase checks live in the P3
+# application/worker boundary and are never supplied by effect payload data.
+P3_POLICY_RULES = MappingProxyType(
+    {
+        3: (
+            EffectRegistration(
+                effect_type="external.p3.dispatch_fake",
+                effect_class=EffectClass.EXTERNAL,
+                allowed_statuses=frozenset({RunStatus.READY}),
+            ),
+            EffectRegistration(
+                effect_type="internal.p3.assess",
+                effect_class=EffectClass.INTERNAL,
+                allowed_statuses=frozenset({RunStatus.READY}),
+            ),
+            EffectRegistration(
+                effect_type="internal.p3.render_report",
+                effect_class=EffectClass.INTERNAL,
+                allowed_statuses=frozenset({RunStatus.READY}),
+            ),
+        )
+    }
+)
+ALL_FIXED_POLICY_RULES = MappingProxyType({**P2_POLICY_RULES, **P3_POLICY_RULES})
 DEFAULT_EFFECT_REGISTRY = EffectRegistry()
+P3_EFFECT_REGISTRY = EffectRegistry(policy_version=3)
 
 
 def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, object]):
@@ -149,7 +178,7 @@ def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, 
 
 
 def evaluate_dispatch(
-    state: KernelState,
+    state: KernelState | P3WorkflowState,
     effect: object,
     registry: EffectRegistry | Mapping[str, object] = DEFAULT_EFFECT_REGISTRY,
 ) -> DispatchDecision:
@@ -170,12 +199,27 @@ def evaluate_dispatch(
         return DispatchDecision.BLOCK
     if getattr(registration, "effect_class", None) is not effect_class:
         return DispatchDecision.BLOCK
-    if state.status in (RunStatus.CANCELLED, RunStatus.FAILED):
+    if isinstance(registry, EffectRegistry) and registry.policy_version == 3:
+        if not isinstance(state, P3WorkflowState):
+            return DispatchDecision.BLOCK
+        if state.schema_version != P3_SCHEMA_VERSION or state.engine_version != P3_ENGINE_VERSION:
+            return DispatchDecision.BLOCK
+        required_phase = {
+            "external.p3.dispatch_fake": WorkflowPhase.DISPATCH_PENDING,
+            "internal.p3.assess": WorkflowPhase.ASSESSMENT_PENDING,
+            "internal.p3.render_report": WorkflowPhase.REPORT_PENDING,
+        }.get(effect_type)
+        if state.phase is not required_phase:
+            return DispatchDecision.BLOCK
+    effective_status = (
+        RunStatus(state.status.value) if isinstance(state, P3WorkflowState) else state.status
+    )
+    if effective_status in (RunStatus.CANCELLED, RunStatus.FAILED):
         return DispatchDecision.CANCEL
     allowed_statuses = getattr(registration, "allowed_statuses", frozenset())
-    if state.status not in allowed_statuses:
+    if effective_status not in allowed_statuses:
         return DispatchDecision.BLOCK
-    if state.status is RunStatus.WAITING_FOR_INPUT:
+    if effective_status is RunStatus.WAITING_FOR_INPUT:
         if effect_class is EffectClass.EXTERNAL:
             return DispatchDecision.BLOCK
         if not getattr(registration, "safe_while_waiting", False):
@@ -188,5 +232,8 @@ __all__ = [
     "DispatchDecision",
     "EffectRegistration",
     "EffectRegistry",
+    "P2_POLICY_RULES",
+    "P3_POLICY_RULES",
+    "P3_EFFECT_REGISTRY",
     "evaluate_dispatch",
 ]

@@ -66,6 +66,7 @@ class OutboxWorker:
         lease_duration: timedelta = timedelta(seconds=30),
         max_attempts: int = 5,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
+        completion_service_factory: Callable[[], EffectCompletionService] | None = None,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
@@ -85,6 +86,7 @@ class OutboxWorker:
         self.lease_duration = lease_duration
         self.max_attempts = max_attempts
         self.registry = registry
+        self.completion_service_factory = completion_service_factory
 
     def run_once(self, *, limit: int = 1) -> tuple[DeliveryReport, ...]:
         """Deliver at most ``limit`` effects without invoking a handler pre-authorization."""
@@ -186,12 +188,17 @@ class OutboxWorker:
                     error_code=HandlerErrorCode.HANDLER_EXCEPTION,
                 )
             try:
-                completion = EffectCompletionService(
-                    self.database_path,
-                    clock=self.clock,
-                    registry=self.registry,
-                    max_attempts=self.max_attempts,
-                ).complete(permit, normalized)
+                completion_service = (
+                    self.completion_service_factory()
+                    if self.completion_service_factory is not None
+                    else EffectCompletionService(
+                        self.database_path,
+                        clock=self.clock,
+                        registry=self.registry,
+                        max_attempts=self.max_attempts,
+                    )
+                )
+                completion = completion_service.complete(permit, normalized)
             except LeaseLostError:
                 reports.append(
                     DeliveryReport(permit.effect.effect_id, "lease_lost", permit.generation)

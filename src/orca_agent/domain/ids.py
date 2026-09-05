@@ -106,6 +106,41 @@ class WorkerId(PrefixedId):
     _pattern = re.compile(r"^worker_[0-9a-f]{32}$")
 
 
+class ConversationId(PrefixedId):
+    prefix = "conversation"
+    _pattern = re.compile(r"^conversation_[0-9a-f]{32}$")
+
+
+class ApprovalGrantId(PrefixedId):
+    prefix = "approval"
+    _pattern = re.compile(r"^approval_[0-9a-f]{32}$")
+
+
+class ExecutionId(PrefixedId):
+    prefix = "execution"
+    _pattern = re.compile(r"^execution_[0-9a-f]{32}$")
+
+
+class JobId(PrefixedId):
+    prefix = "job"
+    _pattern = re.compile(r"^job_[0-9a-f]{32}$")
+
+
+class WorkflowRecordId(PrefixedId):
+    prefix = "workflow"
+    _pattern = re.compile(r"^workflow_[0-9a-f]{32}$")
+
+
+class AssessmentId(PrefixedId):
+    prefix = "assessment"
+    _pattern = re.compile(r"^assessment_[0-9a-f]{32}$")
+
+
+class ReportManifestId(PrefixedId):
+    prefix = "report"
+    _pattern = re.compile(r"^report_[0-9a-f]{32}$")
+
+
 EFFECT_NAMESPACE = uuid.UUID("9d5c0f3e-3b24-4f3f-9bde-7f07bb3f9473")
 
 
@@ -149,19 +184,26 @@ def is_new_external_command_id(value: CommandId) -> bool:
 
 __all__ = [
     "ActionId",
+    "ApprovalGrantId",
+    "AssessmentId",
     "ArtifactId",
     "ClaimId",
     "CommandId",
+    "ConversationId",
     "EFFECT_NAMESPACE",
     "EffectId",
     "EvidenceId",
     "EventId",
+    "ExecutionId",
     "InterruptId",
+    "JobId",
     "PlanProposalId",
     "PrimitiveId",
     "ProblemSpecId",
+    "ReportManifestId",
     "RunId",
     "WorkerId",
+    "WorkflowRecordId",
     "completion_command_id",
     "effect_id_for",
     "new_id",
