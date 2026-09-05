@@ -1,19 +1,22 @@
 # V2-P2 Acceptance
 
-- Status: NO-GO — independent approval, merge/main CI and user acceptance pending
+- Status: PASS — single-maintainer Owner acceptance; independent GitHub review waived
 - Date: 2026-09-05
 - Branch: `codex/v2-p2-hardening`
 - Implementation submitted for review: `e12de3e10d4b33df098899e3474ac1fef80138f2`
 - Acceptance PR: [#3](https://github.com/az87988799/BG6022-v2/pull/3)
 - Verified implementation workflow: [33937447424](https://github.com/az87988799/BG6022-v2/actions/runs/33937447424)
-- Independent GitHub approval: Pending; PR #3 has no reviews
-- Main merge: Pending; main remains `a001a31b6c0123a24e7e5d89774b0a1799024a27`
+- Independent GitHub approval: Waived by repository owner `az87988799`; GitHub does not permit a PR author to approve their own PR
+- Main merge: `5d899d4a03bc4600115f4a47c26f8544b9324bcd`
+- Main post-merge CI: [33952574495](https://github.com/az87988799/BG6022-v2/actions/runs/33952574495), all four jobs passed
+- User acceptance: PASS, single-maintainer owner instruction received 2026-09-05
 - Local environment: Python 3.14.6, SQLite 3.53.2; locked uv environment
 - Real ORCA/LLM/PubChem/RDKit execution: None
 - P3: Not started
 
 The implementation commit and CI above are fixed evidence, not a self-reference
-to this document's HEAD. Earlier 214-test/80.28% evidence is superseded.
+to this document's HEAD. The owner acceptance is a project governance decision,
+not a synthetic GitHub review. Earlier 214-test/80.28% evidence is superseded.
 See [minimal-repair details](P2_MINIMAL_REPAIR.md) for the approved v4 checksum
 change, upgrade procedure, and separately committed repairs.
 
@@ -66,12 +69,13 @@ All four jobs passed in workflow 33937447424 for the fixed implementation commit
 - Windows Python 3.14
 - Quality
 
-## Remaining acceptance gates
+## Acceptance closure
 
-1. Independent GitHub review/Approval.
-2. Merge PR #3 into main after approval.
-3. Verify post-merge main CI.
-4. Record actual merge SHA and CI, then obtain user acceptance before P2 completion.
+The single-maintainer owner explicitly waived the independent GitHub review gate;
+GitHub's author-self-approval restriction remains recorded and no review was
+fabricated. PR #3 is merged, post-merge main CI is green, and owner acceptance is
+recorded above. P2 is accepted for this repository and P3 may begin from the
+merged main commit.
 
 No production or legacy database was changed, deleted or rebuilt. Old-v4 P2
 development databases must be backed up before recreation; no manual edits to
