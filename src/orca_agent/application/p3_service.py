@@ -789,6 +789,7 @@ class P3ApplicationService:
                         "assessment_artifact_hash": assessment_artifact.content_hash,
                     },
                 }
+            reporter.verify_in_transaction(uow, snapshot)
             manifest_entry = records.latest(
                 run_id=permit.effect.run_id,
                 record_type="report_manifest",
