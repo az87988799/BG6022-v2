@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from orca_agent.application.errors import StateIntegrityError
 from orca_agent.application.p3_service import P3ApplicationService
 from orca_agent.domain.ids import (
     ActionId,
@@ -81,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--json", action="store_true")
 
     verify = subparsers.add_parser("verify-report")
-    verify.add_argument("--run-id", "--run", dest="run_id", type=RunId)
+    verify.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
     verify.add_argument("--report", type=Path)
     verify.add_argument("--json", action="store_true")
 
@@ -155,18 +156,19 @@ def main(argv: list[str] | None = None) -> int:
             output = _export_report(service, args.run_id, args.format, args.output)
             return _emit(output, True, args.json)
         if args.operation == "verify-report":
-            if args.run_id is None and args.report is None:
-                raise ValueError("verify-report requires --run or --report")
-            if args.run_id is not None:
+            try:
                 output = P3ReportRenderer(
                     service.database_path,
                     service.state_root,
                     clock=service.clock,
                 ).verify(args.run_id)
                 if args.report is not None:
-                    output["exported_report"] = _verify_report(args.report)
-            else:
-                output = _verify_report(args.report)
+                    output["exported_report"] = _verify_report(service, args.run_id, args.report)
+                    output["valid"] = output["valid"] and output["exported_report"]["valid"]
+            except (StateIntegrityError, ValueError, OSError):
+                output = {"valid": False, "code": "report_verification_failed"}
+            if not output["valid"]:
+                output["code"] = "report_verification_failed"
             return _emit(output, bool(output["valid"]), args.json)
         if args.operation == "replay-request":
             command = _load_request(args.file)
@@ -242,24 +244,30 @@ def _export_report(service: P3ApplicationService, run_id: RunId, format_name: st
     return {"valid": True, "path": str(output), "artifact_id": str(artifact_id)}
 
 
-def _verify_report(path: Path):
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+def _verify_report(service, run_id, path: Path):
+    if path.suffix.lower() not in (".md", ".json"):
         return {"valid": False, "path": str(path)}
-    if "FAKE FIXTURE ONLY" in text:
-        return {"valid": True, "path": str(path)}
-    try:
-        payload = json.loads(text)
-    except (UnicodeError, json.JSONDecodeError):
-        payload = None
-    valid = (
-        isinstance(payload, dict)
-        and payload.get("fake_marker") == "fake_fixture_only"
-        and payload.get("data_origin") == "fake_fixture"
-        and payload.get("real_scientific_result") is False
-        and payload.get("backend") == "fake"
-    )
+    with SQLiteUnitOfWork(service.database_path, clock=service.clock) as uow:
+        uow.begin()
+        entry = P3RecordRepository(uow.connection).latest(
+            run_id=run_id,
+            record_type="report_manifest",
+            model_type=ReportManifestV1,
+        )
+        if entry is None:
+            raise ValueError("report manifest missing")
+        manifest = entry[1]
+        artifact_id = (
+            manifest.markdown_artifact_id
+            if path.suffix.lower() == ".md"
+            else manifest.json_artifact_id
+        )
+        artifact = ArtifactRecordRepository(uow.connection).get(artifact_id)
+        if artifact is None or artifact.run_id != run_id:
+            raise ValueError("report artifact owner differs")
+        expected = ArtifactStore(service.state_root).read(artifact)
+        valid = path.read_bytes() == expected
+        uow.commit()
     return {"valid": valid, "path": str(path)}
 
 

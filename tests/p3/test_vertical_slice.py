@@ -153,7 +153,7 @@ def test_p3_expired_approval_is_rejected_without_dispatch(tmp_path) -> None:
     assert not rejected.accepted
     assert rejected.code == "interrupt_expired"
     assert service.backend.execution_count() == 0
-    assert service.inspect(started.run_id).state.phase is WorkflowPhase.AWAITING_APPROVAL
+    assert service.inspect(started.run_id).state.phase is WorkflowPhase.FAILED
 
 
 def test_p3_cancel_before_approval_is_durable_and_idempotent(tmp_path) -> None:

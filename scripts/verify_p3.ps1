@@ -96,8 +96,8 @@ if ($completed.backend_execution_count -ne 1) {
 }
 
 $replayed = Invoke-P3Cli @("replay-request", "--file", $approvalFile, "--json")
-if ($replayed.run_id -ne $start.run_id -or $replayed.phase -ne "completed") {
-    throw "approval replay did not return the completed original receipt"
+if (($replayed | ConvertTo-Json -Depth 30 -Compress) -ne ($approved | ConvertTo-Json -Depth 30 -Compress)) {
+    throw "approval replay differs from its original public result"
 }
 $afterReplay = Invoke-P3Cli @("worker", "--drain", "--max-effects", "20", "--json")
 if ($afterReplay.backend_execution_count -ne 1 -or $afterReplay.reports.Count -ne 0) {

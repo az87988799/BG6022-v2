@@ -72,6 +72,18 @@ The reproducible end-to-end check is `scripts/verify_p3.ps1`. It uses real CLI
 processes, validates approval gating, cross-process persistence, retry-safe
 execution, report verification, and conversation isolation.
 
+`verify-report --run <run_id>` verifies the accepted report and evidence chain.
+Add `--report <exported.md or exported.json>` to compare the exported bytes
+exactly with that run's artifact. `--report` alone is a parameter error.
+Report generation and completion both verify the underlying artifact bytes.
+
+Command retries return the original persisted public result. Use `inspect`
+for the current workflow state. Expired approval requests persist the expiry
+before returning `interrupt_expired`. A previously accepted submission can
+recover the same execution after approval expires. An unknown execution blocks
+cancellation; `execution_reconciliation_required` identifies retained execution
+facts requiring investigation. Dead-letter work is not automatically resumed.
+
 ## Acceptance governance
 
 This is a single-maintainer repository. The Owner may perform the final
