@@ -260,3 +260,245 @@ def test_cli_export_requires_run_and_exact_bytes(tmp_path):
             exported,
         )
         assert bad.returncode != 0 and json.loads(bad.stdout)["valid"] is False
+
+
+@pytest.mark.parametrize("expire", [False, True])
+def test_approval_and_expiry_write_failure_rolls_back_all_projections(
+    tmp_path, monkeypatch, expire
+):
+    from orca_agent.infrastructure.p3_records import P3RecordRepository
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+    service = P3ApplicationService(
+        tmp_path / "state", clock=FrozenClock(datetime(2026, 9, 5, tzinfo=UTC))
+    )
+    started = service.start()
+    command = _approval_command(service, started)
+    if expire:
+        service.clock.advance(timedelta(hours=24))
+
+    def counts():
+        with SQLiteUnitOfWork(service.database_path) as uow:
+            return tuple(
+                uow.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                for table in ("events", "outbox", "command_receipts", "workflow_records")
+            )
+
+    before = counts()
+    original = P3RecordRepository.append
+
+    def fail_after_write(repository, **kwargs):
+        result = original(repository, **kwargs)
+        if kwargs["record_type"] == "workflow_state":
+            raise RuntimeError("after workflow record write, before commit")
+        return result
+
+    monkeypatch.setattr(P3RecordRepository, "append", fail_after_write)
+    assert not service.approve(command).accepted
+    assert counts() == before
+    assert service.inspect(started.run_id).ledger_state is LedgerState.PLANNED
+    monkeypatch.setattr(P3RecordRepository, "append", original)
+    first = service.approve(command)
+    assert first.accepted is not expire
+    assert service.approve(command) == first
+    if expire:
+        assert first.code == "interrupt_expired" and first.revision == 3
+        assert dict(first.details) == {}
+        changed = command.model_copy(update={"action_hash": "0" * 64})
+        assert service.approve(changed).code == "duplicate_command_conflict"
+        assert service.inspect(started.run_id).outbox == ()
+
+
+def test_command_public_result_replay_after_completion_in_new_process(tmp_path):
+    import json
+
+    from orca_agent.execution.commands import StartWaterRun
+
+    service = P3ApplicationService(tmp_path / "state")
+    start = StartWaterRun.create()
+    first_start = service.start(start)
+    approve = _approval_command(service, first_start)
+    first_approve = service.approve(approve)
+    assert [r.outcome for r in service.create_worker().run_once(limit=3)] == ["succeeded"] * 3
+    for name, command, expected in (
+        ("start", start, first_start),
+        ("approve", approve, first_approve),
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_text(command.model_dump_json(), encoding="utf-8")
+        result = cli_process(tmp_path, service.state_root, "replay-request", "--file", path)
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == expected.model_dump(mode="json")
+    assert service.backend.execution_count() == 1
+
+
+def test_cancel_replays_the_whole_original_result(tmp_path):
+    service, _, started = prepared(tmp_path)
+    command = CancelWaterRun.create(
+        run_id=started.run_id,
+        conversation_id=started.conversation_id,
+        expected_revision=service.inspect(started.run_id).revision,
+    )
+    result = service.cancel(command)
+    assert result.accepted
+    assert service.cancel(command) == result
+
+
+def test_submission_transaction_wins_concurrent_cancel(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    from orca_agent.infrastructure.p3_records import ActionRepository
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+    service, clock, started = prepared(tmp_path)
+    effect = service.inspect(started.run_id).state.dispatch_effect_id
+    _, permit = _authorize_effect(service, effect, clock, 1)
+    gateway = FakeExecutionGateway(service.database_path, service.state_root, clock=clock)
+    written, cancel_attempted = Event(), Event()
+    original_update, original_begin = ActionRepository.update_ledger, SQLiteUnitOfWork.__enter__
+
+    def update(repository, **kwargs):
+        result = original_update(repository, **kwargs)
+        if kwargs["state"] is LedgerState.SUBMITTING:
+            written.set()
+            assert cancel_attempted.wait(5)
+        return result
+
+    def begin(uow):
+        if current_thread().name.startswith("cancel"):
+            cancel_attempted.set()
+        return original_begin(uow)
+
+    monkeypatch.setattr(ActionRepository, "update_ledger", update)
+    monkeypatch.setattr(SQLiteUnitOfWork, "__enter__", begin)
+    command = CancelWaterRun.create(
+        run_id=started.run_id, conversation_id=started.conversation_id, expected_revision=3
+    )
+    with (
+        ThreadPoolExecutor(1, thread_name_prefix="gateway") as dispatch_pool,
+        ThreadPoolExecutor(1, thread_name_prefix="cancel") as cancel_pool,
+    ):
+        running = dispatch_pool.submit(gateway.execute, permit)
+        assert written.wait(5)
+        cancelling = cancel_pool.submit(service.cancel, command)
+        assert running.result(timeout=10).success
+        assert cancelling.result(timeout=10).code == "effect_in_flight"
+    assert service.backend.execution_count() == 1
+
+
+def test_report_completion_receipt_write_failure_rolls_back(tmp_path, monkeypatch):
+    from orca_agent.infrastructure.command_receipts import CommandReceiptRepository
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+    service, clock, started = prepared(tmp_path)
+    worker = service.create_worker()
+    assert [r.outcome for r in worker.run_once(limit=2)] == ["succeeded"] * 2
+    before = service.inspect(started.run_id)
+    original = CommandReceiptRepository.append_event
+
+    def fail(repository, **kwargs):
+        original(repository, **kwargs)
+        raise RuntimeError("after completion receipt write")
+
+    monkeypatch.setattr(CommandReceiptRepository, "append_event", fail)
+    with pytest.raises(RuntimeError):
+        worker.run_once(limit=1)
+    assert service.inspect(started.run_id).revision == before.revision
+    assert service.inspect(started.run_id).ledger_state is LedgerState.SUBMITTED
+    with SQLiteUnitOfWork(service.database_path) as uow:
+        assert (
+            uow.connection.execute("SELECT count(*) FROM command_receipts").fetchone()[0]
+            == before.revision
+        )
+    monkeypatch.setattr(CommandReceiptRepository, "append_event", original)
+    clock.advance(timedelta(minutes=2))
+    assert worker.run_once(limit=1)[0].outcome == "succeeded"
+    assert service.backend.execution_count() == 1
+
+
+def test_cancel_transaction_wins_concurrent_worker(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    from orca_agent.infrastructure.p3_records import ActionRepository
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+    service, _, started = prepared(tmp_path)
+    worker = service.create_worker()
+    written, worker_attempted = Event(), Event()
+    original_update, original_enter = ActionRepository.update_ledger, SQLiteUnitOfWork.__enter__
+
+    def update(repository, **kwargs):
+        result = original_update(repository, **kwargs)
+        if kwargs["state"] is LedgerState.CANCELLED:
+            written.set()
+            assert worker_attempted.wait(5)
+        return result
+
+    def enter(uow):
+        if current_thread().name.startswith("worker"):
+            worker_attempted.set()
+        return original_enter(uow)
+
+    monkeypatch.setattr(ActionRepository, "update_ledger", update)
+    monkeypatch.setattr(SQLiteUnitOfWork, "__enter__", enter)
+    command = CancelWaterRun.create(
+        run_id=started.run_id, conversation_id=started.conversation_id, expected_revision=3
+    )
+    with (
+        ThreadPoolExecutor(1, thread_name_prefix="cancel") as cancel_pool,
+        ThreadPoolExecutor(1, thread_name_prefix="worker") as worker_pool,
+    ):
+        cancelling = cancel_pool.submit(service.cancel, command)
+        assert written.wait(5)
+        running = worker_pool.submit(worker.run_once, limit=1)
+        assert cancelling.result(timeout=10).accepted
+        assert running.result(timeout=10) == ()
+    assert service.backend.execution_count() == 0
+
+
+def test_cli_rejects_other_run_unknown_format_and_missing_file(tmp_path):
+    import json
+
+    service, _, first = prepared(tmp_path)
+    assert len(service.create_worker().run_once(limit=3)) == 3
+    second = service.start()
+    assert service.approve(_approval_command(service, second)).accepted
+    assert len(service.create_worker().run_once(limit=3)) == 3
+    exported = tmp_path / "first.md"
+    assert (
+        cli_process(
+            tmp_path,
+            service.state_root,
+            "report",
+            "--run",
+            first.run_id,
+            "--format",
+            "md",
+            "--output",
+            exported,
+        ).returncode
+        == 0
+    )
+    unknown = tmp_path / "first.txt"
+    unknown.write_bytes(exported.read_bytes())
+    for path in (exported, unknown, tmp_path / "missing.json"):
+        result = cli_process(
+            tmp_path, service.state_root, "verify-report", "--run", second.run_id, "--report", path
+        )
+        assert result.returncode == 2 and json.loads(result.stdout)["valid"] is False
+
+
+def test_invalid_expired_approval_does_not_expire_someone_elses_binding(tmp_path):
+    service = P3ApplicationService(
+        tmp_path / "state", clock=FrozenClock(datetime(2026, 9, 5, tzinfo=UTC))
+    )
+    started = service.start()
+    command = _approval_command(service, started)
+    service.clock.advance(timedelta(hours=24))
+    assert not service.approve(command.model_copy(update={"action_hash": "0" * 64})).accepted
+    assert service.inspect(started.run_id).revision == 2
+    assert service.inspect(started.run_id).ledger_state is LedgerState.PLANNED
+    expired = service.approve(command)
+    assert expired.code == "interrupt_expired" and expired.revision == 3

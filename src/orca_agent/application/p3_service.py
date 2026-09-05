@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from pydantic import field_validator
@@ -13,7 +13,6 @@ from orca_agent.application.errors import (
     ApplicationError,
     DuplicateCommandConflictError,
     EffectInFlightError,
-    InterruptExpiredError,
     InvalidTransitionError,
     RevisionConflictError,
     StateIntegrityError,
@@ -51,7 +50,7 @@ from orca_agent.domain.p3 import (
     ReportManifestV1,
     WorkflowPhase,
 )
-from orca_agent.infrastructure.clock import Clock, SystemClock
+from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
 from orca_agent.infrastructure.p3_records import (
     ActionRepository,
     ArtifactRecordRepository,
@@ -72,6 +71,7 @@ from orca_agent.orchestration.p3_kernel import (
     expected_p3_application_result,
     reduce_p3_event,
 )
+from orca_agent.orchestration.p3_replay import replay_p3
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from orca_agent.orchestration.replay import state_hash
 from orca_agent.orchestration.state import RunStatus
@@ -215,14 +215,9 @@ class P3ApplicationService:
                     )
                     if not isinstance(verified.state, P3WorkflowState):
                         raise StateIntegrityError("P3 command is bound to a non-P3 run")
+                    public = self._original_result(uow, command)
                     uow.commit()
-                    return self._result_from_state(
-                        command.run_id,
-                        command.conversation_id,
-                        verified.revision,
-                        verified.state,
-                        True,
-                    )
+                    return public
 
                 created_event, created_transition, created_result = self._create_p3_run(
                     uow=uow,
@@ -318,14 +313,9 @@ class P3ApplicationService:
                     created_at_utc=now,
                     source_event_id=request_event.event_id,
                 )
+                public = self._original_result(uow, command)
                 uow.commit()
-                return self._result_from_state(
-                    command.run_id,
-                    command.conversation_id,
-                    request_result.revision,
-                    request_transition.next_state,
-                    True,
-                )
+                return public
         except Exception as error:
             return self._safe_reject(command.run_id, command.conversation_id, error)
 
@@ -358,14 +348,9 @@ class P3ApplicationService:
                     )
                     if not isinstance(snapshot.state, P3WorkflowState):
                         raise StateIntegrityError("approval is bound to a non-P3 run")
+                    public = self._original_result(uow, command)
                     uow.commit()
-                    return self._result_from_state(
-                        command.run_id,
-                        command.conversation_id,
-                        snapshot.revision,
-                        snapshot.state,
-                        True,
-                    )
+                    return public
                 snapshot = uow.runs.get_verified(
                     command.run_id,
                     uow.events,
@@ -387,8 +372,6 @@ class P3ApplicationService:
                 if interrupt is None or interrupt.status.value != "pending":
                     raise InvalidTransitionError("approval interrupt is not pending")
                 now = self.clock.now_utc()
-                if interrupt.expires_at_utc <= now:
-                    raise InterruptExpiredError("approval interrupt has expired")
                 action_record = ActionRepository(uow.connection).get(command.action_id)
                 if action_record is None or action_record.run_id != command.run_id:
                     raise InvalidTransitionError("approval action is not owned by the run")
@@ -410,6 +393,36 @@ class P3ApplicationService:
                     )
                 ):
                     raise StateIntegrityError("approval interrupt projection is inconsistent")
+                if now >= interrupt.expires_at_utc:
+                    _, transition, event = self._persist_p3_event(
+                        uow=uow,
+                        current=snapshot,
+                        command_id=command.command_id,
+                        command_type=CommandType.RESOLVE_INTERRUPT,
+                        command_hash=command.command_hash(),
+                        event_type=EventType.INTERRUPT_EXPIRED,
+                        payload={
+                            "interrupt_id": str(command.interrupt_id),
+                            "expires_at_utc": format_utc(interrupt.expires_at_utc),
+                        },
+                        occurred_at_utc=now,
+                    )
+                    ActionRepository(uow.connection).update_ledger(
+                        action_id=command.action_id,
+                        state=LedgerState.FAILED,
+                        expected_state=LedgerState.PLANNED,
+                        now=now,
+                    )
+                    P3RecordRepository(uow.connection).append(
+                        run_id=command.run_id,
+                        record_type="workflow_state",
+                        record=transition.next_state,
+                        created_at_utc=now,
+                        source_event_id=event.event_id,
+                    )
+                    public = self._original_result(uow, command)
+                    uow.commit()
+                    return public
                 approval = ApprovalGrantV1.create(
                     approval_grant_id=command.approval_grant_id
                     or _deterministic_approval_id(command.run_id, command.action_id),
@@ -501,14 +514,9 @@ class P3ApplicationService:
                     created_at_utc=now,
                     source_event_id=event.event_id,
                 )
+                public = self._original_result(uow, command)
                 uow.commit()
-                return self._result_from_state(
-                    command.run_id,
-                    command.conversation_id,
-                    result.revision,
-                    transition.next_state,
-                    True,
-                )
+                return public
         except Exception as error:
             return self._safe_reject(command.run_id, command.conversation_id, error)
 
@@ -541,14 +549,9 @@ class P3ApplicationService:
                     )
                     if not isinstance(snapshot.state, P3WorkflowState):
                         raise StateIntegrityError("cancel is bound to a non-P3 run")
+                    public = self._original_result(uow, command)
                     uow.commit()
-                    return self._result_from_state(
-                        command.run_id,
-                        command.conversation_id,
-                        snapshot.revision,
-                        snapshot.state,
-                        True,
-                    )
+                    return public
                 snapshot = uow.runs.get_verified(
                     command.run_id,
                     uow.events,
@@ -593,14 +596,9 @@ class P3ApplicationService:
                     created_at_utc=self.clock.now_utc(),
                     source_event_id=event.event_id,
                 )
+                public = self._original_result(uow, command)
                 uow.commit()
-                return self._result_from_state(
-                    command.run_id,
-                    command.conversation_id,
-                    result.revision,
-                    transition.next_state,
-                    True,
-                )
+                return public
         except Exception as error:
             return self._safe_reject(command.run_id, command.conversation_id, error)
 
@@ -1028,6 +1026,82 @@ class P3ApplicationService:
             raise RevisionConflictError("P3 expected revision was not current")
         uow.command_receipts.append_event(event=event, recorded_at_utc=occurred_at_utc)
         return result, transition, event
+
+    def _original_result(self, uow, command) -> P3Result:
+        """Reconstruct the fixed schema-2 public operation boundary from its receipt."""
+        receipt = uow.command_receipts.get(command.command_id)
+        expected_type = (
+            CommandType.CREATE_RUN
+            if isinstance(command, StartWaterRun)
+            else CommandType.RESOLVE_INTERRUPT
+            if isinstance(command, ApproveAction)
+            else CommandType.CANCEL_RUN
+        )
+        if (
+            receipt is None
+            or receipt.command_id != command.command_id
+            or receipt.command_hash != command.command_hash()
+            or receipt.command_type is not expected_type
+            or receipt.run_id != command.run_id
+        ):
+            raise DuplicateCommandConflictError("P3 command receipt binding differs")
+        uow.runs.get_verified(
+            command.run_id, uow.events, interrupts=uow.interrupts, outbox=uow.outbox
+        )
+        events = tuple(item.event for item in uow.events.list_for_run(command.run_id))
+        indices = [i for i, item in enumerate(events) if item.event_id == receipt.result_event_id]
+        if len(indices) != 1:
+            raise StateIntegrityError("P3 command result event missing")
+        index = indices[0]
+        event = events[index]
+        if (
+            event.command_id != command.command_id
+            or event.command_hash != command.command_hash()
+            or event.command_type is not expected_type
+        ):
+            raise StateIntegrityError("P3 receipt event identity differs")
+        if isinstance(command, StartWaterRun):
+            if index != 0 or len(events) < 2 or event.event_type is not EventType.RUN_CREATED:
+                raise StateIntegrityError("P3 start operation prefix is incomplete")
+            initial = replay_p3(events[:1])
+            request = events[1]
+            payload = request.payload
+            expected_payload = {
+                "conversation_id": str(initial.conversation_id),
+                "action_id": str(initial.action_id),
+                "action_hash": initial.action_hash,
+                "envelope_hash": initial.envelope_hash,
+                "budget_hash": initial.budget_hash,
+                "fixture_id": "water_sp_v1",
+                "fixture_version": "1",
+            }
+            if (
+                request.event_type is not EventType.INTERRUPT_REQUESTED
+                or request.command_type is not CommandType.REQUEST_INTERRUPT
+                or request.occurred_at_utc != event.occurred_at_utc
+                or payload.get("kind") != "p3.action_approval"
+                or payload.get("interrupt_id") != str(initial.approval_interrupt_id)
+                or dict(payload.get("payload", {})) != expected_payload
+                or datetime.fromisoformat(payload.get("expires_at_utc"))
+                != event.occurred_at_utc + timedelta(hours=24)
+            ):
+                raise StateIntegrityError("P3 start approval event binding differs")
+            index = 1
+        state = replay_p3(events[: index + 1])
+        if state.conversation_id != command.conversation_id:
+            raise StateIntegrityError("P3 historical conversation differs")
+        result = self._result_from_state(
+            command.run_id, command.conversation_id, index + 1, state, True
+        )
+        if events[index].event_type is EventType.INTERRUPT_EXPIRED:
+            return result.model_copy(
+                update={
+                    "accepted": False,
+                    "code": "interrupt_expired",
+                    "details": freeze_json_object({}),
+                }
+            )
+        return result
 
     def _result_from_state(
         self,

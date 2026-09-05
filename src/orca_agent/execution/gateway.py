@@ -284,13 +284,7 @@ class FakeExecutionGateway:
                     raise StateIntegrityError("execution intent binding is invalid")
                 intent = existing_intent[1]
             else:
-                P3RecordRepository(uow.connection).append(
-                    run_id=run_id,
-                    record_type="execution_intent",
-                    record=intent,
-                    created_at_utc=self.clock.now_utc(),
-                    source_event_id=source_event_id,
-                )
+                raise StateIntegrityError("approved execution intent is missing")
             uow.commit()
         return stored.action, approval, intent, load_water_fixture()
 
