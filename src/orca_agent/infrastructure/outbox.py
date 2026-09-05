@@ -22,7 +22,14 @@ from orca_agent.application.errors import (
 )
 from orca_agent.domain.errors import DomainError, HashMismatchError
 from orca_agent.domain.hashing import effect_spec_hash, sha256_hex, verify_sha256
-from orca_agent.domain.ids import EffectId, EventId, RunId, WorkerId, effect_id_for
+from orca_agent.domain.ids import (
+    EffectId,
+    EventId,
+    RunId,
+    WorkerId,
+    completion_command_id,
+    effect_id_for,
+)
 from orca_agent.domain.json_types import (
     FrozenJsonObject,
     freeze_json_object,
@@ -693,6 +700,33 @@ class OutboxRepository:
             ).fetchone()
         return stored_int(row[0], what="outbox count", minimum=0)
 
+    def verify_completion_namespace(self, record: OutboxRecord) -> None:
+        """Reject historical collisions, including the next dispatch generation.
+
+        UUID5 cannot be reversed. Recheck the imminent generation before every
+        claim; upgrade also checks every observed generation without overwriting
+        any historical receipt.
+        """
+        for generation in range(1, record.attempt_count + 2):
+            for outcome in ("succeeded", "dead_letter"):
+                identifier = completion_command_id(record.effect_id, generation, outcome)
+                row = self.connection.execute(
+                    "SELECT run_id, binding_kind, result_event_id FROM command_receipts "
+                    "WHERE command_id = ?",
+                    (str(identifier),),
+                ).fetchone()
+                if row is not None and not (
+                    str(row[0]) == str(record.run_id)
+                    and str(row[1]) == "event"
+                    and str(row[2]) == str(record.audit_event_id)
+                    and generation == record.terminal_generation
+                    and outcome == record.status.value
+                ):
+                    raise StateIntegrityError(
+                        "historical command occupies an internal completion ID",
+                        details={"effect_id": str(record.effect_id), "generation": generation},
+                    )
+
     def claim_due(
         self,
         *,
@@ -767,6 +801,7 @@ class OutboxRepository:
                 for row in rows:
                     after = (str(row[13]), str(row[28]), str(row[0]))
                     record = self._load(row)
+                    self.verify_completion_namespace(record)
                     snapshot = snapshots.get(record.run_id)
                     if snapshot is None:
                         raise StateIntegrityError("outbox effect references an unknown run")

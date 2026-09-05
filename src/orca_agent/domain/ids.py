@@ -142,6 +142,11 @@ def completion_command_id(
     return CommandId(f"command_{value.hex}")
 
 
+def is_new_external_command_id(value: CommandId) -> bool:
+    """Only new external writes require UUID4; historical reads stay permissive."""
+    return uuid.UUID(hex=str(value).removeprefix("command_")).version == 4
+
+
 __all__ = [
     "ActionId",
     "ArtifactId",

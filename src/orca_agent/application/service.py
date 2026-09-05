@@ -31,7 +31,7 @@ from orca_agent.application.errors import (
 )
 from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import GENESIS_EVENT_HASH
-from orca_agent.domain.ids import EventId, InterruptId, new_id
+from orca_agent.domain.ids import EventId, InterruptId, is_new_external_command_id, new_id
 from orca_agent.domain.json_types import JsonObject, freeze_json_object, thaw_json
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
 from orca_agent.infrastructure.command_receipts import CommandBindingKind, CommandReceipt
@@ -201,6 +201,8 @@ class KernelApplicationService:
         stored = uow.events.get_by_command_id(command.command_id)
         if stored is not None:
             raise StateIntegrityError("event exists without its command receipt")
+        if not is_new_external_command_id(command.command_id):
+            raise InvalidTransitionError("new external command ID must be UUID4")
         if isinstance(command, CreateRun):
             return self._create_run(uow, command, command_hash)
         current = uow.runs.get_verified(
