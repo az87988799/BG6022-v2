@@ -1,0 +1,260 @@
+{
+  "manifest_version": 1,
+  "workflow": "p4",
+  "provider": "fake",
+  "started_at_utc": "2026-09-06T05:28:19.0973293Z",
+  "state_root": "E:\\BG6022-v2\\.tmp-verify-p4-doc",
+  "auto_confirm_identity": true,
+  "cases": [
+    {
+      "name": "water",
+      "run_id": "run_7d20a15a0a9c496b93cf741498646bed",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_7d20a15a0a9c496b93cf741498646bed",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_2bdc5dbe876b40d28d7ea7de4b4d9aef",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_ab83cea9542a5086aa4c31e95305f889",
+          "registry_snapshot_id": "workflow_6b8d8fd591055e0f817f3314d5a3ad98",
+          "identity_effect_id": "effect_24d3326038db52ee9829d1ee7b92fb2a"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_24d3326038db52ee9829d1ee7b92fb2a",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "confirm": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_7d20a15a0a9c496b93cf741498646bed",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_2bdc5dbe876b40d28d7ea7de4b4d9aef",
+        "details": {
+          "phase": "plan_ready",
+          "identity_confirmed": true,
+          "planning_valid": true,
+          "execution_ready": false,
+          "execution_approved": false,
+          "real_scientific_result": false,
+          "confirmed_molecule_id": "workflow_baf542a7ca195470aeb724abf8646551",
+          "prepared_plan_id": "workflow_68e4fd792c0754c4880f38dc9d296cdf",
+          "prepared_plan_hash": "be6355449bff36d3725c2eef7b2b181644d4b4c51ed5ba82ebd6646ccfbd8ce2"
+        }
+      },
+      "replay": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_7d20a15a0a9c496b93cf741498646bed",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_2bdc5dbe876b40d28d7ea7de4b4d9aef",
+        "details": {
+          "confirmed_molecule_id": "workflow_baf542a7ca195470aeb724abf8646551",
+          "execution_approved": false,
+          "execution_ready": false,
+          "identity_confirmed": true,
+          "phase": "plan_ready",
+          "planning_valid": true,
+          "prepared_plan_hash": "be6355449bff36d3725c2eef7b2b181644d4b4c51ed5ba82ebd6646ccfbd8ce2",
+          "prepared_plan_id": "workflow_68e4fd792c0754c4880f38dc9d296cdf",
+          "real_scientific_result": false
+        }
+      },
+      "export": {
+        "valid": true,
+        "path": "E:\\BG6022-v2\\.tmp-verify-p4-doc\\water-plan.md",
+        "format": "md"
+      }
+    },
+    {
+      "name": "ethanol",
+      "run_id": "run_432aa3855d25458089ea900e98face13",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_432aa3855d25458089ea900e98face13",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_c92f2cb9a5e9408b8c06484ae9c1942c",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_f8e42f8cb4b1565aa4e591600f968608",
+          "registry_snapshot_id": "workflow_216835fa4f5d5860a728996470a40c5d",
+          "identity_effect_id": "effect_8a0f82899a5e58cc9768a70978df809b"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_8a0f82899a5e58cc9768a70978df809b",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "confirm": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_432aa3855d25458089ea900e98face13",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_c92f2cb9a5e9408b8c06484ae9c1942c",
+        "details": {
+          "phase": "plan_ready",
+          "identity_confirmed": true,
+          "planning_valid": true,
+          "execution_ready": false,
+          "execution_approved": false,
+          "real_scientific_result": false,
+          "confirmed_molecule_id": "workflow_f45825702076516ebc08b18a254bfaff",
+          "prepared_plan_id": "workflow_b1de917984f352d1a7a40d671a185eb7",
+          "prepared_plan_hash": "0a5227334e8061dfd5f8546586bd51873ad990d91469a84d0befe64e333dca1f"
+        }
+      },
+      "replay": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_432aa3855d25458089ea900e98face13",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_c92f2cb9a5e9408b8c06484ae9c1942c",
+        "details": {
+          "confirmed_molecule_id": "workflow_f45825702076516ebc08b18a254bfaff",
+          "execution_approved": false,
+          "execution_ready": false,
+          "identity_confirmed": true,
+          "phase": "plan_ready",
+          "planning_valid": true,
+          "prepared_plan_hash": "0a5227334e8061dfd5f8546586bd51873ad990d91469a84d0befe64e333dca1f",
+          "prepared_plan_id": "workflow_b1de917984f352d1a7a40d671a185eb7",
+          "real_scientific_result": false
+        }
+      },
+      "export": {
+        "valid": true,
+        "path": "E:\\BG6022-v2\\.tmp-verify-p4-doc\\ethanol-plan.md",
+        "format": "md"
+      }
+    },
+    {
+      "name": "benzene",
+      "run_id": "run_9d839e9cd15548cbb891c6752cded7c3",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_9d839e9cd15548cbb891c6752cded7c3",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_ad6c6b66bd164cc381688933c671b48a",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_ac4a439fe56e516ab0c46236b11a673a",
+          "registry_snapshot_id": "workflow_9ac941a2b3f65280b849cc3a98387e48",
+          "identity_effect_id": "effect_bea14ed5ca735ff9a4f089813de3fd75"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_bea14ed5ca735ff9a4f089813de3fd75",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "confirm": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_9d839e9cd15548cbb891c6752cded7c3",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_ad6c6b66bd164cc381688933c671b48a",
+        "details": {
+          "phase": "plan_ready",
+          "identity_confirmed": true,
+          "planning_valid": true,
+          "execution_ready": false,
+          "execution_approved": false,
+          "real_scientific_result": false,
+          "confirmed_molecule_id": "workflow_25e15fe087f9566583c373e21910d93b",
+          "prepared_plan_id": "workflow_cbd1b5d49fad5e04824f6a515df44d6d",
+          "prepared_plan_hash": "65fc97a6015e45794d372ebff20fe6c8137f3200634945e9fa7d2577a1cba922"
+        }
+      },
+      "replay": {
+        "accepted": true,
+        "code": "plan_ready",
+        "run_id": "run_9d839e9cd15548cbb891c6752cded7c3",
+        "revision": 3,
+        "status": "ready",
+        "phase": "plan_ready",
+        "conversation_id": "conversation_ad6c6b66bd164cc381688933c671b48a",
+        "details": {
+          "confirmed_molecule_id": "workflow_25e15fe087f9566583c373e21910d93b",
+          "execution_approved": false,
+          "execution_ready": false,
+          "identity_confirmed": true,
+          "phase": "plan_ready",
+          "planning_valid": true,
+          "prepared_plan_hash": "65fc97a6015e45794d372ebff20fe6c8137f3200634945e9fa7d2577a1cba922",
+          "prepared_plan_id": "workflow_cbd1b5d49fad5e04824f6a515df44d6d",
+          "real_scientific_result": false
+        }
+      },
+      "export": {
+        "valid": true,
+        "path": "E:\\BG6022-v2\\.tmp-verify-p4-doc\\benzene-plan.md",
+        "format": "md"
+      }
+    }
+  ],
+  "cancellation": {
+    "accepted": true,
+    "code": "run_cancelled",
+    "run_id": "run_71e805ee18f24d338e153f0228702d7a",
+    "revision": 2,
+    "status": "cancelled",
+    "phase": "cancelled",
+    "conversation_id": "conversation_765773b82acf48b5867ba93d84b7ddf9",
+    "details": {
+      "phase": "cancelled",
+      "reason_code": "user_cancelled"
+    }
+  },
+  "wrong_binding": {
+    "accepted": false,
+    "code": "invalid_transition",
+    "run_id": "run_7d20a15a0a9c496b93cf741498646bed",
+    "revision": 3,
+    "status": "ready",
+    "phase": "plan_ready",
+    "conversation_id": "conversation_2bdc5dbe876b40d28d7ea7de4b4d9aef",
+    "details": {}
+  },
+  "backend_counts": {
+    "actions": 0,
+    "jobs": 0
+  },
+  "completed_at_utc": "2026-09-06T05:28:45.3680076Z"
+}
