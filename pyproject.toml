@@ -12,6 +12,12 @@ dependencies = [
     "pydantic>=2.13.5,<3",
 ]
 
+[project.optional-dependencies]
+p4 = [
+    "rdkit==2026.3.5",
+    "httpx==0.28.1",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8",

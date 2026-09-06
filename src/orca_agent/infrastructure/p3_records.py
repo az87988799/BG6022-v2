@@ -43,8 +43,19 @@ from orca_agent.domain.p3 import (
     P3WorkflowState,
     ReportManifestV1,
 )
+from orca_agent.domain.p4 import (
+    CandidateBundle,
+    ConfirmedMolecule,
+    LookupAttempt,
+    MoleculeQuery,
+    P4WorkflowState,
+    PreparedPlan,
+    ResponseEnvelope,
+)
+from orca_agent.domain.registry import RegistrySnapshot
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
+from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 
 from .clock import format_utc, parse_utc
 from .repositories import json_text, json_value, stored_int
@@ -63,6 +74,14 @@ _RECORD_CONTRACTS: dict[str, tuple[type[BaseModel], int, str]] = {
     "fake_job_result": (FakeJobResult, P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
     "assessment": (FixtureScientificAssessment, P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
     "report_manifest": (ReportManifestV1, P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
+    "p4.molecule_query": (MoleculeQuery, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.registry_snapshot": (RegistrySnapshot, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.lookup_attempt": (LookupAttempt, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.response_envelope": (ResponseEnvelope, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.candidate_bundle": (CandidateBundle, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.confirmed_molecule": (ConfirmedMolecule, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.prepared_plan": (PreparedPlan, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p4.workflow_state": (P4WorkflowState, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
 }
 
 
@@ -70,7 +89,7 @@ def _record_contract(record_type: str) -> tuple[type[BaseModel], int, str]:
     try:
         return _RECORD_CONTRACTS[record_type]
     except KeyError as error:
-        raise StateIntegrityError("unsupported P3 workflow record type") from error
+        raise StateIntegrityError("unsupported workflow record type") from error
 
 
 def _model_json(value: BaseModel) -> str:
@@ -238,6 +257,11 @@ class P3RecordRepository:
             "WHERE run_id = ? ORDER BY created_at_utc, rowid",
             (str(run_id),),
         ).fetchall()
+        return self._parse_list_rows(run_id, rows)
+
+    def _parse_list_rows(
+        self, run_id: RunId, rows: list[sqlite3.Row] | list[tuple[object, ...]]
+    ) -> tuple[tuple[WorkflowRecordId, str, object], ...]:
         values: list[tuple[WorkflowRecordId, str, object]] = []
         for row in rows:
             try:
@@ -263,6 +287,136 @@ class P3RecordRepository:
             except (DomainError, TypeError, ValueError, ArithmeticError) as error:
                 raise StateIntegrityError("stored P3 workflow record is invalid") from error
         return tuple(values)
+
+
+class P4RecordRepository(P3RecordRepository):
+    """Thin typed helper over the existing append-only workflow_records table."""
+
+    def list_for_run(self, run_id: RunId) -> tuple[tuple[WorkflowRecordId, str, object], ...]:
+        """List only P4 records so P1 IDs cannot cross this typed boundary."""
+
+        rows = self.connection.execute(
+            "SELECT record_id, record_type, schema_version, engine_version, record_json, "
+            "record_hash, source_event_id, created_at_utc FROM workflow_records "
+            "WHERE run_id = ? AND record_type LIKE 'p4.%' "
+            "ORDER BY created_at_utc, rowid",
+            (str(run_id),),
+        ).fetchall()
+        return self._parse_list_rows(run_id, rows)
+
+    def append_p4(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        record: BaseModel,
+        created_at_utc: datetime,
+        source_event_id: object | None = None,
+        record_id: WorkflowRecordId | None = None,
+    ) -> WorkflowRecordId:
+        return self.append_any(
+            run_id=run_id,
+            record_type=record_type,
+            record=record,
+            schema_version=P4_SCHEMA_VERSION,
+            engine_version=P4_ENGINE_VERSION,
+            created_at_utc=created_at_utc,
+            source_event_id=source_event_id,
+            record_id=record_id,
+        )
+
+    def latest_p4(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> tuple[WorkflowRecordId, ModelT] | None:
+        return self.latest_any(
+            run_id=run_id,
+            record_type=record_type,
+            model_type=model_type,
+            schema_version=P4_SCHEMA_VERSION,
+            engine_version=P4_ENGINE_VERSION,
+        )
+
+    def get_exact(
+        self,
+        *,
+        run_id: RunId,
+        record_id: WorkflowRecordId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> ModelT | None:
+        expected_model, expected_schema, expected_engine = _record_contract(record_type)
+        if (
+            expected_model is not model_type
+            or expected_schema != P4_SCHEMA_VERSION
+            or expected_engine != P4_ENGINE_VERSION
+        ):
+            raise StateIntegrityError("P4 record lookup does not match its typed contract")
+        row = self.connection.execute(
+            "SELECT record_id, run_id, record_type, schema_version, engine_version, "
+            "record_json, record_hash, source_event_id FROM workflow_records "
+            "WHERE record_id = ?",
+            (str(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            if (
+                str(row[0]) != str(record_id)
+                or str(row[1]) != str(run_id)
+                or str(row[2]) != record_type
+                or stored_int(row[3], what="P4 record schema_version", minimum=1)
+                != P4_SCHEMA_VERSION
+                or str(row[4]) != P4_ENGINE_VERSION
+            ):
+                raise StateIntegrityError("P4 record owner or version is invalid")
+            parsed = _parse_model(str(row[5]), expected_model, what="P4 record")
+            if _model_json(parsed) != str(row[5]) or _record_hash(parsed) != str(row[6]):
+                raise StateIntegrityError("P4 record hash does not match")
+            _verify_source_event(self.connection, row[7], run_id)
+            return parsed
+        except StateIntegrityError:
+            raise
+        except (DomainError, TypeError, ValueError, ArithmeticError) as error:
+            raise StateIntegrityError("stored P4 record is invalid") from error
+
+    def attempts_for_effect(self, *, run_id: RunId, effect_id: object) -> tuple[LookupAttempt, ...]:
+        entries = self.list_for_run(run_id)
+        return tuple(
+            record
+            for _record_id, record_type, record in entries
+            if record_type == "p4.lookup_attempt"
+            and isinstance(record, LookupAttempt)
+            and record.effect_id == effect_id
+        )
+
+    def attempt_for_generation(
+        self,
+        *,
+        run_id: RunId,
+        effect_id: object,
+        generation: int,
+        request_sequence: int = 1,
+    ) -> LookupAttempt | None:
+        matches = tuple(
+            item
+            for item in self.attempts_for_effect(run_id=run_id, effect_id=effect_id)
+            if item.generation == generation and item.request_sequence == request_sequence
+        )
+        if len(matches) > 1:
+            raise StateIntegrityError("P4 lookup attempt key is duplicated")
+        return matches[0] if matches else None
+
+    def latest_attempt(self, *, run_id: RunId, effect_id: object) -> LookupAttempt | None:
+        values = self.attempts_for_effect(run_id=run_id, effect_id=effect_id)
+        return (
+            max(values, key=lambda item: (item.generation, item.request_sequence))
+            if values
+            else None
+        )
 
 
 def _verify_source_event(
@@ -736,6 +890,7 @@ __all__ = [
     "EvidenceRepository",
     "JobRepository",
     "P3RecordRepository",
+    "P4RecordRepository",
     "StoredAction",
     "StoredArtifact",
     "StoredEvidence",

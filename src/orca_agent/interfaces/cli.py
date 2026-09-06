@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -15,12 +16,25 @@ from orca_agent.domain.ids import (
     ConversationId,
     InterruptId,
     RunId,
+    WorkflowRecordId,
 )
 from orca_agent.domain.p3 import ReportManifestV1, WorkflowPhase
+from orca_agent.domain.p4 import IdentityDecision, IdentityProvider, MoleculeInputKind
 from orca_agent.infrastructure.artifacts import ArtifactStore
 from orca_agent.infrastructure.p3_records import ArtifactRecordRepository, P3RecordRepository
+from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
-from orca_agent.orchestration.p3_versions import P3_FIXTURE_ID
+from orca_agent.orchestration.p3_versions import (
+    P3_ENGINE_VERSION,
+    P3_FIXTURE_ID,
+    P3_SCHEMA_VERSION,
+)
+from orca_agent.orchestration.p4_commands import (
+    CancelPlanningRun,
+    ConfirmMoleculeIdentity,
+    StartPlanningRun,
+)
+from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 from orca_agent.reporting.renderer import P3ReportRenderer
 
 from ..execution.commands import ApproveAction, CancelWaterRun, StartWaterRun
@@ -36,6 +50,30 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--new-conversation", action="store_true")
     start.add_argument("--save-request")
     start.add_argument("--json", action="store_true")
+
+    prepare = subparsers.add_parser("prepare")
+    identity_group = prepare.add_mutually_exclusive_group(required=True)
+    identity_group.add_argument("--name")
+    identity_group.add_argument("--cas")
+    identity_group.add_argument("--cid")
+    identity_group.add_argument("--smiles")
+    prepare.add_argument("--charge", type=int, required=True)
+    prepare.add_argument("--multiplicity", type=int, required=True)
+    prepare.add_argument(
+        "--provider",
+        type=IdentityProvider,
+        choices=tuple(IdentityProvider),
+        required=True,
+    )
+    prepare.add_argument(
+        "--protocol",
+        dest="protocol_id",
+        default="ground_state_baseline_r2scan3c_v1",
+    )
+    prepare.add_argument("--new-conversation", action="store_true")
+    prepare.add_argument("--command-id", type=_command_id)
+    prepare.add_argument("--save-request")
+    prepare.add_argument("--json", action="store_true")
 
     approve = subparsers.add_parser("approve")
     for name, value_type, required in (
@@ -61,11 +99,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
+    inspect.add_argument("--workflow", choices=("p3", "p4"))
     inspect.add_argument("--json", action="store_true")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--limit", "--max-effects", dest="limit", type=int, default=1)
     worker.add_argument("--drain", action="store_true")
+    worker.add_argument("--workflow", choices=("p3", "p4"), default="p3")
+    worker.add_argument("--allow-network", action="store_true")
     worker.add_argument("--json", action="store_true")
 
     cancel = subparsers.add_parser("cancel")
@@ -73,7 +114,36 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--conversation-id", type=ConversationId, required=True)
     cancel.add_argument("--expected-revision", type=int, required=True)
     cancel.add_argument("--reason-code", default="user_cancelled")
+    cancel.add_argument("--workflow", choices=("p3", "p4"))
     cancel.add_argument("--json", action="store_true")
+
+    confirm = subparsers.add_parser("confirm-identity")
+    confirm.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
+    confirm.add_argument("--conversation-id", type=ConversationId, required=True)
+    confirm.add_argument("--expected-revision", type=int, required=True)
+    confirm.add_argument("--interrupt-id", type=InterruptId, required=True)
+    confirm.add_argument("--query-id", type=WorkflowRecordId)
+    confirm.add_argument("--query-hash", required=True)
+    confirm.add_argument("--candidate-bundle-id", type=WorkflowRecordId)
+    confirm.add_argument("--candidate-bundle-hash")
+    confirm.add_argument("--candidate-set-hash", required=True)
+    confirm.add_argument("--candidate-id", required=True)
+    confirm.add_argument("--candidate-hash", required=True)
+    confirm.add_argument(
+        "--decision",
+        type=IdentityDecision,
+        choices=tuple(IdentityDecision),
+        required=True,
+    )
+    confirm.add_argument("--command-id", type=_command_id)
+    confirm.add_argument("--save-request")
+    confirm.add_argument("--json", action="store_true")
+
+    export_plan = subparsers.add_parser("export-plan")
+    export_plan.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
+    export_plan.add_argument("--format", choices=("md", "json"), default="md")
+    export_plan.add_argument("--output", type=Path, required=True)
+    export_plan.add_argument("--json", action="store_true")
 
     report = subparsers.add_parser("report")
     report.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
@@ -96,6 +166,110 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+        if args.operation == "prepare":
+            service = _p4_service(args.state_root)
+            input_kind, raw_input = _prepare_input(args)
+            command = StartPlanningRun.create(
+                input_kind=input_kind,
+                raw_input=raw_input,
+                charge=args.charge,
+                multiplicity=args.multiplicity,
+                provider=args.provider,
+                protocol_id=args.protocol_id,
+                command_id=args.command_id,
+                requested_at_utc=service.clock.now_utc(),
+                new_conversation=args.new_conversation,
+            )
+            _save_request(command, args.save_request)
+            result = service.start(command)
+            return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+        if args.operation == "confirm-identity":
+            service = _p4_service(args.state_root)
+            view = service.inspect(args.run_id)
+            if view.candidate_bundle is None:
+                raise ValueError("P4 candidate bundle is unavailable")
+            command = ConfirmMoleculeIdentity.create(
+                run_id=args.run_id,
+                conversation_id=args.conversation_id,
+                interrupt_id=args.interrupt_id,
+                expected_revision=args.expected_revision,
+                query_id=args.query_id or view.query.query_id,
+                query_hash=args.query_hash,
+                candidate_bundle_id=args.candidate_bundle_id or view.candidate_bundle.record_id,
+                candidate_bundle_hash=(
+                    args.candidate_bundle_hash or view.candidate_bundle.bundle_hash
+                ),
+                candidate_set_hash=args.candidate_set_hash,
+                candidate_id=args.candidate_id,
+                candidate_hash=args.candidate_hash,
+                decision=args.decision,
+                command_id=args.command_id,
+                requested_at_utc=service.clock.now_utc(),
+            )
+            _save_request(command, args.save_request)
+            result = service.confirm(command)
+            return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+        if args.operation == "export-plan":
+            service = _p4_service(args.state_root)
+            content = service.export_plan(args.run_id, format=args.format)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            if args.format == "json":
+                args.output.write_text(
+                    json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+            else:
+                if not isinstance(content, str):
+                    raise ValueError("P4 Markdown export is not text")
+                args.output.write_text(content, encoding="utf-8")
+            return _emit(
+                {"valid": True, "path": str(args.output), "format": args.format},
+                True,
+                args.json,
+            )
+        if args.operation == "worker" and args.workflow == "p4":
+            service = _p4_service(args.state_root, allow_network=args.allow_network)
+            worker = service.create_worker()
+            reports = []
+            while True:
+                batch = worker.run_once(limit=max(args.limit, 1))
+                reports.extend(asdict(item) for item in batch)
+                if not args.drain or not batch:
+                    break
+            return _emit({"workflow": "p4", "reports": reports}, True, args.json)
+        if args.operation == "inspect":
+            workflow = args.workflow or _detect_workflow(args.state_root, args.run_id)
+            if workflow == "p4":
+                return _emit(
+                    _p4_service(args.state_root).inspect(args.run_id).model_dump(mode="json"),
+                    True,
+                    args.json,
+                )
+        if args.operation == "cancel":
+            workflow = args.workflow or _detect_workflow(args.state_root, args.run_id)
+            if workflow == "p4":
+                service = _p4_service(args.state_root)
+                result = service.cancel(
+                    CancelPlanningRun.create(
+                        run_id=args.run_id,
+                        conversation_id=args.conversation_id,
+                        expected_revision=args.expected_revision,
+                        reason_code=args.reason_code,
+                        requested_at_utc=service.clock.now_utc(),
+                    )
+                )
+                return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+        if args.operation == "replay-request":
+            command = _load_request(args.file)
+            if isinstance(command, (StartPlanningRun, ConfirmMoleculeIdentity, CancelPlanningRun)):
+                service = _p4_service(args.state_root)
+                if isinstance(command, StartPlanningRun):
+                    result = service.start(command)
+                elif isinstance(command, ConfirmMoleculeIdentity):
+                    result = service.confirm(command)
+                else:
+                    result = service.cancel(command)
+                return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+
         service = P3ApplicationService(args.state_root)
         if args.operation == "start":
             if args.fixture != P3_FIXTURE_ID:
@@ -190,6 +364,48 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
 
+def _p4_service(state_root: str | Path, *, allow_network: bool = False):
+    from orca_agent.application.p4_service import P4ApplicationService
+
+    return P4ApplicationService(state_root, allow_network=allow_network)
+
+
+def _prepare_input(args) -> tuple[MoleculeInputKind, str]:
+    values = (
+        (MoleculeInputKind.NAME, args.name),
+        (MoleculeInputKind.CAS, args.cas),
+        (MoleculeInputKind.CID, args.cid),
+        (MoleculeInputKind.SMILES, args.smiles),
+    )
+    selected = tuple(item for item in values if item[1] is not None)
+    if len(selected) != 1:
+        raise ValueError("exactly one P4 molecule input is required")
+    return selected[0]
+
+
+def _detect_workflow(state_root: str | Path, run_id: RunId) -> str:
+    database_path = resolve_database_path(state_root)
+    if not database_path.exists():
+        raise ValueError("state database does not exist")
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT schema_version, engine_version FROM runs WHERE run_id = ?",
+            (str(run_id),),
+        ).fetchone()
+    if row is None:
+        raise ValueError("run was not found")
+    try:
+        schema_version = int(row[0])
+    except (TypeError, ValueError):
+        raise ValueError("run schema version is invalid") from None
+    engine_version = str(row[1])
+    if schema_version == P4_SCHEMA_VERSION and engine_version == P4_ENGINE_VERSION:
+        return "p4"
+    if schema_version == P3_SCHEMA_VERSION and engine_version == P3_ENGINE_VERSION:
+        return "p3"
+    raise ValueError("run workflow version is unsupported")
+
+
 def _command_id(value: str):
     from orca_agent.domain.ids import CommandId
 
@@ -211,6 +427,20 @@ def _load_request(path: Path):
     payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise ValueError("request file must contain a JSON object")
+    p4_command_models = {
+        "p4.prepare": StartPlanningRun,
+        "p4.confirm_identity": ConfirmMoleculeIdentity,
+        "p4.cancel": CancelPlanningRun,
+    }
+    if (
+        payload.get("schema_version") == P4_SCHEMA_VERSION
+        and payload.get("engine_version") == P4_ENGINE_VERSION
+    ):
+        command_type = payload.get("command_type")
+        model_type = p4_command_models.get(command_type)
+        if model_type is None:
+            raise ValueError("unsupported P4 command type")
+        return model_type.model_validate_json(raw, strict=True)
     if "fixture_id" in payload:
         return StartWaterRun.model_validate_json(raw, strict=True)
     return ApproveAction.model_validate_json(raw, strict=True)

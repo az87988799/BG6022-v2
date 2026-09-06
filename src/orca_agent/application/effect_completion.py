@@ -27,6 +27,7 @@ from orca_agent.domain.ids import (
 )
 from orca_agent.domain.json_types import JsonObject, thaw_json
 from orca_agent.domain.p3 import P3WorkflowState
+from orca_agent.domain.p4 import P4WorkflowState
 from orca_agent.infrastructure.clock import Clock, SystemClock
 from orca_agent.infrastructure.command_receipts import CommandBindingKind, CommandReceipt
 from orca_agent.infrastructure.outbox import (
@@ -53,6 +54,11 @@ from orca_agent.orchestration.p3_kernel import (
     P3KernelEvent,
     expected_p3_application_result,
     reduce_p3_event,
+)
+from orca_agent.orchestration.p4_kernel import (
+    P4KernelEvent,
+    expected_p4_application_result,
+    reduce_p4_event,
 )
 from orca_agent.orchestration.reducer import reduce_event
 from orca_agent.orchestration.result_contract import expected_application_result
@@ -95,6 +101,7 @@ class EffectCompletionService:
         successor_effect_factory: Callable[..., tuple[EffectSpec, ...]] | None = None,
         completion_metadata_factory: Callable[..., JsonObject] | None = None,
         completion_hook: Callable[..., None] | None = None,
+        retry_not_before_factory: Callable[..., datetime | None] | None = None,
     ) -> None:
         if type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("max_attempts must be positive")
@@ -106,6 +113,7 @@ class EffectCompletionService:
         self.successor_effect_factory = successor_effect_factory
         self.completion_metadata_factory = completion_metadata_factory
         self.completion_hook = completion_hook
+        self.retry_not_before_factory = retry_not_before_factory
 
     def complete(self, permit: DispatchPermit, result: object) -> EffectCompletionReport:
         """Persist success, retry, or dead-letter for one exact permit."""
@@ -174,10 +182,28 @@ class EffectCompletionService:
                 now=now,
             )
             if not terminal:
+                not_before = None
+                if self.retry_not_before_factory is not None:
+                    not_before = self.retry_not_before_factory(
+                        uow=uow,
+                        permit=permit,
+                        completion=completion,
+                        snapshot=snapshot,
+                    )
+                    if not_before is not None:
+                        try:
+                            from orca_agent.orchestration.temporal import ensure_utc
+
+                            not_before = ensure_utc(not_before)
+                        except (TypeError, ValueError, ArithmeticError) as error:
+                            raise StateIntegrityError(
+                                "retry not-before factory returned an invalid timestamp"
+                            ) from error
                 updated = uow.outbox.retry_dispatch_in_transaction(
                     permit=permit,
                     now=now,
                     error_code=completion.error_code or HandlerErrorCode.HANDLER_FAILED,
+                    not_before=not_before,
                 )
                 uow.commit()
                 return EffectCompletionReport(
@@ -451,6 +477,17 @@ def _build_completion_event(
             payload=payload,
             occurred_at_utc=occurred_at_utc,
         )
+    if isinstance(snapshot.state, P4WorkflowState):
+        return _build_p4_completion_event(
+            snapshot=snapshot,
+            events=events,
+            event_type=event_type,
+            command_id=command_id,
+            command_hash=command_hash,
+            command_type=command_type,
+            payload=payload,
+            occurred_at_utc=occurred_at_utc,
+        )
     from orca_agent.orchestration.commands import CommandType
 
     if not hasattr(events, "get"):
@@ -502,6 +539,71 @@ def _build_completion_event(
         engine_version=candidate.engine_version,
         schema_version=candidate.schema_version,
         command_hash=command_hash,
+        previous_event_hash=candidate.previous_event_hash,
+    )
+    return event, transition, result
+
+
+def _build_p4_completion_event(
+    *,
+    snapshot: RunSnapshot,
+    events: object,
+    event_type: EventType,
+    command_id: CommandId,
+    command_hash: str,
+    command_type: str,
+    payload: JsonObject,
+    occurred_at_utc: datetime,
+) -> tuple[P4KernelEvent, object, ApplicationResult]:
+    from orca_agent.orchestration.commands import CommandType
+
+    if not hasattr(events, "get") or not isinstance(snapshot.state, P4WorkflowState):
+        raise StorageError("P4 event repository or state is unavailable")
+    previous_event = events.get(snapshot.last_event_id)
+    if not isinstance(previous_event, P4KernelEvent):
+        raise StateIntegrityError("P4 previous event was not found")
+    event_id = new_id(EventId)
+    typed_command_type = CommandType(command_type)
+    placeholder = ApplicationResult.accepted_result(
+        code=event_type.value,
+        run_id=snapshot.run_id,
+        revision=snapshot.revision + 1,
+        status=RunStatus(snapshot.state.status.value),
+        event_id=event_id,
+    )
+    candidate = P4KernelEvent.create(
+        event_id=event_id,
+        command_id=command_id,
+        command_type=typed_command_type,
+        run_id=snapshot.run_id,
+        sequence_no=snapshot.revision + 1,
+        expected_revision=snapshot.revision,
+        event_type=event_type,
+        payload=payload,
+        result=placeholder,
+        occurred_at_utc=occurred_at_utc,
+        command_hash=command_hash,
+        previous_event_hash=previous_event.event_hash,
+    )
+    transition = reduce_p4_event(snapshot.state, candidate)
+    result = expected_p4_application_result(
+        prior_state=snapshot.state,
+        event=candidate,
+        transition=transition,
+    )
+    event = P4KernelEvent.create(
+        event_id=candidate.event_id,
+        command_id=candidate.command_id,
+        command_type=candidate.command_type,
+        run_id=candidate.run_id,
+        sequence_no=candidate.sequence_no,
+        expected_revision=candidate.expected_revision,
+        event_type=candidate.event_type,
+        payload=payload,
+        result=result,
+        occurred_at_utc=candidate.occurred_at_utc,
+        recorded_at_utc=candidate.recorded_at_utc,
+        command_hash=candidate.command_hash,
         previous_event_hash=candidate.previous_event_hash,
     )
     return event, transition, result

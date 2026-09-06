@@ -11,8 +11,10 @@ from orca_agent.domain.errors import DomainError
 from orca_agent.domain.hashing import effect_spec_hash, sha256_hex
 from orca_agent.domain.ids import EffectId, EventId, InterruptId
 from orca_agent.domain.p3 import P3WorkflowState
+from orca_agent.domain.p4 import P4WorkflowState
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent, reduce_p3_event
+from orca_agent.orchestration.p4_kernel import P4KernelEvent, reduce_p4_event
 from orca_agent.orchestration.schema1_read import reduce_event
 from orca_agent.orchestration.state import RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
@@ -48,7 +50,7 @@ class _ExpectedInterrupt:
 def verify_run_projections(
     *,
     snapshot: RunSnapshot,
-    events: Sequence[KernelEvent],
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent],
     interrupts: Sequence[InterruptRecord],
     outbox: Sequence[OutboxRecord],
 ) -> None:
@@ -56,6 +58,8 @@ def verify_run_projections(
 
     if isinstance(snapshot.state, P3WorkflowState):
         reducer = reduce_p3_event
+    elif isinstance(snapshot.state, P4WorkflowState):
+        reducer = reduce_p4_event
     else:
         reducer = reduce_event
     _verify_interrupts(snapshot=snapshot, events=events, actual=interrupts, reducer=reducer)
@@ -65,7 +69,7 @@ def verify_run_projections(
 def _verify_interrupts(
     *,
     snapshot: RunSnapshot,
-    events: Sequence[KernelEvent],
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent],
     actual: Sequence[InterruptRecord],
     reducer: object,
 ) -> None:

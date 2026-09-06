@@ -19,6 +19,7 @@ htmlcov/
 
 # Temporary and generated agent data
 .tmp/
+.tmp-*/
 tmp/
 agent_output/
 build/

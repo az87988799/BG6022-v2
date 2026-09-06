@@ -9,9 +9,11 @@ from types import MappingProxyType
 
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.p3 import P3WorkflowState, WorkflowPhase
+from orca_agent.domain.p4 import P4Phase, P4WorkflowState
 
 from .effects import EffectClass
 from .p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
+from .p4_versions import P4_ENGINE_VERSION, P4_POLICY_VERSION, P4_SCHEMA_VERSION
 from .state import KernelState, RunStatus
 
 
@@ -166,9 +168,26 @@ P3_POLICY_RULES = MappingProxyType(
         )
     }
 )
-ALL_FIXED_POLICY_RULES = MappingProxyType({**P2_POLICY_RULES, **P3_POLICY_RULES})
+P4_POLICY_RULES = MappingProxyType(
+    {
+        P4_POLICY_VERSION: (
+            EffectRegistration(
+                effect_type="external.p4.resolve_pubchem",
+                effect_class=EffectClass.EXTERNAL,
+                allowed_statuses=frozenset({RunStatus.CREATED}),
+            ),
+            EffectRegistration(
+                effect_type="internal.p4.resolve_smiles",
+                effect_class=EffectClass.INTERNAL,
+                allowed_statuses=frozenset({RunStatus.CREATED}),
+            ),
+        )
+    }
+)
+ALL_FIXED_POLICY_RULES = MappingProxyType({**P2_POLICY_RULES, **P3_POLICY_RULES, **P4_POLICY_RULES})
 DEFAULT_EFFECT_REGISTRY = EffectRegistry()
 P3_EFFECT_REGISTRY = EffectRegistry(policy_version=3)
+P4_EFFECT_REGISTRY = EffectRegistry(policy_version=P4_POLICY_VERSION)
 
 
 def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, object]):
@@ -178,7 +197,7 @@ def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, 
 
 
 def evaluate_dispatch(
-    state: KernelState | P3WorkflowState,
+    state: KernelState | P3WorkflowState | P4WorkflowState,
     effect: object,
     registry: EffectRegistry | Mapping[str, object] = DEFAULT_EFFECT_REGISTRY,
 ) -> DispatchDecision:
@@ -211,6 +230,20 @@ def evaluate_dispatch(
         }.get(effect_type)
         if state.phase is not required_phase:
             return DispatchDecision.BLOCK
+    if isinstance(registry, EffectRegistry) and registry.policy_version == P4_POLICY_VERSION:
+        if not isinstance(state, P4WorkflowState):
+            return DispatchDecision.BLOCK
+        if state.schema_version != P4_SCHEMA_VERSION or state.engine_version != P4_ENGINE_VERSION:
+            return DispatchDecision.BLOCK
+        if state.phase is not P4Phase.RESOLVING_IDENTITY:
+            return DispatchDecision.BLOCK
+        if state.identity_effect_id is None:
+            return DispatchDecision.BLOCK
+        if effect_type not in {
+            "external.p4.resolve_pubchem",
+            "internal.p4.resolve_smiles",
+        }:
+            return DispatchDecision.BLOCK
     effective_status = (
         RunStatus(state.status.value) if isinstance(state, P3WorkflowState) else state.status
     )
@@ -235,5 +268,7 @@ __all__ = [
     "P2_POLICY_RULES",
     "P3_POLICY_RULES",
     "P3_EFFECT_REGISTRY",
+    "P4_POLICY_RULES",
+    "P4_EFFECT_REGISTRY",
     "evaluate_dispatch",
 ]

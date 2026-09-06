@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -52,6 +53,8 @@ from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.events import EventType, KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
+from orca_agent.orchestration.p4_kernel import P4KernelEvent
+from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 from orca_agent.orchestration.schema1_read import read_error_text
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
@@ -574,7 +577,7 @@ class OutboxRepository:
     def register_effects(
         self,
         *,
-        event: KernelEvent | P3KernelEvent,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent,
         run_id: RunId,
         effects: tuple[EffectSpec, ...],
         available_at_utc: datetime,
@@ -737,6 +740,7 @@ class OutboxRepository:
         lease_duration: timedelta,
         limit: int,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
+        readiness_check: Callable[[OutboxRecord, object, datetime], bool] | None = None,
     ) -> tuple[OutboxRecord, ...]:
         """Claim due effects; the verified worker path uses ``claim_due_verified``."""
 
@@ -754,6 +758,7 @@ class OutboxRepository:
             lease_duration=lease_duration,
             limit=limit,
             registry=registry,
+            readiness_check=readiness_check,
         )
 
     def claim_due_verified(
@@ -767,6 +772,7 @@ class OutboxRepository:
         lease_duration: timedelta,
         limit: int = 1,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
+        readiness_check: Callable[[OutboxRecord, object, datetime], bool] | None = None,
     ) -> tuple[OutboxRecord, ...]:
         """Claim only after every candidate run and projection has been replay-verified."""
 
@@ -778,6 +784,10 @@ class OutboxRepository:
         lease_expires_text = format_utc(now + lease_duration)
         try:
             begin_immediate(self.connection)
+            if readiness_check is not None:
+                bind_connection = getattr(readiness_check, "bind_connection", None)
+                if callable(bind_connection):
+                    bind_connection(self.connection)
             snapshots = {
                 run_id: runs.get_verified(
                     run_id,
@@ -807,6 +817,8 @@ class OutboxRepository:
                     snapshot = snapshots.get(record.run_id)
                     if snapshot is None:
                         raise StateIntegrityError("outbox effect references an unknown run")
+                    if readiness_check is not None and not readiness_check(record, snapshot, now):
+                        continue
                     decision = evaluate_dispatch(snapshot.state, record, registry)
                     if decision is DispatchDecision.CANCEL:
                         if record.status is OutboxStatus.PENDING or (
@@ -1219,6 +1231,7 @@ class OutboxRepository:
         permit: DispatchPermit,
         now: datetime,
         error_code: HandlerErrorCode,
+        not_before: datetime | None = None,
     ) -> OutboxRecord:
         """Return a dispatching effect to pending without a business Event."""
 
@@ -1228,6 +1241,9 @@ class OutboxRepository:
             raise ValueError("retry error code is not allowlisted") from error
         current = self.validate_dispatch_permit(permit=permit, now=now)
         available_at = now + backoff_for_attempt(current.attempt_count)
+        if not_before is not None:
+            not_before = parse_utc(format_utc(not_before))
+            available_at = max(available_at, not_before)
         cursor = self.connection.execute(
             "UPDATE outbox SET status = 'pending', available_at_utc = ?, "
             "lease_owner = NULL, lease_expires_at_utc = NULL, "
@@ -1375,6 +1391,7 @@ def _supported_version(schema_version: int, engine_version: str) -> bool:
     return (schema_version, engine_version) in {
         (CURRENT_SCHEMA_VERSION, ENGINE_VERSION),
         (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
+        (P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
     }
 
 

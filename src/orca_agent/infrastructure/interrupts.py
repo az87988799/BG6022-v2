@@ -27,6 +27,8 @@ from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
+from orca_agent.orchestration.p4_kernel import P4KernelEvent
+from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 from orca_agent.orchestration.transitions import (
     InterruptProjectionOp,
     InterruptProjectionOperation,
@@ -128,8 +130,48 @@ class InterruptRepository:
         if request_event is None or request_event.run_id != record.run_id:
             raise StateIntegrityError("interrupt request event does not belong to the run")
         request_payload = request_event.payload
+        p4_confirmation = (
+            isinstance(request_event, P4KernelEvent)
+            and request_event.schema_version == P4_SCHEMA_VERSION
+            and request_event.engine_version == P4_ENGINE_VERSION
+            and request_event.event_type.value == "effect_succeeded"
+        )
         request_id_key: str
-        if request_event.event_type.value == "interrupt_requested":
+        if p4_confirmation:
+            nested = request_payload.get("confirmation_request")
+            if not isinstance(nested, Mapping):
+                raise StateIntegrityError("P4 identity confirmation request is missing")
+            request_payload = nested
+            request_id_key = "interrupt_id"
+            effect_id = request_payload.get("effect_id")
+            if not isinstance(effect_id, str):
+                raise StateIntegrityError("P4 identity confirmation effect is missing")
+            effect_row = self.connection.execute(
+                "SELECT run_id, status, audit_event_id, source_event_id FROM outbox "
+                "WHERE effect_id = ?",
+                (effect_id,),
+            ).fetchone()
+            if (
+                effect_row is None
+                or str(effect_row[0]) != str(record.run_id)
+                or str(effect_row[1]) != "succeeded"
+                or str(effect_row[2]) != str(request_event.event_id)
+            ):
+                raise StateIntegrityError("P4 identity confirmation effect is not authoritative")
+            try:
+                source_event_id = EventId(str(effect_row[3]))
+            except DomainError as error:
+                raise StateIntegrityError("P4 identity effect source event is invalid") from error
+            source_event = events.get(source_event_id)
+            if source_event is None or source_event.run_id != record.run_id:
+                raise StateIntegrityError("P4 identity effect source event is invalid")
+            for key, expected in (
+                ("run_id", str(record.run_id)),
+                ("effect_id", effect_id),
+            ):
+                if request_payload.get(key) != expected:
+                    raise StateIntegrityError("P4 confirmation effect binding is invalid")
+        elif request_event.event_type.value == "interrupt_requested":
             request_id_key = "interrupt_id"
         elif request_event.event_type.value == "interrupt_replaced":
             request_id_key = "new_interrupt_id"
@@ -146,7 +188,7 @@ class InterruptRepository:
             raise StateIntegrityError("interrupt version does not match its request event")
         if record.created_at_utc != request_event.occurred_at_utc:
             raise StateIntegrityError("interrupt creation time does not match its request event")
-        raw_payload = request_payload.get("payload")
+        raw_payload = request_payload if p4_confirmation else request_payload.get("payload")
         if not isinstance(raw_payload, Mapping):
             raise StateIntegrityError("interrupt request payload is invalid")
         if freeze_json_object(raw_payload) != record.payload:
@@ -281,7 +323,7 @@ class InterruptRepository:
     def apply_operations(
         self,
         *,
-        event: KernelEvent | P3KernelEvent,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent,
         operations: tuple[InterruptProjectionOp, ...],
     ) -> None:
         for operation in operations:
@@ -293,7 +335,10 @@ class InterruptRepository:
                 self._finalize(event=event, operation=operation)
 
     def _insert_pending(
-        self, *, event: KernelEvent | P3KernelEvent, operation: InterruptProjectionOp
+        self,
+        *,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent,
+        operation: InterruptProjectionOp,
     ) -> None:
         if operation.kind is None or operation.payload is None or operation.expires_at_utc is None:
             raise StateIntegrityError("pending interrupt projection is incomplete")
@@ -326,7 +371,10 @@ class InterruptRepository:
             ) from error
 
     def _finalize(
-        self, *, event: KernelEvent | P3KernelEvent, operation: InterruptProjectionOp
+        self,
+        *,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent,
+        operation: InterruptProjectionOp,
     ) -> None:
         response_json = None
         response_hash = None
@@ -378,6 +426,7 @@ def _supported_version(schema_version: int, engine_version: str) -> bool:
     return (schema_version, engine_version) in {
         (CURRENT_SCHEMA_VERSION, ENGINE_VERSION),
         (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
+        (P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
     }
 
 

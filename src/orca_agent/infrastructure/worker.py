@@ -67,6 +67,7 @@ class OutboxWorker:
         max_attempts: int = 5,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
         completion_service_factory: Callable[[], EffectCompletionService] | None = None,
+        readiness_check: Callable[[object, object, object], bool] | None = None,
     ) -> None:
         if lease_duration <= timedelta(0):
             raise ValueError("lease_duration must be positive")
@@ -87,6 +88,7 @@ class OutboxWorker:
         self.max_attempts = max_attempts
         self.registry = registry
         self.completion_service_factory = completion_service_factory
+        self.readiness_check = readiness_check
 
     def run_once(self, *, limit: int = 1) -> tuple[DeliveryReport, ...]:
         """Deliver at most ``limit`` effects without invoking a handler pre-authorization."""
@@ -114,6 +116,7 @@ class OutboxWorker:
                         lease_duration=self.lease_duration,
                         limit=1,
                         registry=self.registry,
+                        readiness_check=self.readiness_check,
                     )
             except StorageBusyError:
                 reports.append(DeliveryReport(None, "storage_busy", 0))
