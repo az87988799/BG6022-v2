@@ -339,6 +339,10 @@ p4 = [
     { name = "httpx" },
     { name = "rdkit" },
 ]
+p5 = [
+    { name = "httpx" },
+    { name = "rdkit" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -351,10 +355,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", marker = "extra == 'p4'", specifier = "==0.28.1" },
+    { name = "httpx", marker = "extra == 'p5'", specifier = "==0.28.1" },
     { name = "pydantic", specifier = ">=2.13.5,<3" },
     { name = "rdkit", marker = "extra == 'p4'", specifier = "==2026.3.5" },
+    { name = "rdkit", marker = "extra == 'p5'", specifier = "==2026.3.5" },
 ]
-provides-extras = ["p4"]
+provides-extras = ["p4", "p5"]
 
 [package.metadata.requires-dev]
 dev = [

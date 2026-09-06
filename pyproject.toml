@@ -12,8 +12,15 @@ dependencies = [
     "pydantic>=2.13.5,<3",
 ]
 
+[project.scripts]
+orca-agent = "orca_agent.interfaces.cli:main"
+
 [project.optional-dependencies]
 p4 = [
+    "rdkit==2026.3.5",
+    "httpx==0.28.1",
+]
+p5 = [
     "rdkit==2026.3.5",
     "httpx==0.28.1",
 ]

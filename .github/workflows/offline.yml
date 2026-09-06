@@ -34,7 +34,7 @@ jobs:
           version: "0.12.9"
           enable-cache: true
       - run: uv python install ${{ matrix.python }}
-      - run: uv sync --locked --extra p4 --python ${{ matrix.python }}
+      - run: uv sync --locked --extra p5 --python ${{ matrix.python }}
       - run: uv run --offline --no-sync python -c "import sqlite3; print(f'SQLite {sqlite3.sqlite_version}')"
       - run: uv run --offline --no-sync python -m compileall -q src tests
       - run: uv run --offline --no-sync pytest
@@ -58,7 +58,7 @@ jobs:
           version: "0.12.9"
           enable-cache: true
       - run: uv python install 3.14
-      - run: uv sync --locked --extra p4 --python 3.14
+      - run: uv sync --locked --extra p5 --python 3.14
       - run: uv run --offline --no-sync python -c "import sqlite3; print(f'SQLite {sqlite3.sqlite_version}')"
       - run: uv lock --check
       - name: Check changed-file whitespace

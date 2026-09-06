@@ -13,7 +13,11 @@ FORBIDDEN_TOP_LEVEL = {
 }
 ADAPTER_ALLOWLIST = {
     "identity/rdkit_normalizer.py": {"rdkit"},
+    "identity/geometry.py": {"rdkit"},
     "identity/http_pubchem.py": {"httpx"},
+    "execution/local_backend.py": {"subprocess"},
+    "execution/local_runner.py": {"subprocess"},
+    "execution/orca_config.py": {"subprocess"},
 }
 
 
@@ -87,10 +91,16 @@ def test_p3_execution_stages_keep_the_offline_boundary() -> None:
     assert (PACKAGE_ROOT / "evidence").exists()
     assert (PACKAGE_ROOT / "reporting").exists()
     assert not (PACKAGE_ROOT / "orca").exists()
+    p5_local_files = {
+        "execution/local_backend.py",
+        "execution/local_runner.py",
+        "execution/orca_config.py",
+    }
     violations = [
         f"{path.name}:{module}"
         for stage in ("execution", "evidence", "reporting")
         for path in (PACKAGE_ROOT / stage).rglob("*.py")
+        if path.relative_to(PACKAGE_ROOT).as_posix() not in p5_local_files
         for module in _imports(path)
         if _top_level(module) in {"subprocess", "socket", "requests", "httpx", "openai"}
     ]
