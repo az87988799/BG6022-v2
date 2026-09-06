@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from importlib import import_module
 from typing import ClassVar
 
 from orca_agent.domain.hashing import sha256_hex
@@ -46,9 +45,12 @@ class RDKitNormalizer:
 
     def __init__(self) -> None:
         try:
-            self._chem = import_module("rdkit.Chem")
-            self._rd_base = import_module("rdkit.rdBase")
-            self._descriptors = import_module("rdkit.Chem.rdMolDescriptors")
+            from rdkit import Chem, rdBase
+            from rdkit.Chem import rdMolDescriptors
+
+            self._chem = Chem
+            self._rd_base = rdBase
+            self._descriptors = rdMolDescriptors
         except ModuleNotFoundError as error:
             raise RuntimeError(
                 "P4 identity normalization requires the p4 optional dependencies"
@@ -58,6 +60,10 @@ class RDKitNormalizer:
         if not isinstance(smiles, str) or not smiles.strip() or "\x00" in smiles:
             raise IdentityNormalizationError("invalid_identity", "SMILES is empty or invalid")
         source = smiles.strip()
+        if "|" in source or any(character.isspace() for character in source):
+            raise IdentityNormalizationError(
+                "invalid_identity", "CXSMILES and annotated SMILES are unsupported in P4"
+            )
         if len(source) > self.max_input_chars:
             raise IdentityNormalizationError("identity_result_limit_exceeded", "SMILES is too long")
         if type(charge) is not int or type(multiplicity) is not int or multiplicity < 1:
@@ -109,7 +115,9 @@ class RDKitNormalizer:
         unsupported_elements = tuple(
             element for element in elements if element not in self.supported_elements
         )
-        atomic_electron_sum = sum(atom.GetAtomicNum() for atom in molecule.GetAtoms())
+        atomic_electron_sum = sum(
+            atom.GetAtomicNum() for atom in self._chem.AddHs(molecule).GetAtoms()
+        )
         electron_count = atomic_electron_sum - charge
         spin_parity_valid = (
             electron_count >= 0

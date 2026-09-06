@@ -10,7 +10,6 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
-from importlib import import_module
 from urllib.parse import quote
 
 from orca_agent.domain.p4 import IdentityProvider, MoleculeInputKind, MoleculeQuery
@@ -44,7 +43,7 @@ class HttpPubChemAdapter(PubChemPort):
             raise ValueError("timeout_seconds must be positive")
         if allow_network:
             try:
-                import_module("httpx")
+                import httpx  # noqa: F401
             except ModuleNotFoundError as error:
                 raise RuntimeError(
                     "P4 live PubChem requires the p4 optional dependencies"
@@ -71,7 +70,9 @@ class HttpPubChemAdapter(PubChemPort):
                 retryable=False,
                 body={"error_code": IdentityErrorCode.QUERY_REJECTED.value},
             )
-        httpx = import_module("httpx")
+        import httpx
+
+        deadline = self._monotonic() + 20.0
         path_kind = "cid" if query.input_kind is MoleculeInputKind.CID else "name"
         encoded = quote(query.normalized_input, safe="")
         url = (
@@ -80,17 +81,20 @@ class HttpPubChemAdapter(PubChemPort):
         )
         if query.input_kind in (MoleculeInputKind.NAME, MoleculeInputKind.CAS):
             url += "?name_type=complete"
-        self._respect_rate_limit()
         try:
+            self._respect_rate_limit()
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                raise TimeoutError("PubChem deadline exceeded before request")
             with httpx.Client(
                 base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout_seconds),
+                timeout=httpx.Timeout(min(self.timeout_seconds, remaining)),
                 follow_redirects=False,
                 transport=self.transport,
             ) as client:
-                response = client.get(url.removeprefix(self.base_url))
-                body = self._read_bounded(response)
-        except httpx.TimeoutException:
+                with client.stream("GET", url.removeprefix(self.base_url)) as response:
+                    body = self._read_bounded(response, deadline=deadline)
+        except (httpx.TimeoutException, TimeoutError):
             return self._failure(
                 query,
                 IdentityErrorCode.LOOKUP_TIMEOUT,
@@ -171,11 +175,17 @@ class HttpPubChemAdapter(PubChemPort):
                 self._sleeper(remaining)
         self._last_request_at = self._monotonic()
 
-    def _read_bounded(self, response: object) -> bytes:
-        body = response.content
-        if len(body) > self.max_response_bytes:
-            raise ValueError("PubChem response exceeds 2 MiB")
-        return body
+    def _read_bounded(self, response: object, *, deadline: float) -> bytes:
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            if self._monotonic() >= deadline:
+                raise TimeoutError("PubChem response deadline exceeded")
+            if len(body) + len(chunk) > self.max_response_bytes:
+                raise ValueError("PubChem response exceeds 2 MiB")
+            body.extend(chunk)
+        if self._monotonic() >= deadline:
+            raise TimeoutError("PubChem response deadline exceeded")
+        return bytes(body)
 
     def _result_error(
         self,
@@ -277,7 +287,7 @@ def _parse_retry_after(raw: str | None, now: datetime) -> RetryAfter:
         if seconds < 0:
             raise ValueError
         return RetryAfter(raw=raw, status="valid", not_before_utc=now + timedelta(seconds=seconds))
-    except ValueError:
+    except (ValueError, OverflowError):
         try:
             deadline = parsedate_to_datetime(value)
             if deadline.tzinfo is None:

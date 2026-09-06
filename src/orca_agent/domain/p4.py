@@ -567,7 +567,7 @@ class LookupAttempt(P4Model):
     def _request_summary(cls, value: object) -> FrozenJsonObject:
         return freeze_json_object(value)
 
-    @field_validator("error_code", "retry_after_raw")
+    @field_validator("error_code")
     @classmethod
     def _optional_text(cls, value: str | None) -> str | None:
         return None if value is None else _non_blank(value, "attempt text", maximum=256)

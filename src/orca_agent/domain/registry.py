@@ -332,6 +332,30 @@ class RegistrySnapshot(P4Model):
 
     @model_validator(mode="after")
     def _snapshot_hashes(self) -> RegistrySnapshot:
+        entries = []
+        keys = set()
+        for kind, values in (
+            (RegistryKind.METHOD.value, self.methods),
+            (RegistryKind.PRIMITIVE.value, self.primitives),
+            (RegistryKind.PROTOCOL.value, self.protocols),
+            (RegistryKind.CAPABILITY.value, self.capabilities),
+        ):
+            for entry in values:
+                key = (kind, entry.registry_id, entry.version)
+                if key in keys:
+                    raise ValueError("registry entry identity is duplicated")
+                keys.add(key)
+                entries.append(
+                    dict(
+                        kind=kind,
+                        registry_id=entry.registry_id,
+                        version=entry.version,
+                        entry_hash=entry.entry_hash,
+                    )
+                )
+        entries.sort(key=lambda item: (item["kind"], item["registry_id"], item["version"]))
+        if tuple(entries) != self.manifest:
+            raise ValueError("registry manifest does not match actual entries")
         expected_manifest = tuple(
             sorted(
                 self.manifest,

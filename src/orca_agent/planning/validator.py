@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.p4 import ConfirmedMolecule, PreparedPlan
 from orca_agent.domain.registry import RegistrySnapshot
 from orca_agent.planning.registry import (
@@ -18,6 +19,10 @@ class PlanValidationError(ValueError):
 
 
 def validate_registry_snapshot(snapshot: RegistrySnapshot) -> None:
+    try:
+        RegistrySnapshot.model_validate_json(snapshot.model_dump_json(warnings="error"))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PlanValidationError("registry snapshot contents are invalid") from error
     if snapshot.registry_version != "registry-v1":
         raise PlanValidationError("registry snapshot version is unsupported")
     if not isinstance(snapshot.manifest, tuple):
@@ -55,6 +60,29 @@ def validate_ground_state_plan(
     """Check every reference, parameter, geometry edge, and capability flag."""
 
     validate_registry_snapshot(snapshot)
+    if (
+        plan.protocol_id != PROTOCOL_GROUND_STATE.registry_id
+        or plan.protocol_hash != PROTOCOL_GROUND_STATE.entry_hash
+        or plan.method_profile_id != METHOD_R2SCAN3C.registry_id
+        or plan.method_profile_hash != METHOD_R2SCAN3C.entry_hash
+        or plan.proposal.problem_spec_id != plan.problem_spec.record_id
+        or plan.proposal.problem_spec_hash != sha256_hex(plan.problem_spec)
+    ):
+        raise PlanValidationError("plan top-level protocol, method or problem binding is invalid")
+    if (
+        confirmed.formal_charge != 0
+        or confirmed.multiplicity != 1
+        or confirmed.environment.value != PROTOCOL_GROUND_STATE.environment
+        or plan.problem_spec.constraints != {"protocol_id": PROTOCOL_GROUND_STATE.registry_id}
+        or plan.problem_spec.target_properties != ("optimized_geometry", "frequencies")
+        or plan.missing_execution_prerequisites
+        != (
+            "initial_3d_geometry",
+            "implemented_orca_backend",
+            "validated_action_and_execution_approval",
+        )
+    ):
+        raise PlanValidationError("plan protocol constraints are invalid")
     if plan.run_id != confirmed.run_id:
         raise PlanValidationError("plan and confirmed molecule have different runs")
     if (
@@ -99,7 +127,7 @@ def validate_ground_state_plan(
         "source_output": PRIMITIVE_OPTIMIZATION.output_geometry,
     }:
         raise PlanValidationError("Freq geometry parameter is invalid")
-    if set(step.primitive_id for step in steps) != {opt.primitive_id, freq.primitive_id}:
+    if opt.primitive_id == freq.primitive_id:
         raise PlanValidationError("primitive IDs are not unique")
     if (
         plan.capability_id != CAPABILITY_GROUND_STATE_PLANNING.registry_id

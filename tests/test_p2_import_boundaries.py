@@ -11,6 +11,10 @@ FORBIDDEN_TOP_LEVEL = {
     "socket",
     "subprocess",
 }
+ADAPTER_ALLOWLIST = {
+    "identity/rdkit_normalizer.py": {"rdkit"},
+    "identity/http_pubchem.py": {"httpx"},
+}
 
 
 def _top_level(module: str) -> str:
@@ -25,6 +29,23 @@ def _imports(path: Path) -> list[str]:
             modules.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             modules.append(node.module)
+        elif isinstance(node, ast.Call):
+            # Dynamic loading is forbidden, including aliased importlib entry points.
+            dynamic_names = {"import_module", "__import__"}
+            dynamic_names.update(
+                alias.asname or alias.name
+                for item in ast.walk(tree)
+                if isinstance(item, ast.ImportFrom) and item.module == "importlib"
+                for alias in item.names
+                if alias.name == "import_module"
+            )
+            name = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+            )
+            if name in dynamic_names:
+                modules.append("dynamic_import")
     return modules
 
 
@@ -33,7 +54,12 @@ def test_p2_package_has_no_external_execution_or_network_imports() -> None:
         f"{path.name}:{module}"
         for path in PACKAGE_ROOT.rglob("*.py")
         for module in _imports(path)
-        if _top_level(module) in FORBIDDEN_TOP_LEVEL
+        if module == "dynamic_import"
+        or (
+            _top_level(module) in FORBIDDEN_TOP_LEVEL
+            and _top_level(module)
+            not in ADAPTER_ALLOWLIST.get(path.relative_to(PACKAGE_ROOT).as_posix(), set())
+        )
     ]
     assert violations == []
 
@@ -43,6 +69,17 @@ def test_reducer_does_not_import_infrastructure_or_io() -> None:
     modules = _imports(reducer)
     assert all(_top_level(module) not in {"sqlite3", "pathlib"} for module in modules)
     assert all(not module.startswith("orca_agent.infrastructure") for module in modules)
+
+
+def test_dynamic_import_aliases_are_detected(tmp_path):
+    for source in (
+        "from importlib import import_module as load; load('rdkit')",
+        "import importlib as loader; loader.import_module('httpx')",
+        "__import__('httpx')",
+    ):
+        path = tmp_path / "bad_adapter.py"
+        path.write_text(source, encoding="utf-8")
+        assert "dynamic_import" in _imports(path)
 
 
 def test_p3_execution_stages_keep_the_offline_boundary() -> None:
