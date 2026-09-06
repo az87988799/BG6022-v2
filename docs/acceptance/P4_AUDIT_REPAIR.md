@@ -69,7 +69,10 @@ evidence uses canonical bytes, so its digest survives checkout line conventions.
   The run emitted 17 warnings (SQLite resource warnings and the expected
   offline socket-blocking warning); no test failed.
 - Ruff, format, compileall, lock check and package build: checked locally.
-- Repair PR/CI: pending publication.
+- Repair PR: [#5](https://github.com/az87988799/BG6022-v2/pull/5).
+  The PR checks are the live CI acceptance target; its reviewed implementation
+  commit is recorded above. CI results will be attached to the PR description
+  after completion, without creating self-referential verification commits.
 - Actual repaired main SHA/CI: pending owner-approved merge.
 - Owner acceptance: PENDING (single maintainer; no independent approval invented).
 - ORCA/LLM/scientific execution: not run; action/job rows remain zero.
