@@ -302,3 +302,126 @@ def test_obsolete_normalizer_is_readable_but_not_confirmable(tmp_path):
     assert view.candidate_bundle.candidates[0].normalization_strategy == "rdkit-normalizer-v1"
     _, result = _confirm(service, clock, view)
     assert not result.accepted and result.code == "state_integrity_error"
+
+
+@pytest.mark.parametrize("delete_attempt", [False, True])
+def test_committed_retry_pair_survives_completion_crash(tmp_path, delete_attempt):
+    class Adapter:
+        calls = 0
+
+        def resolve(self, query):
+            self.calls += 1
+            return LookupResult(
+                provider=query.provider,
+                adapter_version="reaudit",
+                body=b"throttled",
+                request_metadata={},
+                error_code=IdentityErrorCode.PROVIDER_THROTTLED,
+                retryable=True,
+                retry_after=RetryAfter(
+                    raw="10", status="valid", not_before_utc=BASE_TIME + timedelta(seconds=10)
+                ),
+            )
+
+    class Crash(BaseException):
+        pass
+
+    adapter = Adapter()
+    service, clock = _service(tmp_path, adapter=adapter)
+    _, started = _start(service, clock)
+    worker = service.create_worker(lease_duration=timedelta(seconds=1))
+    original = worker.handler
+
+    def crash_after_commit(permit):
+        original(permit)
+        raise Crash()
+
+    worker.handler = crash_after_commit
+    with pytest.raises(Crash):
+        worker.run_once(limit=1)
+    if delete_attempt:
+        with sqlite3.connect(service.database_path) as connection:
+            _remove_protection(connection)
+            connection.execute("DELETE FROM workflow_records WHERE record_type='p4.lookup_attempt'")
+    clock.advance(timedelta(seconds=2))
+    recovered = service.create_worker(lease_duration=timedelta(seconds=1))
+    if delete_attempt:
+        with pytest.raises(StateIntegrityError, match="paired"):
+            service.inspect(started.run_id)
+        with pytest.raises(StateIntegrityError, match="paired"):
+            recovered.run_once(limit=1)
+    else:
+        assert len(service.inspect(started.run_id).attempts) == 1
+        assert recovered.run_once(limit=1) == ()
+    assert adapter.calls == 1
+    with sqlite3.connect(service.database_path) as connection:
+        assert connection.execute("SELECT attempt_count FROM outbox").fetchone()[0] == 1
+
+
+def test_crash_before_either_source_record_allows_recovery(tmp_path):
+    class Crash(BaseException):
+        pass
+
+    service, clock = _service(tmp_path)
+    _, started = _start(service, clock)
+    worker = service.create_worker(lease_duration=timedelta(seconds=1))
+
+    def crash_before_handler(_permit):
+        raise Crash()
+
+    worker.handler = crash_before_handler
+    with pytest.raises(Crash):
+        worker.run_once(limit=1)
+    assert service.inspect(started.run_id).attempts == ()
+    clock.advance(timedelta(seconds=2))
+    reports = service.create_worker(lease_duration=timedelta(seconds=1)).run_once(limit=1)
+    assert reports[0].outcome == "succeeded" and reports[0].attempt_count == 2
+    assert service.inspect(started.run_id).state.phase.value == "awaiting_identity"
+
+
+@pytest.mark.parametrize("fault", ["duplicate", "wrong_query", "wrong_envelope_id"])
+def test_response_pair_rejects_duplicate_and_mismatched_records(tmp_path, fault):
+    from orca_agent.domain.canonical import canonical_json_bytes
+    from orca_agent.domain.ids import WorkflowRecordId, new_id
+    from orca_agent.domain.p4 import ResponseEnvelope
+    from orca_agent.infrastructure.p3_records import P4RecordRepository
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+    service, clock = _service(tmp_path)
+    _, started = _start(service, clock)
+    _resolve(service, started)
+    with SQLiteUnitOfWork(service.database_path, clock=clock) as uow:
+        records = P4RecordRepository(uow.connection)
+        envelope = next(
+            value
+            for _, kind, value in records.list_for_run(started.run_id)
+            if kind == "p4.response_envelope"
+        )
+        data = envelope.model_dump(mode="json")
+        if fault in ("duplicate", "wrong_envelope_id"):
+            data["record_id"] = str(new_id(WorkflowRecordId))
+        else:
+            data["query_id"] = str(new_id(WorkflowRecordId))
+        data["envelope_hash"] = sha256_hex({k: v for k, v in data.items() if k != "envelope_hash"})
+        changed = ResponseEnvelope.model_validate_json(json.dumps(data))
+        source = uow.connection.execute(
+            "SELECT source_event_id FROM workflow_records WHERE record_id=?",
+            (str(envelope.record_id),),
+        ).fetchone()[0]
+        _remove_protection(uow.connection)
+        if fault != "duplicate":
+            uow.connection.execute(
+                "DELETE FROM workflow_records WHERE record_id=?", (str(envelope.record_id),)
+            )
+        records.append_p4(
+            run_id=started.run_id,
+            record_type="p4.response_envelope",
+            record=changed,
+            record_id=changed.record_id,
+            source_event_id=source,
+            created_at_utc=clock.now_utc(),
+        )
+        assert canonical_json_bytes(changed)
+        uow.commit()
+    with pytest.raises(StateIntegrityError):
+        service.inspect(started.run_id)

@@ -2,6 +2,10 @@
 
 Status: LOCAL REPAIR VERIFIED; PR CI AND OWNER ACCEPTANCE PENDING. P5: NO-GO.
 
+The follow-up review of `74e809d` identified an orphan-envelope gap. The latest
+repair and additional live CID/CAS evidence are recorded in
+[P4_REAUDIT_REPAIR.md](P4_REAUDIT_REPAIR.md); numbers below describe the first repair.
+
 Baseline main: `dbb36f05ba721c88b56894b815bb7bf4e31e2191`, directly published;
 baseline CI [34015177327](https://github.com/az87988799/BG6022-v2/actions/runs/34015177327)
 was independently checked as successful for that exact SHA.

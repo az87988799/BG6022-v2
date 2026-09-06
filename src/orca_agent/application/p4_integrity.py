@@ -30,11 +30,28 @@ def verified_attempts(connection, state, state_root):
     ).fetchone()
     if effect is None:
         raise StateIntegrityError("P4 identity effect is missing")
+    entries = records.list_for_run(state.run_id)
     attempts = tuple(
         value
-        for _, kind, value in records.list_for_run(state.run_id)
+        for _, kind, value in entries
         if kind == "p4.lookup_attempt" and isinstance(value, LookupAttempt)
     )
+    envelopes = {}
+    for _, kind, envelope in entries:
+        if kind != "p4.response_envelope":
+            continue
+        key = (envelope.generation, envelope.request_sequence)
+        if (
+            key in envelopes
+            or envelope.run_id != state.run_id
+            or envelope.query_id != state.query_id
+            or envelope.query_hash != state.query_hash
+            or envelope.effect_id != state.identity_effect_id
+            or envelope.generation > effect[0]
+            or envelope.request_sequence != 1
+        ):
+            raise StateIntegrityError("P4 response envelope owner or request key is invalid")
+        envelopes[key] = envelope
     seen = set()
     for attempt in attempts:
         key = (attempt.generation, attempt.request_sequence)
@@ -67,6 +84,7 @@ def verified_attempts(connection, state, state_root):
         )
         if (
             persisted != envelope
+            or envelopes.get(key) != envelope
             or envelope.run_id != state.run_id
             or envelope.query_id != state.query_id
             or envelope.query_hash != state.query_hash
@@ -80,6 +98,8 @@ def verified_attempts(connection, state, state_root):
         ):
             raise StateIntegrityError("P4 attempt and response envelope disagree")
         _source(connection, envelope.record_id, effect[1])
+    if set(envelopes) != seen:
+        raise StateIntegrityError("P4 response envelope and attempt must be paired")
     return attempts
 
 
