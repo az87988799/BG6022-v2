@@ -1,17 +1,16 @@
 # V2-P4 Acceptance Record
 
-- Status: AUDIT REPAIR IMPLEMENTED; OWNER ACCEPTANCE PENDING
-- Latest repair evidence: [P4_AUDIT_REPAIR.md](P4_AUDIT_REPAIR.md).
+- Status: PASS
+- Latest repair evidence: [P4_REAUDIT_REPAIR.md](P4_REAUDIT_REPAIR.md).
 - Scope: schema-3 molecule identity confirmation and planning-only workflow.
 - Base `main`: `4f6ee0e8b4d1e604278276ec777f752e0e32a41f`.
-- Reviewed implementation commit: `f5451f828fa792cc11f7476138d6ae3eb6b4d03e`.
-- Working branch: `codex/v2-p4-identity-protocol`.
-- Original P4 publication: directly published to `main` at
-  `dbb36f05ba721c88b56894b815bb7bf4e31e2191`; no synthetic merge commit is claimed.
-- Published `main` CI: [34015177327](https://github.com/az87988799/BG6022-v2/actions/runs/34015177327),
-  all four jobs successful for that SHA. This is the pre-repair baseline.
-- Repair publication and CI: see the latest repair evidence above.
-- Owner acceptance: PENDING.
+- Reviewed implementation commit: `fd72b50e9ed93ff4cd6957c9e3c332ed347f8aa9`.
+- PR #5: MERGED.
+- Merge commit / accepted `main` SHA: `f11216dd0573530de1e565ed5d3defb34e867e53`.
+- Merged `main` CI: [34032683613](https://github.com/az87988799/BG6022-v2/actions/runs/34032683613),
+  all four jobs successful for the merged SHA.
+- `main` contains `fd72b50`: verified by ancestor check.
+- Owner acceptance: ACCEPTED (single maintainer, 2026-09-06 UTC).
 
 ## Original implementation environment and fixed registries
 
@@ -113,11 +112,12 @@ of a live PubChem source.
 - ORCA 6.1 compile/execute: NOT RUN (P5 scope).
 - LLM, scientific execution, action, grant, intent, and job: NOT RUN / NOT
   CREATED.
-- Repair PR and CI: tracked in the latest repair record. The baseline main CI
-  above does not certify the repair.
-- Owner acceptance: PENDING.
+- Repair PR #5: MERGED into `main` at `f11216dd0573530de1e565ed5d3defb34e867e53`.
+- Post-merge `main` CI: [34032683613](https://github.com/az87988799/BG6022-v2/actions/runs/34032683613),
+  all four jobs successful.
+- Owner acceptance: ACCEPTED.
 
-P4 complete acceptance is intentionally not closed by this local result alone.
-It still requires a repaired implementation with successful `main` CI and
-explicit single-maintainer Owner acceptance. Live source evidence does not
-constitute identity confirmation or scientific execution approval.
+P4 complete acceptance is PASS on the merged `main` SHA above. Live source
+evidence records candidate provenance and remains separate from identity
+confirmation or scientific execution approval. P5 work may begin from the
+separately created P5 branch after this accepted main.

@@ -1,7 +1,7 @@
 # P4 follow-up repair of 74e809d
 
-Status: repair implemented; Owner acceptance and repaired-main CI pending.
-P5: NO-GO. Acceptance target: [PR #5](https://github.com/az87988799/BG6022-v2/pull/5).
+Status: PASS. Owner acceptance: ACCEPTED. P5 branch may be created from the
+accepted main. Acceptance target: [PR #5](https://github.com/az87988799/BG6022-v2/pull/5).
 
 ## Retry source pairing
 
@@ -52,8 +52,12 @@ fresh state root, followed by `scripts/collect_p4_source_evidence.py` for verifi
 read-only export. No real identity was automatically confirmed; ORCA and LLM
 were not run.
 
-## Remaining release decisions
+## Release record
 
-Single-maintainer Owner acceptance remains PENDING. After owner approval, merge
-PR #5 and verify all checks for the actual resulting main SHA. Only then record
-P4 PASS and assess P5 entry. Earlier green main/PR runs do not certify this repair.
+PR #5 was merged into `main` with merge SHA
+`f11216dd0573530de1e565ed5d3defb34e867e53`; the merge contains reviewed
+implementation commit `fd72b50e9ed93ff4cd6957c9e3c332ed347f8aa9`. The post-merge
+[main CI run 34032683613](https://github.com/az87988799/BG6022-v2/actions/runs/34032683613)
+passed all four jobs. Single-maintainer Owner acceptance was recorded as
+ACCEPTED on 2026-09-06 UTC. P4 is therefore PASS; P5 starts from a new branch
+created from this accepted main.
