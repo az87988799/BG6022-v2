@@ -17,8 +17,10 @@ __pycache__/
 coverage.xml
 htmlcov/
 
-# Temporary and generated agent data
+# Temporary and generated agent data.
+# New temporary state must be created under .tmp/<phase>/[operation]/.
 .tmp/
+# Compatibility guard for old top-level names; do not create new .tmp-* paths.
 .tmp-*/
 tmp/
 agent_output/

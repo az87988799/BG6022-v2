@@ -32,6 +32,8 @@ database and a new artifact root; legacy active state is never migrated.
 The migration manifest records the provenance and semantic status of every
 future migration. P3 state is configured through an explicit state root; the
 legacy repository and its active state remain read-only and are never opened.
+All local temporary state is kept below `.tmp/<phase>/`; see
+`docs/TEMP_WORKSPACE.md` for the partitioning convention.
 
 ## P0 contents
 
