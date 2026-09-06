@@ -141,7 +141,7 @@ def test_names_require_identity_confirmation_and_create_only_a_plan(tmp_path, na
     assert view.candidate_bundle is not None
     assert view.candidate_bundle.confirmable is True
     assert len(view.candidate_bundle.candidates) == 1
-    assert view.candidate_bundle.candidates[0].normalization_strategy == "rdkit-normalizer-v1"
+    assert view.candidate_bundle.candidates[0].normalization_strategy == "rdkit-normalizer-v2"
 
     _confirm_command, confirmed = _confirm(service, clock, view)
     assert confirmed.accepted is True
@@ -808,14 +808,20 @@ def test_http_retry_after_parser_and_rate_limit_are_deterministic():
     assert _parse_retry_after("Sun, 06 Sep 2026 00:00:05 GMT", now).status == "valid"
     assert _parse_retry_after("not-a-date", now).status == "invalid"
 
-    ticks = iter((0.0, 0.2, 1.2))
+    ticks = [0.0]
     sleeps: list[float] = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        ticks[0] += seconds
+
     adapter = _mock_http_adapter(
         status_code=404,
-        monotonic=lambda: next(ticks),
-        sleeper=sleeps.append,
+        monotonic=lambda: ticks[0],
+        sleeper=sleep,
     )
     adapter.resolve(_pubchem_query())
+    ticks[0] += 0.2
     adapter.resolve(_pubchem_query(raw_input="ethanol"))
     assert sleeps == [pytest.approx(0.8)]
 

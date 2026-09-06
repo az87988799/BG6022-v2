@@ -83,6 +83,7 @@ from orca_agent.orchestration.p4_kernel import (
     expected_p4_application_result,
     reduce_p4_event,
 )
+from orca_agent.orchestration.p4_replay import replay_p4
 from orca_agent.orchestration.p4_versions import (
     P4_ENGINE_VERSION,
     P4_SCHEMA_VERSION,
@@ -95,6 +96,7 @@ from orca_agent.planning.validator import validate_ground_state_plan
 
 from .effect_completion import EffectCompletionService
 from .p4_handlers import P4IdentityHandler
+from .p4_integrity import require_current_normalization, verified_attempts, verify_record_chain
 
 if TYPE_CHECKING:
     from orca_agent.identity.ports import PubChemPort
@@ -137,7 +139,8 @@ class P4RunView(P4Model):
 class _P4Readiness:
     """Worker claim hook that reads trusted Retry-After history on its claim connection."""
 
-    def __init__(self) -> None:
+    def __init__(self, state_root) -> None:
+        self.state_root = state_root
         self.connection: sqlite3.Connection | None = None
 
     def bind_connection(self, connection: sqlite3.Connection) -> None:
@@ -150,9 +153,9 @@ class _P4Readiness:
             return True
         if self.connection is None:
             raise StateIntegrityError("P4 readiness hook is not bound to a claim connection")
-        latest = P4RecordRepository(self.connection).latest_attempt(
-            run_id=record.run_id,
-            effect_id=record.effect_id,
+        attempts = verified_attempts(self.connection, snapshot.state, self.state_root)
+        latest = max(
+            attempts, key=lambda item: (item.generation, item.request_sequence), default=None
         )
         if latest is None or latest.retry_not_before_utc is None:
             return True
@@ -354,6 +357,8 @@ class P4ApplicationService:
                 state = self._p4_state(snapshot)
                 if state.phase is not P4Phase.AWAITING_IDENTITY:
                     raise InvalidTransitionError("P4 run is not awaiting identity confirmation")
+                verified = verify_record_chain(uow, state, self.state_root)
+                require_current_normalization(verified[2])
                 self._validate_confirmation_bindings(uow, snapshot, command)
                 interrupt = uow.interrupts.get(command.interrupt_id)
                 if interrupt is None or interrupt.status.value != "pending":
@@ -625,6 +630,7 @@ class P4ApplicationService:
                 outbox=uow.outbox,
             )
             state = self._p4_state(snapshot)
+            verify_record_chain(uow, state, self.state_root)
             records = P4RecordRepository(uow.connection)
             query = records.get_exact(
                 run_id=run_id,
@@ -754,7 +760,7 @@ class P4ApplicationService:
             fake_adapter=self.fake_adapter,
             pubchem_adapter=self.pubchem_adapter,
         )
-        readiness = _P4Readiness()
+        readiness = _P4Readiness(self.state_root)
 
         def metadata_factory(*, uow, permit, completion, snapshot):
             return self._completion_metadata(
@@ -765,6 +771,7 @@ class P4ApplicationService:
             )
 
         def retry_not_before_factory(*, uow, permit, completion, snapshot):
+            verified_attempts(uow.connection, snapshot.state, self.state_root)
             attempt = P4RecordRepository(uow.connection).attempt_for_generation(
                 run_id=permit.effect.run_id,
                 effect_id=permit.effect.effect_id,
@@ -799,6 +806,7 @@ class P4ApplicationService:
         view = self.inspect(run_id)
         if view.prepared_plan is None:
             raise InvalidTransitionError("P4 run has no prepared plan")
+        require_current_normalization(view.candidate_bundle)
         plan = view.prepared_plan
         if format == "json":
             return plan.model_dump(mode="json")
@@ -1250,10 +1258,14 @@ class P4ApplicationService:
             interrupts=uow.interrupts,
             outbox=uow.outbox,
         )
-        return _p4_result_from_application(
-            result,
-            snapshot.state if isinstance(snapshot.state, P4WorkflowState) else None,
+        self._p4_state(snapshot)
+        history = uow.events.list_for_run(command.run_id)
+        prefix = tuple(
+            item.event for item in history if item.event.sequence_no <= event.sequence_no
         )
+        if not prefix or prefix[-1].event_id != receipt.result_event_id:
+            raise StateIntegrityError("P4 receipt result is not in verified history")
+        return _p4_result_from_application(result, replay_p4(prefix))
 
     def _safe_reject(
         self, run_id: RunId, conversation_id: ConversationId, error: Exception

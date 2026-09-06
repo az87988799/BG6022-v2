@@ -1,0 +1,119 @@
+{
+  "manifest_version": 1,
+  "workflow": "p4",
+  "provider": "pubchem",
+  "started_at_utc": "2026-09-06T08:22:43.5541680Z",
+  "state_root": "E:\\BG6022-v2\\.tmp-p4-audit-live",
+  "auto_confirm_identity": false,
+  "cases": [
+    {
+      "name": "water",
+      "run_id": "run_155f310145ad440cb28cd59ece75bac6",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_155f310145ad440cb28cd59ece75bac6",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_a75e8f8ae42b4f3fbe02bc91cd448eba",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_9f2d0ba08f96533eb53a3b49a9dfff9a",
+          "registry_snapshot_id": "workflow_8d3f1dba5dcd5838a3df5372a98a61a1",
+          "identity_effect_id": "effect_feb55c20663d580fac8cc98e95699ffb"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_feb55c20663d580fac8cc98e95699ffb",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "status": "identity_confirmation_not_requested"
+    },
+    {
+      "name": "ethanol",
+      "run_id": "run_f36039edbf5f489a8c586e26aa277945",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_f36039edbf5f489a8c586e26aa277945",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_58455bc049714bb9a31e13aa07689789",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_4448576e10a95e6da0c42133276370ca",
+          "registry_snapshot_id": "workflow_9c0c83eb3ab45004b9354eeb8c548333",
+          "identity_effect_id": "effect_7c382ab805a15655841ce3ed17baae8e"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_7c382ab805a15655841ce3ed17baae8e",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "status": "identity_confirmation_not_requested"
+    },
+    {
+      "name": "benzene",
+      "run_id": "run_eb2f21d590cf4c1c9ada5ddb75db3358",
+      "prepare": {
+        "accepted": true,
+        "code": "run_created",
+        "run_id": "run_eb2f21d590cf4c1c9ada5ddb75db3358",
+        "revision": 1,
+        "status": "created",
+        "phase": "resolving_identity",
+        "conversation_id": "conversation_00be12a61dad445594fb0e685afa7845",
+        "details": {
+          "phase": "resolving_identity",
+          "query_id": "workflow_6dc10e0f87b952ddb7098c2d92749d61",
+          "registry_snapshot_id": "workflow_9b42aea3b34551feb2335dae5a7d3ed3",
+          "identity_effect_id": "effect_8fb7b51631e159ecb2c15097b7af8580"
+        }
+      },
+      "worker": {
+        "workflow": "p4",
+        "reports": [
+          {
+            "effect_id": "effect_8fb7b51631e159ecb2c15097b7af8580",
+            "outcome": "succeeded",
+            "attempt_count": 1
+          }
+        ]
+      },
+      "status": "identity_confirmation_not_requested"
+    }
+  ],
+  "cancellation": {
+    "accepted": true,
+    "code": "run_cancelled",
+    "run_id": "run_d44c527b652541f78d465e4aac8de2c3",
+    "revision": 2,
+    "status": "cancelled",
+    "phase": "cancelled",
+    "conversation_id": "conversation_09f98aafdb7144d2a34133c41a4ebf3c",
+    "details": {
+      "phase": "cancelled",
+      "reason_code": "user_cancelled"
+    }
+  },
+  "wrong_binding": null,
+  "backend_counts": {
+    "actions": 0,
+    "jobs": 0
+  },
+  "completed_at_utc": "2026-09-06T08:22:55.1984288Z"
+}

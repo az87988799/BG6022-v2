@@ -1,16 +1,19 @@
 # V2-P4 Acceptance Record
 
-- Status: OFFLINE TECHNICAL PASS; COMPLETE P4 ACCEPTANCE PENDING
+- Status: AUDIT REPAIR IMPLEMENTED; OWNER ACCEPTANCE PENDING
+- Latest repair evidence: [P4_AUDIT_REPAIR.md](P4_AUDIT_REPAIR.md).
 - Scope: schema-3 molecule identity confirmation and planning-only workflow.
 - Base `main`: `4f6ee0e8b4d1e604278276ec777f752e0e32a41f`.
 - Reviewed implementation commit: `f5451f828fa792cc11f7476138d6ae3eb6b4d03e`.
 - Working branch: `codex/v2-p4-identity-protocol`.
-- Pull request: NOT OPEN.
-- Merge commit: NOT AVAILABLE.
-- Post-merge `main` CI: NOT RUN.
+- Original P4 publication: directly published to `main` at
+  `dbb36f05ba721c88b56894b815bb7bf4e31e2191`; no synthetic merge commit is claimed.
+- Published `main` CI: [34015177327](https://github.com/az87988799/BG6022-v2/actions/runs/34015177327),
+  all four jobs successful for that SHA. This is the pre-repair baseline.
+- Repair publication and CI: see the latest repair evidence above.
 - Owner acceptance: PENDING.
 
-## Environment and fixed registries
+## Original implementation environment and fixed registries
 
 - Platform: Windows-11-10.0.26200-SP0.
 - Python: `3.14.6`.
@@ -78,7 +81,7 @@ The P4 result is planning-only:
 | T23 | locked P4 extra sync, fixture-inclusive `uv build`, and package metadata checks |
 | T24 | default offline socket-blocking suite; fake/live separation; live smoke recorded below |
 
-## Offline technical evidence
+## Original implementation offline technical evidence
 
 - Locked dependency sync: PASS (`python -m uv sync --locked --extra p4`).
 - Lockfile consistency: PASS (`python -m uv lock --check`).
@@ -93,6 +96,9 @@ The P4 result is planning-only:
 - Windows independent-process manifest: [P4_WINDOWS_MANIFEST.json](P4_WINDOWS_MANIFEST.json).
 - Manifest SHA-256:
   `1a082e0d8794eff76d75b864bcf57dbcadedbc05d1c11fadd46c3169d19be11c`.
+  This digest describes the original Windows CRLF bytes. Git checkouts may use
+  LF; it is not a cross-platform byte digest. New audit evidence records its
+  byte convention separately.
 
 The manifest uses the fake provider only. It records three successful
 `plan_ready` flows, confirmation replay, wrong candidate binding rejection,
@@ -102,14 +108,16 @@ of a live PubChem source.
 ## External and execution gates
 
 - Default business network access: OFF by default and covered by offline tests.
-- PubChem live smoke: NOT RUN; no raw live response artifact or live response
-  hash is claimed.
+- PubChem live source smoke: three real responses captured in the audit repair;
+  see [P4_AUDIT_LIVE_EVIDENCE.json](P4_AUDIT_LIVE_EVIDENCE.json).
 - ORCA 6.1 compile/execute: NOT RUN (P5 scope).
 - LLM, scientific execution, action, grant, intent, and job: NOT RUN / NOT
   CREATED.
-- GitHub PR, review/approval, merge, and post-merge `main` CI: PENDING.
+- Repair PR and CI: tracked in the latest repair record. The baseline main CI
+  above does not certify the repair.
 - Owner acceptance: PENDING.
 
 P4 complete acceptance is intentionally not closed by this local result alone.
-It still requires the real PubChem source-contract smoke, a pushed/merged
-implementation with successful `main` CI, and explicit Owner acceptance.
+It still requires a repaired implementation with successful `main` CI and
+explicit single-maintainer Owner acceptance. Live source evidence does not
+constitute identity confirmation or scientific execution approval.

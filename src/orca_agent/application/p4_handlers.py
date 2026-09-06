@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from orca_agent.application.errors import StateIntegrityError, StorageError
+from orca_agent.application.p4_integrity import verify_record_chain
 from orca_agent.domain.canonical import canonical_json_bytes
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import ArtifactId, WorkflowRecordId
@@ -93,7 +94,7 @@ class P4IdentityHandler:
                     status_code=result.status_code,
                     retry_after=result.retry_after,
                 )
-            return self._persist_result(permit, query, result)
+            return self._persist_result(permit, query, result, started=started)
         except (StateIntegrityError, StorageError):
             raise
         except Exception:
@@ -117,6 +118,7 @@ class P4IdentityHandler:
                 raise StateIntegrityError("P4 handler received a non-P4 run")
             if snapshot.state.phase is not P4Phase.RESOLVING_IDENTITY:
                 raise StateIntegrityError("P4 identity effect is not in resolving phase")
+            verify_record_chain(uow, snapshot.state, self.state_root)
             payload = permit.effect.payload
             if (
                 payload.get("run_id") != str(snapshot.run_id)
@@ -185,6 +187,8 @@ class P4IdentityHandler:
         permit: DispatchPermit,
         query: MoleculeQuery,
         result: LookupResult,
+        *,
+        started: float | None = None,
     ) -> HandlerResult:
         body = result.body if isinstance(result.body, bytes) else bytes(result.body)
         if not body:
@@ -233,6 +237,13 @@ class P4IdentityHandler:
                 error_code = IdentityErrorCode(error.code)
             except (TypeError, ValueError, KeyError) as error:
                 raise StateIntegrityError("P4 provider candidate normalization failed") from error
+        if started is not None and self._monotonic() - started >= self.deadline_seconds:
+            result = self._replace_result_error(
+                result, body, IdentityErrorCode.LOOKUP_TIMEOUT, retryable=True
+            )
+            error_code = IdentityErrorCode.LOOKUP_TIMEOUT
+            candidates = ()
+            confirmable = False
         now = self.clock.now_utc()
         with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
             if any(item is None for item in (uow.runs, uow.events, uow.interrupts, uow.outbox)):
