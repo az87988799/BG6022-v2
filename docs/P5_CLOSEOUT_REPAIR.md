@@ -1,7 +1,15 @@
 # f5991d0 review: limited closeout repair
 
-Status: implementation verification in progress; **PENDING_OWNER_ACCEPTANCE**.
+Status: limited code repair verified; **PENDING_OWNER_ACCEPTANCE**.
 This does not authorize merge, P5 PASS or starting P6.
+
+Implementation: `e6343052911e030a6eaf7eb03b68f7cc12ff8870`.
+[CI 34100584094](https://github.com/az87988799/BG6022-v2/actions/runs/34100584094)
+is fully green: Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only
+skips; Ubuntu branch coverage 80.31% with the unchanged 80% gate; quality PASS.
+Targeted local suite: 67 passed, including Windows process tests; final backend
+guard replay: 10 passed. Ruff, format, compileall, lock check and wheel/sdist
+build passed. [Separate offline replay and new preview](evidence/p5-closeout/README.md).
 
 ## Parser v4: translation-only Hessian binding
 

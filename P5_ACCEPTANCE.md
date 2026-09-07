@@ -17,12 +17,15 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 | Windows control | PASS in controlled tests | Non-destructive poll, PID identity, one-shot launch, long job, descendant cancel/timeout, supervisor crash, Job memory/output/workdir limits |
 | Ruff / format / compileall | PASS | Latest source, tests and scripts |
 | Locked dependencies / build | PASS | Locked sync/check; C1–C3 wheel and sdist built |
-| R01 Water Opt→Freq→SP | FAIL / unresolved | Additional Opt parsed successfully; Freq rejected for Hessian coordinate-frame mismatch; SP not launched. [Original evidence](docs/evidence/p5-freq-blocker/README.md); no automatic retry |
+| Frozen real Freq replay | PASS at e634305 | Parser v4 allows translation only; 9x9 Hessian and 9 raw modes; [separate offline evidence](docs/evidence/p5-closeout/frozen-freq-replay.json). Historical run not rewritten |
+| Unconfirmed Windows tree | PASS in targeted regression | Nonempty/query-error Job for cancel/timeout remains pending through runner, backend and service; no downstream result or physical relaunch |
+| R01 Water Opt→Freq→SP | HISTORICAL FAIL / new run awaiting approval | Old chain rejected Freq and never launched SP. Parser blocker repaired offline; a new real chain is still required. [Original evidence](docs/evidence/p5-freq-blocker/README.md), [new preview](docs/evidence/p5-closeout/README.md); no automatic retry |
 | R02 process restart and command replay | NOT_COMPLETED | Chain did not complete; no successful replay gate inferred |
 | R03 real cancellation | PASS at 97a8fc2 | Authorized one-shot 30-second case; identity/liveness/request/stop/tree-empty facts and [raw evidence](docs/evidence/p5-c-controls/README.md). Old receipt is not reused as PASS |
 | R04 real timeout | PASS at 97a8fc2 | Authorized one-shot 3-second case physically started then stopped at deadline; [raw evidence](docs/evidence/p5-c-controls/README.md). Old zero-start attempt remains NOT_EXERCISED |
 | Prior PR / Windows–Ubuntu matrix | PASS at c7cd1ea | [CI 34080330125](https://github.com/az87988799/BG6022-v2/actions/runs/34080330125): Windows 497 passed; Ubuntu 3.11/3.14 495 passed, 2 skipped; Ubuntu branch coverage 80.19%; quality PASS |
 | C1–C3 PR matrix | PASS at 97a8fc2 | [CI 34086229322](https://github.com/az87988799/BG6022-v2/actions/runs/34086229322): Windows 517 passed; Ubuntu 3.11/3.14 515 passed, 2 Windows-only skips; Ubuntu branch coverage 80.16%; quality PASS |
+| Closeout PR matrix | PASS at e634305 | [CI 34100584094](https://github.com/az87988799/BG6022-v2/actions/runs/34100584094): Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only skips; Ubuntu branch coverage 80.31%; quality PASS. No main CI inferred |
 | Main merge / main CI | NOT_RUN | No automatic merge or P6 start |
 | Owner acceptance | PENDING | Only the owner can accept this phase |
 

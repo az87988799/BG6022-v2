@@ -2,7 +2,16 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current scope: V2-P3
+## Current phase: V2-P5 (pending Owner acceptance)
+
+P5 local ORCA implementation is under acceptance on `codex/v2-p5-local-orca`;
+the accepted main baseline remains P4 until an authorized merge. See
+[P5 acceptance](P5_ACCEPTANCE.md) and the [limited closeout repair](docs/P5_CLOSEOUT_REPAIR.md)
+for current verification and remaining real/release gates. P5 is not marked
+complete and P6 has not started. Real execution requires explicit bounded
+approval; offline fixtures and parser replay do not replace real acceptance.
+
+## V2-P0–P3 foundation
 
 V2-P0 established the traceable repository and migration baseline. V2-P1 adds
 the reproducible Python toolchain, versioned domain contracts, deterministic
