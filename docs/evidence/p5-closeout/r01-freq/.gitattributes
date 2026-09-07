@@ -3,4 +3,5 @@
 *.err binary
 *.xyz binary
 *.inp binary
+*.hess binary
 *.json binary
