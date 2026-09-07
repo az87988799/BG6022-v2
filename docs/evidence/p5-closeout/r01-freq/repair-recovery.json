@@ -1,0 +1,27 @@
+{
+  "schema": "p5-r01-freq-collection-recovery/v1",
+  "source_repair_commit": "7c68e6a9b26d49e825b45db1784360ec366119a0",
+  "execution_id": "execution_476b19928f774dd69674b613b23bd4d4",
+  "physical_start_count": 1,
+  "pre_repair_observation": {
+    "event_revision": 13,
+    "collection_code": "unsupported_execution_profile",
+    "reason": "downstream SP preparation reserialized the frozen geometry instead of reusing the current action geometry artifact bytes",
+    "state_preserved": true,
+    "rerun_started": false
+  },
+  "minimal_repair": {
+    "behavior": "validate and reuse the current action geometry artifact bytes when preparing a downstream node",
+    "binding_and_geometry_hashes_remain_fail_closed": true,
+    "no_tolerance_widening": true,
+    "no_auto_retry": true
+  },
+  "post_repair_collection": {
+    "worker_outcome": "node_completed",
+    "event_revision": 18,
+    "freq_result_parse_status": "complete",
+    "next_phase": "awaiting_execution_approval",
+    "next_node": "p5.opt_freq_sp.r2scan3c.v1:node-3",
+    "sp_started": false
+  }
+}

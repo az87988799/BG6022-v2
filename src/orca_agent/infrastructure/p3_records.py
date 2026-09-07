@@ -52,6 +52,16 @@ from orca_agent.domain.p4 import (
     PreparedPlan,
     ResponseEnvelope,
 )
+from orca_agent.domain.p5 import (
+    GeometryRecord,
+    P5ActionRecord,
+    P5ApprovalGrant,
+    P5ExecutionBinding,
+    P5ExecutionContext,
+    P5ExecutionPlan,
+    P5ResultRecord,
+    P5WorkflowState,
+)
 from orca_agent.domain.registry import RegistrySnapshot
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
@@ -82,6 +92,14 @@ _RECORD_CONTRACTS: dict[str, tuple[type[BaseModel], int, str]] = {
     "p4.confirmed_molecule": (ConfirmedMolecule, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
     "p4.prepared_plan": (PreparedPlan, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
     "p4.workflow_state": (P4WorkflowState, P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+    "p5.execution_context": (P5ExecutionContext, 4, "p5-local-orca-v1"),
+    "p5.execution_plan": (P5ExecutionPlan, 4, "p5-local-orca-v1"),
+    "p5.geometry": (GeometryRecord, 4, "p5-local-orca-v1"),
+    "p5.execution_binding": (P5ExecutionBinding, 4, "p5-local-orca-v1"),
+    "p5.action": (P5ActionRecord, 4, "p5-local-orca-v1"),
+    "p5.approval_grant": (P5ApprovalGrant, 4, "p5-local-orca-v1"),
+    "p5.result": (P5ResultRecord, 4, "p5-local-orca-v1"),
+    "p5.workflow_state": (P5WorkflowState, 4, "p5-local-orca-v1"),
 }
 
 
@@ -417,6 +435,138 @@ class P4RecordRepository(P3RecordRepository):
             if values
             else None
         )
+
+
+class P5RecordRepository(P3RecordRepository):
+    """Typed append-only P5 records stored in the shared workflow table."""
+
+    def append_p5(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        record: BaseModel,
+        created_at_utc: datetime,
+        source_event_id: object | None = None,
+        record_id: WorkflowRecordId | None = None,
+    ) -> WorkflowRecordId:
+        if not record_type.startswith("p5."):
+            raise StateIntegrityError("P5 record type must use the p5 namespace")
+        return self.append_any(
+            run_id=run_id,
+            record_type=record_type,
+            record=record,
+            schema_version=4,
+            engine_version="p5-local-orca-v1",
+            created_at_utc=created_at_utc,
+            source_event_id=source_event_id,
+            record_id=record_id,
+        )
+
+    def latest_p5(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> tuple[WorkflowRecordId, ModelT] | None:
+        return self.latest_any(
+            run_id=run_id,
+            record_type=record_type,
+            model_type=model_type,
+            schema_version=4,
+            engine_version="p5-local-orca-v1",
+        )
+
+    def get_exact_p5(
+        self,
+        *,
+        run_id: RunId,
+        record_id: WorkflowRecordId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> ModelT | None:
+        expected_model, expected_schema, expected_engine = _record_contract(record_type)
+        if (
+            model_type is not expected_model
+            or expected_schema != 4
+            or expected_engine != "p5-local-orca-v1"
+        ):
+            raise StateIntegrityError("P5 record lookup does not match its typed contract")
+        row = self.connection.execute(
+            "SELECT record_id, run_id, record_type, schema_version, engine_version, record_json, "
+            "record_hash, source_event_id FROM workflow_records WHERE record_id = ?",
+            (str(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            str(row[0]) != str(record_id)
+            or str(row[1]) != str(run_id)
+            or str(row[2]) != record_type
+            or stored_int(row[3], what="P5 record schema_version", minimum=1) != 4
+            or str(row[4]) != "p5-local-orca-v1"
+        ):
+            raise StateIntegrityError("P5 record owner or version is invalid")
+        parsed = _parse_model(str(row[5]), expected_model, what="P5 record")
+        if _model_json(parsed) != str(row[5]) or _record_hash(parsed) != str(row[6]):
+            raise StateIntegrityError("P5 record hash does not match")
+        _verify_source_event(self.connection, row[7], run_id)
+        return parsed
+
+    def get_by_record_id_p5(
+        self,
+        *,
+        record_id: WorkflowRecordId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> tuple[RunId, ModelT] | None:
+        expected_model, expected_schema, expected_engine = _record_contract(record_type)
+        if (
+            model_type is not expected_model
+            or expected_schema != 4
+            or expected_engine != "p5-local-orca-v1"
+        ):
+            raise StateIntegrityError("P5 record lookup does not match its typed contract")
+        row = self.connection.execute(
+            "SELECT record_id, run_id, record_type, schema_version, engine_version, "
+            "record_json, record_hash, source_event_id, created_at_utc "
+            "FROM workflow_records WHERE record_id = ?",
+            (str(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        run_id = RunId(str(row[1]))
+        values = self._parse_list_rows(
+            run_id,
+            [
+                (
+                    row[0],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                )
+            ],
+        )
+        if len(values) != 1 or values[0][0] != record_id or values[0][1] != record_type:
+            raise StateIntegrityError("P5 record owner or type is invalid")
+        parsed = values[0][2]
+        if not isinstance(parsed, model_type):
+            raise StateIntegrityError("P5 record model type is invalid")
+        return run_id, parsed
+
+    def list_p5_for_run(self, run_id: RunId) -> tuple[tuple[WorkflowRecordId, str, object], ...]:
+        rows = self.connection.execute(
+            "SELECT record_id, record_type, schema_version, engine_version, record_json, "
+            "record_hash, source_event_id, created_at_utc FROM workflow_records "
+            "WHERE run_id = ? AND record_type LIKE 'p5.%' ORDER BY created_at_utc, rowid",
+            (str(run_id),),
+        ).fetchall()
+        return self._parse_list_rows(run_id, rows)
 
 
 def _verify_source_event(
@@ -891,6 +1041,7 @@ __all__ = [
     "JobRepository",
     "P3RecordRepository",
     "P4RecordRepository",
+    "P5RecordRepository",
     "StoredAction",
     "StoredArtifact",
     "StoredEvidence",

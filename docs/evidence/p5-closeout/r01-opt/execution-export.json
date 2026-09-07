@@ -1,0 +1,379 @@
+{
+  "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+  "revision": 8,
+  "state": {
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "status": "ready",
+    "phase": "awaiting_execution_approval",
+    "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+    "source_run_id": "run_99d2b1e1217140d3bfe9a3e5a60c9759",
+    "execution_plan_id": "workflow_d7fe192f6a354241855ff2cb89efe1f7",
+    "execution_plan_hash": "78356bf17026491c4b4b025b67d05f34ab5fda15134774b8cf410399cbf17bde",
+    "current_node_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+    "current_action_id": "action_9039ee63cd9647ba840b1534b26b4c20",
+    "current_action_hash": "0f884861fdc32f8e628ddd46ef315d428941d44284b4b4f947779a3d9e36c710",
+    "current_binding_hash": "6b2b0217a3312b2ec09bf3e9febfe82cec9bc75d65151743eb3da9077a77f6db",
+    "current_grant_id": null,
+    "current_execution_id": null,
+    "last_result_id": null,
+    "cancel_requested": false,
+    "last_outcome_code": "node_prepared",
+    "last_error_code": null,
+    "last_error_message": null
+  },
+  "context": {
+    "record_id": "workflow_7e485cb32b5148f5a9207d86e4ad1440",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+    "source_run_id": "run_99d2b1e1217140d3bfe9a3e5a60c9759",
+    "source_registry_snapshot_id": "workflow_f9598835f8c55e6cbf7c689c9fbbeb8c",
+    "source_registry_snapshot_hash": "ddfb9a16665e527ed061129fc69e05811029bd555a42825b824166bcf8e7ea51",
+    "confirmed_molecule_id": "workflow_bf4390efe3325d1a94690edd6c20f103",
+    "confirmed_molecule_hash": "c08ea45784c5665d61e213ac2de8e6b4e5d081cd481f5fe63272170edfd189a7",
+    "prepared_plan_id": "workflow_33103a0f9c535ff59980e35ef6c2311e",
+    "prepared_plan_hash": "8db0b39451b651773a1d1bd0b9f3b0d93e1062589a7b99a76ad4e25dfb6dbd39",
+    "execution_plan_id": "workflow_d7fe192f6a354241855ff2cb89efe1f7",
+    "execution_plan_hash": "78356bf17026491c4b4b025b67d05f34ab5fda15134774b8cf410399cbf17bde",
+    "context_hash": "2e13a57c19dc96c0156523445ec0546a13e738ff28c189b077504090a0d329a6"
+  },
+  "plan": {
+    "record_id": "workflow_d7fe192f6a354241855ff2cb89efe1f7",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "source_run_id": "run_99d2b1e1217140d3bfe9a3e5a60c9759",
+    "source_plan_id": "workflow_33103a0f9c535ff59980e35ef6c2311e",
+    "source_plan_hash": "8db0b39451b651773a1d1bd0b9f3b0d93e1062589a7b99a76ad4e25dfb6dbd39",
+    "confirmed_molecule_id": "workflow_bf4390efe3325d1a94690edd6c20f103",
+    "confirmed_molecule_hash": "c08ea45784c5665d61e213ac2de8e6b4e5d081cd481f5fe63272170edfd189a7",
+    "protocol_id": "p5.opt_freq_sp.r2scan3c.v1",
+    "protocol_hash": "785b6ff424c6c19af23646a9bf4ea8e83e4301ee1dce3c57efef1173c6c300e8",
+    "registry_snapshot_id": "workflow_f9598835f8c55e6cbf7c689c9fbbeb8c",
+    "registry_snapshot_hash": "ddfb9a16665e527ed061129fc69e05811029bd555a42825b824166bcf8e7ea51",
+    "method_profile_id": "baseline.r2scan3c.v1",
+    "method_profile_hash": "4d1f8b9b7acd43c5f9b0e23247b2783f9e85bcc59163811c5e43b1466d1734cf",
+    "nodes": [
+      {
+        "node_id": "p5.opt_freq_sp.r2scan3c.v1:node-1",
+        "kind": "opt",
+        "geometry_source": "initial_geometry",
+        "depends_on": [],
+        "source_node_id": null,
+        "method_profile_id": "baseline.r2scan3c.v1",
+        "method_profile_hash": "4d1f8b9b7acd43c5f9b0e23247b2783f9e85bcc59163811c5e43b1466d1734cf",
+        "budget": {
+          "nprocs": 1,
+          "total_memory_mb": 2048,
+          "maxcore_mb": 1536,
+          "wall_time_seconds": 900,
+          "run_wall_time_seconds": 3600,
+          "stdout_stderr_limit_bytes": 67108864,
+          "workdir_limit_bytes": 536870912
+        }
+      },
+      {
+        "node_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+        "kind": "freq",
+        "geometry_source": "optimized_geometry",
+        "depends_on": [
+          "p5.opt_freq_sp.r2scan3c.v1:node-1"
+        ],
+        "source_node_id": "p5.opt_freq_sp.r2scan3c.v1:node-1",
+        "method_profile_id": "baseline.r2scan3c.v1",
+        "method_profile_hash": "4d1f8b9b7acd43c5f9b0e23247b2783f9e85bcc59163811c5e43b1466d1734cf",
+        "budget": {
+          "nprocs": 1,
+          "total_memory_mb": 2048,
+          "maxcore_mb": 1536,
+          "wall_time_seconds": 1800,
+          "run_wall_time_seconds": 3600,
+          "stdout_stderr_limit_bytes": 67108864,
+          "workdir_limit_bytes": 536870912
+        }
+      },
+      {
+        "node_id": "p5.opt_freq_sp.r2scan3c.v1:node-3",
+        "kind": "sp",
+        "geometry_source": "optimized_geometry",
+        "depends_on": [
+          "p5.opt_freq_sp.r2scan3c.v1:node-1",
+          "p5.opt_freq_sp.r2scan3c.v1:node-2"
+        ],
+        "source_node_id": null,
+        "method_profile_id": "baseline.r2scan3c.v1",
+        "method_profile_hash": "4d1f8b9b7acd43c5f9b0e23247b2783f9e85bcc59163811c5e43b1466d1734cf",
+        "budget": {
+          "nprocs": 1,
+          "total_memory_mb": 2048,
+          "maxcore_mb": 1536,
+          "wall_time_seconds": 300,
+          "run_wall_time_seconds": 3600,
+          "stdout_stderr_limit_bytes": 67108864,
+          "workdir_limit_bytes": 536870912
+        }
+      }
+    ],
+    "run_budget_seconds": 3600,
+    "plan_hash": "78356bf17026491c4b4b025b67d05f34ab5fda15134774b8cf410399cbf17bde"
+  },
+  "geometry": [
+    {
+      "record_id": "workflow_1975ba27ed884770acac2c492084c267",
+      "schema_version": 4,
+      "engine_version": "p5-local-orca-v1",
+      "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+      "confirmed_molecule_id": "workflow_bf4390efe3325d1a94690edd6c20f103",
+      "identity_hash": "c08ea45784c5665d61e213ac2de8e6b4e5d081cd481f5fe63272170edfd189a7",
+      "canonical_isomeric_smiles": "O",
+      "molecular_formula": "H2O",
+      "formal_charge": 0,
+      "multiplicity": 1,
+      "atom_symbols": [
+        "O",
+        "H",
+        "H"
+      ],
+      "atom_map": [
+        1,
+        2,
+        3
+      ],
+      "coordinates": [
+        [
+          -0.0006695686332157025,
+          0.3776149838817171,
+          -0.0
+        ],
+        [
+          0.8028517811491441,
+          -0.18859766371265607,
+          0.0
+        ],
+        [
+          -0.8021822125159281,
+          -0.18901732016906103,
+          -0.0
+        ]
+      ],
+      "xyz_precision": 8,
+      "rdkit_version": "2026.03.5",
+      "algorithm_version": "rdkit-etkdgv3-geometry-v1",
+      "seed": 6022,
+      "geometry_hash": "2db84e13c1e523fb9c67e7d4078b3a1d09dae0d5c560d1afaf26ec521ab2294f",
+      "xyz_bytes_sha256": "9ad6fbb7bcc183d55ff471d122a4551907003fd53f9060bf2b4065057cc5a433",
+      "record_hash": "5eabd1174c4f4fb2f8ed043c2ded6191bdc473fc1362b27df1fcd555e32b4188"
+    },
+    {
+      "record_id": "workflow_a698806959dd4689b495e0fbf44b25a5",
+      "schema_version": 4,
+      "engine_version": "p5-local-orca-v1",
+      "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+      "confirmed_molecule_id": "workflow_bf4390efe3325d1a94690edd6c20f103",
+      "identity_hash": "c08ea45784c5665d61e213ac2de8e6b4e5d081cd481f5fe63272170edfd189a7",
+      "canonical_isomeric_smiles": "O",
+      "molecular_formula": "H2O",
+      "formal_charge": 0,
+      "multiplicity": 1,
+      "atom_symbols": [
+        "O",
+        "H",
+        "H"
+      ],
+      "atom_map": [
+        1,
+        2,
+        3
+      ],
+      "coordinates": [
+        [
+          -0.00019183275657,
+          0.39451712930812,
+          0.0
+        ],
+        [
+          0.75825020860413,
+          -0.19689042055847,
+          0.0
+        ],
+        [
+          -0.75805837584757,
+          -0.19762670874965,
+          0.0
+        ]
+      ],
+      "xyz_precision": 8,
+      "rdkit_version": "2026.03.5",
+      "algorithm_version": "rdkit-etkdgv3-geometry-v1",
+      "seed": 6022,
+      "geometry_hash": "af3ed364b96158b87353292fb1b6b54e55e297be47008a48e39544a44e19c780",
+      "xyz_bytes_sha256": "581b0cbfa31faf1d014c586dbb21c4fea5c791a328f963115a0a2a0c4014cca7",
+      "record_hash": "08bfe0020016883883072058c9a308f837b301b8ab3ecbc91e0391dc75109dea"
+    }
+  ],
+  "action": {
+    "record_id": "workflow_9231a59929e24f2eb73f1efdd2cf9412",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+    "action_id": "action_9039ee63cd9647ba840b1534b26b4c20",
+    "node_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+    "primitive_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+    "action_hash": "0f884861fdc32f8e628ddd46ef315d428941d44284b4b4f947779a3d9e36c710",
+    "envelope_hash": "76377bb2a83d0f1fd1271e02d19ecf3f9ad6d590f604058d83c77084d1b34d87",
+    "budget_hash": "b3353efcdc47e143d41bd65bdc03c8aaf209c8fa869380c272e95cf99e4d3b6b",
+    "binding_id": "workflow_f8eea363fedd48e4a3b0e6b4c9f1592f",
+    "binding_hash": "6b2b0217a3312b2ec09bf3e9febfe82cec9bc75d65151743eb3da9077a77f6db",
+    "input_artifact_id": "artifact_9e7d78915d5258908644eb8eeed77e1f",
+    "geometry_artifact_id": "artifact_ade0176b65e950f6b81cc15686657662",
+    "status": "planned",
+    "grant_id": null,
+    "execution_id": null,
+    "created_at_utc": "2026-09-07T11:24:24.078233Z",
+    "action_record_hash": "f75da0bd9684ca872fd3149708f567d9b2a4caf1e40ca673b634606325d4564f"
+  },
+  "binding": {
+    "record_id": "workflow_f8eea363fedd48e4a3b0e6b4c9f1592f",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+    "source_run_id": "run_99d2b1e1217140d3bfe9a3e5a60c9759",
+    "confirmed_molecule_id": "workflow_bf4390efe3325d1a94690edd6c20f103",
+    "confirmed_molecule_hash": "c08ea45784c5665d61e213ac2de8e6b4e5d081cd481f5fe63272170edfd189a7",
+    "prepared_plan_id": "workflow_33103a0f9c535ff59980e35ef6c2311e",
+    "prepared_plan_hash": "8db0b39451b651773a1d1bd0b9f3b0d93e1062589a7b99a76ad4e25dfb6dbd39",
+    "execution_plan_id": "workflow_d7fe192f6a354241855ff2cb89efe1f7",
+    "execution_plan_hash": "78356bf17026491c4b4b025b67d05f34ab5fda15134774b8cf410399cbf17bde",
+    "node_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+    "action_id": "action_9039ee63cd9647ba840b1534b26b4c20",
+    "primitive_id": "p5.opt_freq_sp.r2scan3c.v1:node-2",
+    "upstream_result_id": "workflow_b98d66696b69443296f3bc868bd2ed56",
+    "upstream_result_hash": "30d5b42c60c72bbc0b1680589481e6d82fad4e4d54354ea390310a3eb6a3d743",
+    "method_profile_id": "baseline.r2scan3c.v1",
+    "method_profile_hash": "4d1f8b9b7acd43c5f9b0e23247b2783f9e85bcc59163811c5e43b1466d1734cf",
+    "geometry_artifact_id": "artifact_ade0176b65e950f6b81cc15686657662",
+    "geometry_hash": "af3ed364b96158b87353292fb1b6b54e55e297be47008a48e39544a44e19c780",
+    "xyz_bytes_sha256": "581b0cbfa31faf1d014c586dbb21c4fea5c791a328f963115a0a2a0c4014cca7",
+    "compiler_version": "orca-compiler-v2",
+    "feature_profile_hash": "b953d719e1c96324336d51bb3ca3be138365e47223c5d41a2da0e961a91f3061",
+    "input_manifest_hash": "f84f58e74c395e70cca77846d64a7604fc2ea92670f344ecb648fc0fdb0cd02b",
+    "input_sha256": "a51e07aac33cc89a17495e41ca291c30e9a3ff95cdaf20413b00083e70f271be",
+    "backend_kind": "local_orca",
+    "runtime_config_hash": "6959669bbee11c2747afe3c3cf448aa11473f09e7e86987d06fbd3d1f65d003c",
+    "orca_version": "6.1.1",
+    "executable_sha256": "8d6b51bf4093c967dbed997cc651f0212b8f94313ee77ea56f548f000672c42f",
+    "budget": {
+      "nprocs": 1,
+      "total_memory_mb": 2048,
+      "maxcore_mb": 1536,
+      "wall_time_seconds": 1800,
+      "run_wall_time_seconds": 3600,
+      "stdout_stderr_limit_bytes": 67108864,
+      "workdir_limit_bytes": 536870912
+    },
+    "run_budget_seconds": 3600,
+    "recovery_strategy": "reconcile_no_auto_retry",
+    "binding_hash": "6b2b0217a3312b2ec09bf3e9febfe82cec9bc75d65151743eb3da9077a77f6db"
+  },
+  "grant": {
+    "grant_id": "approval_a3873da65ffa4b6798fd27ea0534a4d3",
+    "schema_version": 4,
+    "engine_version": "p5-local-orca-v1",
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "conversation_id": "conversation_80d7cb72a919472198f9690fd61743d8",
+    "interrupt_id": "p5-approval:action_40c8562e48a047de986c73d1fd9e0853",
+    "revision": 2,
+    "action_id": "action_40c8562e48a047de986c73d1fd9e0853",
+    "action_hash": "822d6e1106b2f4d3fe44422dc444454bea1a43d88bd8765e89ec675985e8aa6e",
+    "binding_hash": "7243bdfacaacc5667167967d1ea3085e0f6956afd37488cae5fa9d766a8026b1",
+    "envelope_hash": "e269ce1040056313e0bda4b43fea70edbb36c40dfbaa4b1f278a5307867d9e0d",
+    "budget_hash": "62d1ae957f985585df64acc86f0e2b54292c15976277ba4d66149b8946be6ef1",
+    "issued_at_utc": "2026-09-07T11:23:37.863802Z",
+    "expires_at_utc": "2026-09-08T11:23:37.863802Z",
+    "approval_command_id": "command_09624abd7463411c9553eca1555f9155",
+    "grant_hash": "e4c807aad4b091fb5c0994d1b72398058314a5e8f491a6dacea2b35f6a9bcdd2"
+  },
+  "job": {
+    "job_id": "job_983c3cc3ff1d41fe8ed887621e51620b",
+    "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+    "action_id": "action_40c8562e48a047de986c73d1fd9e0853",
+    "execution_id": "execution_e91e54c4b2a84d6a809dbc824cf9e8f1",
+    "idempotency_key": "p5:run_3e96adc04ed048f2aefee660908eaab2:action_40c8562e48a047de986c73d1fd9e0853",
+    "binding_id": "workflow_dae6a7b94fd1481cbb70fff00f87695d",
+    "binding_hash": "7243bdfacaacc5667167967d1ea3085e0f6956afd37488cae5fa9d766a8026b1",
+    "input_manifest_hash": "b3ef4fe2c982ff879e7b933d3b8d1049c63370c16cb0b7bc7342946f5b4f083d",
+    "geometry_hash": "2db84e13c1e523fb9c67e7d4078b3a1d09dae0d5c560d1afaf26ec521ab2294f",
+    "backend_kind": "local_orca",
+    "launch_token": "6cbb4af0828445369b1c615996e78e05",
+    "launch_generation": 1,
+    "launch_reserved_at_utc": "2026-09-07T11:23:45.935217Z",
+    "launch_consumed_at_utc": "2026-09-07T11:23:47.460860Z",
+    "status": "succeeded",
+    "supervisor_pid": 5844,
+    "supervisor_created_at": null,
+    "orca_pid": null,
+    "orca_created_at": null,
+    "host_identity": "AZ:nt",
+    "executable_sha256": "8d6b51bf4093c967dbed997cc651f0212b8f94313ee77ea56f548f000672c42f",
+    "job_directory_id": "execution_e91e54c4b2a84d6a809dbc824cf9e8f1",
+    "deadline_utc": "2026-09-07T11:38:46.001783Z",
+    "cancel_requested": false,
+    "stop_reason": "normal_exit",
+    "last_observation_sequence": 1,
+    "last_observation_hash": "d063bc1911f3c317126693051eec5c86ded3b9fb94a08ecfef2dd87590725e31",
+    "exit_code": 0,
+    "terminal_receipt_id": "workflow_b98d66696b69443296f3bc868bd2ed56",
+    "terminal_receipt_hash": "30d5b42c60c72bbc0b1680589481e6d82fad4e4d54354ea390310a3eb6a3d743",
+    "terminal_at_utc": "2026-09-07T11:24:24.078233Z"
+  },
+  "results": [
+    {
+      "record_id": "workflow_b98d66696b69443296f3bc868bd2ed56",
+      "schema_version": 4,
+      "engine_version": "p5-local-orca-v1",
+      "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+      "action_id": "action_40c8562e48a047de986c73d1fd9e0853",
+      "execution_id": "execution_e91e54c4b2a84d6a809dbc824cf9e8f1",
+      "job_id": "job_983c3cc3ff1d41fe8ed887621e51620b",
+      "data_origin": "orca_local",
+      "primitive": "opt",
+      "input_manifest_hash": "b3ef4fe2c982ff879e7b933d3b8d1049c63370c16cb0b7bc7342946f5b4f083d",
+      "output_manifest_hash": "ec9d72243592097d336b3bfa146704a792193c95feb1f5b5a128cb7669f549d7",
+      "orca_version": "6.1.1",
+      "executable_sha256": "8d6b51bf4093c967dbed997cc651f0212b8f94313ee77ea56f548f000672c42f",
+      "exit_code": 0,
+      "normal_termination": true,
+      "scf_converged": true,
+      "optimization_converged": true,
+      "parse_status": "complete",
+      "energy": -76.418938721015,
+      "energy_unit": "Eh",
+      "energy_token": "-76.418938721015",
+      "frequencies": [],
+      "frequency_unit": null,
+      "optimized_geometry_artifact_id": "artifact_536093bba4175b6e9f8744742569bc74",
+      "hessian_artifact_id": null,
+      "stdout_artifact_id": "artifact_0e875611883157a888c0eda449a572c6",
+      "stderr_artifact_id": "artifact_0aa0725ef3895c698646fc41bac8c8f3",
+      "diagnostics": [],
+      "source_locations": {
+        "energy": 129000,
+        "normal_termination": 138399
+      },
+      "scientific_assessment": "not_evaluated",
+      "claim_status": "not_generated",
+      "result_hash": "30d5b42c60c72bbc0b1680589481e6d82fad4e4d54354ea390310a3eb6a3d743"
+    }
+  ],
+  "diagnostics": [
+    "scientific_assessment=not_evaluated",
+    "claim_status=not_generated"
+  ],
+  "scientific_assessment": "not_evaluated",
+  "claim_status": "not_generated"
+}

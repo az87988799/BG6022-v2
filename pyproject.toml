@@ -12,8 +12,15 @@ dependencies = [
     "pydantic>=2.13.5,<3",
 ]
 
+[project.scripts]
+orca-agent = "orca_agent.interfaces.cli:main"
+
 [project.optional-dependencies]
 p4 = [
+    "rdkit==2026.3.5",
+    "httpx==0.28.1",
+]
+p5 = [
     "rdkit==2026.3.5",
     "httpx==0.28.1",
 ]
@@ -44,6 +51,9 @@ line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
 extend-exclude = ["build", "dist"]
+
+[tool.coverage.run]
+patch = ["subprocess"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

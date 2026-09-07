@@ -55,6 +55,7 @@ from orca_agent.orchestration.p3_kernel import P3KernelEvent
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from orca_agent.orchestration.p4_kernel import P4KernelEvent
 from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
+from orca_agent.orchestration.p5_versions import P5_ENGINE_VERSION, P5_SCHEMA_VERSION
 from orca_agent.orchestration.schema1_read import read_error_text
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
@@ -537,7 +538,7 @@ class OutboxRepository:
         if payload.get("effect_id") != str(record.effect_id):
             raise StateIntegrityError("outbox audit event effect ID does not match")
         if record.status is OutboxStatus.SUCCEEDED:
-            if event.event_type is not EventType.EFFECT_SUCCEEDED:
+            if event.event_type.value != EventType.EFFECT_SUCCEEDED.value:
                 raise StateIntegrityError("success receipt has an invalid event type")
             raw_summary = payload.get("result_summary")
             try:
@@ -557,7 +558,7 @@ class OutboxRepository:
             if record.result_summary != summary and not converted_empty:
                 raise StateIntegrityError("success receipt summary does not match outbox")
         elif record.status is OutboxStatus.DEAD_LETTER:
-            if event.event_type is not EventType.EFFECT_DEAD_LETTERED:
+            if event.event_type.value != EventType.EFFECT_DEAD_LETTERED.value:
                 raise StateIntegrityError("failure receipt has an invalid event type")
             if (
                 payload.get("error_code") != record.last_error_code
@@ -1392,6 +1393,7 @@ def _supported_version(schema_version: int, engine_version: str) -> bool:
         (CURRENT_SCHEMA_VERSION, ENGINE_VERSION),
         (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
         (P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
+        (P5_SCHEMA_VERSION, P5_ENGINE_VERSION),
     }
 
 

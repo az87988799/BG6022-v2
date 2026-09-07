@@ -1,0 +1,24 @@
+{
+  "schema": "p5-command-replay/v1",
+  "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "approval": {
+    "request": "approve-request.json",
+    "command_id": "command_09624abd7463411c9553eca1555f9155",
+    "event_id": "event_2cda5d1692b34f6dbec59c8452a9f79f",
+    "replay_accepted": true,
+    "replay_code": "action_approved",
+    "replay_revision": 3
+  },
+  "reconcile": {
+    "request": "reconcile-request.json",
+    "command_id": "command_e7ad57e5afd848d8b22df48a92c253c3",
+    "event_id": "event_e402325b8ee6479fbd685b70980d7a63",
+    "replay_accepted": true,
+    "replay_code": "reconciled",
+    "replay_revision": 8
+  },
+  "physical_start_count_after_replay": 1,
+  "new_execution_created_by_replay": false,
+  "downstream_jobs_started_by_replay": 0,
+  "historical_results_changed": false
+}

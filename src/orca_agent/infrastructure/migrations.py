@@ -1370,6 +1370,110 @@ P3_WORKFLOW_STATEMENTS = (
 )
 
 
+# P5 appends a real-execution fact projection.  The P3 ``jobs`` table remains
+# fixture-only; changing it would make historical P3 records ambiguous.
+P5_LOCAL_JOB_STATEMENTS = (
+    """
+    CREATE TABLE local_jobs (
+        job_id                    TEXT PRIMARY KEY,
+        run_id                    TEXT NOT NULL REFERENCES runs(run_id),
+        action_id                 TEXT NOT NULL REFERENCES actions(action_id),
+        execution_id              TEXT NOT NULL UNIQUE,
+        idempotency_key           TEXT NOT NULL UNIQUE,
+        binding_id                TEXT NOT NULL,
+        binding_hash              TEXT NOT NULL CHECK(length(binding_hash) = 64),
+        input_manifest_hash       TEXT NOT NULL CHECK(length(input_manifest_hash) = 64),
+        geometry_hash             TEXT NOT NULL CHECK(length(geometry_hash) = 64),
+        backend_kind              TEXT NOT NULL CHECK(backend_kind IN ('local_orca', 'fake')),
+        launch_token              TEXT NOT NULL,
+        launch_generation         INTEGER NOT NULL CHECK(launch_generation >= 1),
+        launch_reserved_at_utc    TEXT NOT NULL,
+        launch_consumed_at_utc    TEXT,
+        status                    TEXT NOT NULL CHECK(status IN (
+            'reserved', 'starting', 'running', 'succeeded', 'failed',
+            'cancelled', 'timed_out', 'interrupted', 'needs_reconciliation'
+        )),
+        supervisor_pid            INTEGER,
+        supervisor_created_at     REAL,
+        orca_pid                  INTEGER,
+        orca_created_at           REAL,
+        host_identity             TEXT NOT NULL,
+        executable_sha256         TEXT CHECK(
+            executable_sha256 IS NULL OR length(executable_sha256) = 64
+        ),
+        job_directory_id          TEXT NOT NULL,
+        deadline_utc              TEXT NOT NULL,
+        cancel_requested          INTEGER NOT NULL CHECK(cancel_requested IN (0, 1)),
+        stop_reason               TEXT,
+        last_observation_sequence INTEGER NOT NULL CHECK(last_observation_sequence >= 0),
+        last_observation_hash     TEXT CHECK(
+            last_observation_hash IS NULL OR length(last_observation_hash) = 64
+        ),
+        exit_code                 INTEGER,
+        terminal_receipt_id       TEXT,
+        terminal_receipt_hash     TEXT CHECK(
+            terminal_receipt_hash IS NULL OR length(terminal_receipt_hash) = 64
+        ),
+        terminal_at_utc           TEXT,
+        CHECK((launch_consumed_at_utc IS NULL) OR status <> 'reserved'),
+        CHECK((terminal_at_utc IS NULL) OR status IN (
+            'succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted'
+        ))
+    )
+    """.strip(),
+    "CREATE INDEX local_jobs_run_status ON local_jobs(run_id, status, deadline_utc)",
+    "CREATE INDEX local_jobs_action ON local_jobs(action_id)",
+    """
+    CREATE UNIQUE INDEX local_jobs_run_action ON local_jobs(run_id, action_id)
+    """.strip(),
+    """
+    CREATE TRIGGER local_jobs_identity_immutable
+    BEFORE UPDATE ON local_jobs
+    WHEN NEW.job_id IS NOT OLD.job_id
+      OR NEW.run_id IS NOT OLD.run_id
+      OR NEW.action_id IS NOT OLD.action_id
+      OR NEW.execution_id IS NOT OLD.execution_id
+      OR NEW.idempotency_key IS NOT OLD.idempotency_key
+      OR NEW.binding_id IS NOT OLD.binding_id
+      OR NEW.binding_hash IS NOT OLD.binding_hash
+      OR NEW.input_manifest_hash IS NOT OLD.input_manifest_hash
+      OR NEW.geometry_hash IS NOT OLD.geometry_hash
+      OR NEW.backend_kind IS NOT OLD.backend_kind
+      OR NEW.launch_token IS NOT OLD.launch_token
+      OR NEW.launch_generation IS NOT OLD.launch_generation
+      OR NEW.host_identity IS NOT OLD.host_identity
+      OR NEW.executable_sha256 IS NOT OLD.executable_sha256
+      OR NEW.job_directory_id IS NOT OLD.job_directory_id
+    BEGIN
+        SELECT RAISE(ABORT, 'local job identity is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER local_jobs_terminal_immutable
+    BEFORE UPDATE ON local_jobs
+    WHEN OLD.status IN ('succeeded', 'failed', 'cancelled', 'timed_out', 'interrupted')
+      AND (
+        NEW.status IS NOT OLD.status
+        OR NEW.exit_code IS NOT OLD.exit_code
+        OR NEW.terminal_receipt_id IS NOT OLD.terminal_receipt_id
+        OR NEW.terminal_receipt_hash IS NOT OLD.terminal_receipt_hash
+        OR NEW.terminal_at_utc IS NOT OLD.terminal_at_utc
+        OR NEW.stop_reason IS NOT OLD.stop_reason
+      )
+    BEGIN
+        SELECT RAISE(ABORT, 'local job terminal state is immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER local_jobs_no_delete
+    BEFORE DELETE ON local_jobs
+    BEGIN
+        SELECT RAISE(ABORT, 'local jobs are append-only facts');
+    END;
+    """.strip(),
+)
+
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
@@ -1407,6 +1511,11 @@ DEFAULT_MIGRATIONS = (
         version=6,
         name="p3_water_workflow_records_and_artifacts",
         statements=P3_WORKFLOW_STATEMENTS,
+    ),
+    Migration(
+        version=7,
+        name="p5_local_execution_jobs",
+        statements=P5_LOCAL_JOB_STATEMENTS,
     ),
 )
 
@@ -1532,6 +1641,7 @@ __all__ = [
     "V3_RECEIPT_AND_EVENT_CHAIN_STATEMENTS",
     "V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS",
     "P3_WORKFLOW_STATEMENTS",
+    "P5_LOCAL_JOB_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",

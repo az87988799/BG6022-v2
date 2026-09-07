@@ -1,0 +1,9 @@
+{
+  "command_id": "command_e7ad57e5afd848d8b22df48a92c253c3",
+  "schema_version": 4,
+  "engine_version": "p5-local-orca-v1",
+  "command_type": "p5.reconcile_execution",
+  "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "requested_at_utc": "2026-09-07T11:24:23.664404Z",
+  "expected_revision": 6
+}

@@ -1,0 +1,51 @@
+{
+  "schema": "p5-r01-sp-command-replay/v1",
+  "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "approval": {
+    "request": "approve-request.json",
+    "response": {
+      "accepted": true,
+      "code": "action_approved",
+      "revision": 19,
+      "event_id": "event_97bfdabf2f4e46a3914f6997a8a57009",
+      "phase": "dispatch_pending"
+    },
+    "replayed_in_fresh_cli_process": true,
+    "replay_response": {
+      "accepted": true,
+      "code": "action_approved",
+      "revision": 19,
+      "event_id": "event_97bfdabf2f4e46a3914f6997a8a57009",
+      "phase": "dispatch_pending"
+    }
+  },
+  "dispatch": {
+    "worker_process": "fresh CLI process",
+    "response": {
+      "outcome": "starting",
+      "status": "running",
+      "physical_start_count": 1,
+      "execution_id": "execution_b2545f5127a94985886ef48539946834"
+    }
+  },
+  "collection": {
+    "worker_process": "fresh CLI process",
+    "response": {
+      "outcome": "execution_completed",
+      "status": "completed",
+      "physical_start_count": 1,
+      "execution_id": "execution_b2545f5127a94985886ef48539946834"
+    }
+  },
+  "post_replay_state": {
+    "revision": 25,
+    "phase": "completed",
+    "completed_result_count": 3,
+    "job_count": 3,
+    "sp_execution_id": "execution_b2545f5127a94985886ef48539946834",
+    "sp_physical_start_count": 1,
+    "duplicate_sp_job_created": false
+  },
+  "scientific_assessment": "not_evaluated",
+  "claim_status": "not_generated"
+}

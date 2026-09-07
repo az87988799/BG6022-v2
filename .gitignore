@@ -14,11 +14,14 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 
-# Temporary and generated agent data
+# Temporary and generated agent data.
+# New temporary state must be created under .tmp/<phase>/[operation]/.
 .tmp/
+# Compatibility guard for old top-level names; do not create new .tmp-* paths.
 .tmp-*/
 tmp/
 agent_output/
@@ -48,6 +51,7 @@ orca-artifacts/
 *.gbw
 *.hess
 *.engrad
+!docs/evidence/p5-closeout/r01-freq/input.hess
 
 # IDE and editor-private files
 .idea/

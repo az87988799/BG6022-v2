@@ -1,0 +1,68 @@
+{
+  "implementation_sha": "97a8fc2197d8027559f4fb58b66463aded5a91cb",
+  "executable_sha256": "8d6b51bf4093c967dbed997cc651f0212b8f94313ee77ea56f548f000672c42f",
+  "orca_version": "6.1.1",
+  "schema": "p5-control-packet/v1",
+  "files": [
+    {
+      "path": "R03/evidence.json",
+      "sha256": "a9a664cb39e14ba5b0f82e32ef9dc5d6202f0e7c5bc1661d69788fbeb03a7257",
+      "size_bytes": 18408
+    },
+    {
+      "path": "R03/exit_receipt.json",
+      "sha256": "c3056a767060f1cc57f4faea7d4072be377129011f250a6fb83f398c9abafa39",
+      "size_bytes": 991
+    },
+    {
+      "path": "R03/geometry.xyz",
+      "sha256": "9ad6fbb7bcc183d55ff471d122a4551907003fd53f9060bf2b4065057cc5a433",
+      "size_bytes": 140
+    },
+    {
+      "path": "R03/input.inp",
+      "sha256": "26bdc167de35cfd84a5983e1c3e3f664962f9c6fb53decaf6e83ad324066311f",
+      "size_bytes": 66
+    },
+    {
+      "path": "R03/stderr.err",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "R03/stdout.out",
+      "sha256": "410c5fdd0b21cf26108d34ca3fc8b9d11eec8806155ed0a23784b7ffc83a4245",
+      "size_bytes": 41704
+    },
+    {
+      "path": "R04/evidence.json",
+      "sha256": "06ada46be31a75cbb9ed429945d11db7047b67d255f44ebd3f73cc8e8d653093",
+      "size_bytes": 18398
+    },
+    {
+      "path": "R04/exit_receipt.json",
+      "sha256": "ee01c25ec34e7461b68ab099c761b34e1e09019c60fd29e8d94bc7230e02067f",
+      "size_bytes": 995
+    },
+    {
+      "path": "R04/geometry.xyz",
+      "sha256": "9ad6fbb7bcc183d55ff471d122a4551907003fd53f9060bf2b4065057cc5a433",
+      "size_bytes": 140
+    },
+    {
+      "path": "R04/input.inp",
+      "sha256": "26bdc167de35cfd84a5983e1c3e3f664962f9c6fb53decaf6e83ad324066311f",
+      "size_bytes": 66
+    },
+    {
+      "path": "R04/stderr.err",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 0
+    },
+    {
+      "path": "R04/stdout.out",
+      "sha256": "ec6369cb3739796163cf7031ca0ff64633f43eb373d6462774d0bf358e287dee",
+      "size_bytes": 34088
+    }
+  ]
+}
