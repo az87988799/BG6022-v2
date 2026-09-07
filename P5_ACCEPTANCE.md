@@ -2,23 +2,25 @@
 
 Status: `PENDING_OWNER_ACCEPTANCE` — P6 remains blocked.
 
-Baseline under repair: `3be5bb271c103807bb0c1d93fcbf0c95f3291ca5`.
-Repair details and the T01–T30 evidence map: [P5 audit repair](docs/P5_AUDIT_REPAIR.md).
+Current review baseline: `c7cd1eab7da646f885fbc6bf040f559d974ae6f2`.
+Minimal C1–C3 changes: [completion repair](docs/P5_C_COMPLETION_REPAIR.md).
+Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md).
 
 ## Verification
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Offline full suite | Revalidation in progress | Previous clean run: 483 passed, branch coverage 80.83%; latest P5 targeted suites: 77 passed, 1 Windows symlink-privilege skip |
+| Offline full suite | C1–C3 revalidation in progress | Prior c7cd1ea local run: 496 passed, 1 skipped, 80.97%; original CI collected 497 |
 | Coverage policy | Unchanged 80% threshold | All current `src/orca_agent` modules; historical checkout not double-counted |
 | Windows control | PASS in controlled tests | Non-destructive poll, PID identity, one-shot launch, long job, descendant cancel/timeout, supervisor crash, Job memory/output/workdir limits |
 | Ruff / format / compileall | PASS | Latest source, tests and scripts |
-| Locked dependencies / build | PASS; final rebuild pending | `uv sync --locked --extra p5`, `uv lock --check`, wheel and sdist |
-| R01 Water Opt→Freq→SP | Pending authorized additional attempt | First Opt exit 0; application rejected CRLF. Original failed record retained; genuine fixture replay now passes |
-| R02 process restart and command replay | Pending | Embedded in R01 without extra numerical jobs |
-| R03 real cancellation | PASS | First authorization, `execution_db3395b82c1542e7bac04d2a6a18a933`; real child stopped and partial output retained |
-| R04 real timeout | NOT_EXERCISED; additional attempt authorized | First 1-second limit expired before spawn; zero physical starts. New attempt ceiling is 3 seconds |
-| PR / Windows–Ubuntu matrix | Pending | Will bind results to pushed repair SHA |
+| Locked dependencies / build | PASS | Locked sync/check; C1–C3 wheel and sdist built |
+| R01 Water Opt→Freq→SP | FAIL / unresolved | Additional Opt parsed successfully; Freq rejected for Hessian coordinate-frame mismatch; SP not launched. No automatic retry |
+| R02 process restart and command replay | NOT_COMPLETED | Chain did not complete; no successful replay gate inferred |
+| R03 real cancellation | NOT_EXERCISED under C3 / recheck authorized | Old receipt lacks request-time control facts and is no longer counted PASS. One unused 30-second attempt authorized |
+| R04 real timeout | NOT_EXERCISED; unused attempt authorized | First 1-second limit expired before spawn; zero physical starts. Unused attempt ceiling is 3 seconds |
+| Prior PR / Windows–Ubuntu matrix | PASS at c7cd1ea | [CI 34080330125](https://github.com/az87988799/BG6022-v2/actions/runs/34080330125): Windows 497 passed; Ubuntu 3.11/3.14 495 passed, 2 skipped; Ubuntu branch coverage 80.19%; quality PASS |
+| C1–C3 PR matrix | Pending | Must verify the new repair SHA separately |
 | Main merge / main CI | NOT_RUN | No automatic merge or P6 start |
 | Owner acceptance | PENDING | Only the owner can accept this phase |
 
@@ -39,11 +41,16 @@ outcomes:
 
 - First: `.tmp/p5-water-audit`.
 - Additional: `.tmp/p5-water-audit-retry`.
+- Separately authorized, unused final cancellation: `.tmp/p5-water-audit-final-cancel` (one job, 30 seconds).
 - Byte-preserving real Opt fixture: `tests/p5/fixtures/orca_6_1_1_water_opt`.
 
 Synthetic fixtures and controlled Python processes are **not** real ORCA
 acceptance evidence. P5 exports retain `scientific_assessment=not_evaluated`
 and `claim_status=not_generated`.
+
+The reviewer's isolated Linux/Python 3.12 run had four process-identity failures;
+these were not GitHub CI failures. Missing/denied/disappearing `/proc` identity
+remains fail-closed; no PID-only fallback or broader Linux production claim.
 
 ## Owner checklist
 

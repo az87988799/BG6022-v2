@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from orca_agent.domain.ids import RunId
+from orca_agent.execution.control_evidence import control_gate_status
+from orca_agent.execution.work_paths import execution_directory
 from orca_agent.infrastructure.artifacts import ArtifactRecordRepository
 from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRepository
 from orca_agent.infrastructure.repositories import EventRepository, RunRepository
@@ -134,6 +136,35 @@ def collect(state_root: Path, run_id: RunId) -> dict[str, object]:
             for record_id, record_type, record in records
         ]
         job_values = [job.model_dump(mode="json") for _job_id, job in jobs]
+        controls = []
+        for _job_id, job in jobs:
+            if job.backend_kind != "local_orca":
+                continue
+            directory = execution_directory(state_root, str(job.execution_id))
+            path = directory / "exit_receipt.json"
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()
+            receipt = json.loads(raw)
+            if any(
+                receipt.get(key) != expected
+                for key, expected in {
+                    "execution_id": str(job.execution_id),
+                    "job_id": str(job.job_id),
+                    "launch_token": job.launch_token,
+                    "host_identity": job.host_identity,
+                }.items()
+            ):
+                raise ValueError("terminal receipt does not match trusted job identity")
+            controls.append(
+                {
+                    "execution_id": str(job.execution_id),
+                    "receipt_sha256": hashlib.sha256(raw).hexdigest(),
+                    "receipt": receipt,
+                    "cancel_gate": control_gate_status(receipt, "cancelled"),
+                    "timeout_gate": control_gate_status(receipt, "timed_out"),
+                }
+            )
         return {
             "valid": True,
             "implementation_sha": _git_sha(
@@ -157,6 +188,7 @@ def collect(state_root: Path, run_id: RunId) -> dict[str, object]:
             "source_run_id": str(snapshot.state.source_run_id),
             "records": p5_record_values,
             "jobs": job_values,
+            "control_evidence": controls,
             "artifacts": artifacts,
             "scientific_assessment": "not_evaluated",
             "claim_status": "not_generated",

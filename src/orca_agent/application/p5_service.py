@@ -1961,6 +1961,9 @@ class P5ApplicationService:
     def _geometry_from_xyz(
         previous: GeometryRecord, value: bytes, *, run_id: RunId
     ) -> GeometryRecord:
+        from orca_agent.identity.optimized_compatibility import validate_optimized_identity
+
+        validate_optimized_identity(value, previous)
         symbols, coordinates = parse_xyz_bytes(value)
         if symbols != previous.atom_symbols:
             raise GeometryBindingMismatch("optimized geometry atom mapping changed")

@@ -109,12 +109,25 @@ def parse_orca_output(
     normal_matches = list(re.finditer(r"\*+ORCA TERMINATED NORMALLY\*+", text, re.I))
     if len(normal_matches) != 1:
         raise OutputTruncated("ORCA output has no unique normal-termination marker")
-    if re.search(r"SCF\s+(?:NOT\s+)?CONVERGED|SCF\s+CONVERGENCE\s+FAILED", text, re.I):
-        if re.search(r"SCF\s+(?:NOT\s+CONVERGED|CONVERGENCE\s+FAILED)", text, re.I):
-            raise ScfNotConverged("ORCA output reports an unconverged SCF")
-    scf = bool(re.search(r"SCF\s+CONVERGED|SCF CONVERGENCE", text, re.I))
-    if not scf:
-        raise RequiredOutputMissing("ORCA SCF convergence marker is missing")
+    tail = text[normal_matches[0].end() :]
+    if any(
+        line.strip()
+        and not re.fullmatch(
+            r"TOTAL RUN TIME:\s*\d+ days \d+ hours \d+ minutes \d+ seconds \d+ msec",
+            line.strip(),
+            re.I,
+        )
+        for line in tail.splitlines()
+    ):
+        raise OutputTruncated("unexpected calculation content after normal termination")
+    text = text[: normal_matches[0].start()]
+    if len(re.findall(r"Program Version\s+", text, re.I)) > 1 or re.search(
+        r"ORCA TERMINATED|ORCA finished by error termination|"
+        r"SCF\s+(?:NOT\s+CONVERGED|CONVERGENCE\s+FAILED)",
+        text,
+        re.I,
+    ):
+        raise ScfNotConverged("conflicting termination or unconverged calculation")
     energy_matches = list(
         re.finditer(
             r"(?:FINAL SINGLE POINT ENERGY|FINAL ENERGY)\s+(-?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?)", text
@@ -125,6 +138,15 @@ def parse_orca_output(
     if len(energy_matches) > 1 and kind is P5NodeKind.SP:
         raise OutputTruncated("SP output contains multiple ambiguous final energies")
     energy_match = energy_matches[-1]
+    # Every final energy must have its own preceding explicit SCF success.
+    # A chapter heading or success in an earlier Opt cycle is not sufficient.
+    start = 0
+    for match in energy_matches:
+        if not re.search(r"\bSCF\s+CONVERGED\b", text[start : match.start()], re.I):
+            raise RequiredOutputMissing("final calculation lacks explicit SCF convergence")
+        start = match.end()
+    if re.search(r"\bSCF\s+CONVERGED\b", text[start:], re.I):
+        raise OutputTruncated("SCF calculation after final energy has no bound result")
     energy_token = energy_match.group(1)
     energy = float(energy_token)
     version_match = re.search(

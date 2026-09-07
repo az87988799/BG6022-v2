@@ -17,6 +17,7 @@ from pathlib import Path
 from collect_p5_execution_evidence import collect
 
 from orca_agent.domain.ids import RunId
+from orca_agent.execution.control_evidence import control_gate_status
 from orca_agent.execution.windows_job import process_start_marker
 
 
@@ -257,6 +258,7 @@ def execute(manifest, *, gates=None):
         verified = collect(root, RunId(run_id))
         jobs = verified["jobs"]
         physical = []
+        receipts = []
         for job in jobs:
             receipt_path = root / "work" / job["execution_id"] / "exit_receipt.json"
             receipt = (
@@ -265,6 +267,7 @@ def execute(manifest, *, gates=None):
                 else {}
             )
             physical.append(receipt.get("physical_start_count") == 1)
+            receipts.append(receipt)
             if receipt.get("orca_pid") and process_start_marker(receipt["orca_pid"]) is not None:
                 raise RuntimeError("terminal receipt still has a live process")
         status = view["job"]["status"] if view.get("job") else "not_started"
@@ -284,7 +287,13 @@ def execute(manifest, *, gates=None):
             )
         else:
             passed = passed and len(jobs) == 1
-        statuses[gate] = "PASS" if passed else "NOT_EXERCISED" if gate in {"R03", "R04"} else "FAIL"
+        statuses[gate] = (
+            (control_gate_status(receipts[0], expected) if len(receipts) == 1 else "FAIL")
+            if gate in {"R03", "R04"}
+            else "PASS"
+            if passed
+            else "FAIL"
+        )
         evidence = root / f"{gate}-evidence.json"
         subprocess.run(
             [

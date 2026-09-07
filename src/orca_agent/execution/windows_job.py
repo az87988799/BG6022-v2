@@ -100,7 +100,34 @@ class WindowsJobObject:
             terminate = self._kernel32.TerminateJobObject
             terminate.argtypes = [wintypes.HANDLE, wintypes.UINT]
             terminate.restype = wintypes.BOOL
-            terminate(self._handle, exit_code)
+            if not terminate(self._handle, exit_code):
+                raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")
+        else:
+            raise OSError("Job Object is closed")
+
+    def active_process_count(self) -> int:
+        class Accounting(ctypes.Structure):
+            _fields_ = [
+                ("times", ctypes.c_longlong * 4),
+                ("faults", wintypes.DWORD),
+                ("total", wintypes.DWORD),
+                ("active", wintypes.DWORD),
+                ("terminated", wintypes.DWORD),
+            ]
+
+        info = Accounting()
+        query = self._kernel32.QueryInformationJobObject
+        query.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        query.restype = wintypes.BOOL
+        if not query(self._handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
+        return int(info.active)
 
     def resume_pid(self, pid: int) -> None:
         """Resume the initial thread only after the suspended child joins this job."""

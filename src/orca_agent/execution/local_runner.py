@@ -163,6 +163,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
     job: WindowsJobObject | None = None
     process: subprocess.Popen[bytes] | None = None
     start_marker: float | None = None
+    stop_facts = None
     status = "failed"
     exit_code = 126
     reason = "runner_failed"
@@ -215,6 +216,12 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
         while True:
             stdout_handle.flush()
             stderr_handle.flush()
+            polled = process.poll()
+            if polled is not None:
+                exit_code = int(polled)
+                status = "succeeded" if exit_code == 0 else "failed"
+                reason = "normal_exit" if exit_code == 0 else "nonzero_exit"
+                break
             if (
                 stdout_handle.tell() + stderr_handle.tell() > output_limit
                 or _directory_size(directory) > workdir_limit
@@ -224,23 +231,18 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 status = "failed"
                 reason = "resource_limit_exceeded"
                 break
-            if _cancel_pending(root, directory, execution_id):
-                _stop_process(process, job)
-                exit_code = process.wait(timeout=10)
-                status = "cancelled"
-                reason = "cancel_requested"
-                break
-            if time.monotonic() >= monotonic_deadline:
-                _stop_process(process, job)
-                exit_code = process.wait(timeout=10)
-                status = "timed_out"
-                reason = "wall_time_deadline"
-                break
-            polled = process.poll()
-            if polled is not None:
-                exit_code = int(polled)
-                status = "succeeded" if exit_code == 0 else "failed"
-                reason = "normal_exit" if exit_code == 0 else "nonzero_exit"
+            cancel = _cancel_pending(root, directory, execution_id)
+            if cancel or time.monotonic() >= monotonic_deadline:
+                reason = "cancel_requested" if cancel else "wall_time_deadline"
+                stop_facts = _controlled_stop(process, job, start_marker, reason)
+                exit_code = stop_facts["exit_code"]
+                if stop_facts["stop_confirmed"]:
+                    status = "cancelled" if cancel else "timed_out"
+                elif exit_code is not None:
+                    status = "succeeded" if exit_code == 0 else "failed"
+                    reason = "natural_exit_during_control"
+                else:
+                    status, reason = "interrupted", "stop_unconfirmed"
                 break
             time.sleep(0.25)
     except Exception:
@@ -268,6 +270,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
         launch_token=str(spec.get("launch_token")),
         pid=None if process is None else process.pid,
         created=start_marker,
+        stop_facts=stop_facts,
         memory_limit_bytes=binding.budget.total_memory_mb * 1024 * 1024
         if os.name == "nt"
         else None,
@@ -364,6 +367,65 @@ def _stop_process(process: subprocess.Popen[bytes], job: WindowsJobObject | None
         process.terminate()
 
 
+CONTROL_EXIT_CODE = 0xE0050001
+
+
+def _controlled_stop(process, job, expected_created, reason):
+    """Recheck natural exit and identity, and return evidence of actual control.
+
+    An accepted OS request alone is not proof: exit status must match this
+    termination operation. A racing natural exit retains its natural outcome.
+    """
+    facts = dict(
+        schema="p5-stop/v1",
+        reason=reason,
+        pid=process.pid,
+        expected_created=expected_created,
+        observed_created=None,
+        identity_matched=False,
+        alive_before_request=False,
+        request_sent=False,
+        stop_confirmed=False,
+        tree_stopped=False,
+        exit_code=process.poll(),
+        requested_at_utc=None,
+        confirmed_at_utc=None,
+    )
+    if facts["exit_code"] is not None:
+        return facts
+    facts["observed_created"] = process_start_marker(process.pid)
+    facts["identity_matched"] = (
+        expected_created is not None and facts["observed_created"] == expected_created
+    )
+    facts["exit_code"] = process.poll()
+    if not facts["identity_matched"] or facts["exit_code"] is not None:
+        return facts
+    facts["alive_before_request"] = True
+    facts["requested_at_utc"] = datetime.now(UTC).isoformat()
+    try:
+        if job is not None:
+            job.terminate(CONTROL_EXIT_CODE)
+        elif os.name != "nt":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            return facts
+        facts["request_sent"] = True
+        facts["exit_code"] = process.wait(timeout=10)
+        expected_code = CONTROL_EXIT_CODE if job is not None else -signal.SIGKILL
+        facts["stop_confirmed"] = facts["exit_code"] == expected_code
+        if job is not None:
+            until = time.monotonic() + 5
+            while job.active_process_count() and time.monotonic() < until:
+                time.sleep(0.02)
+            facts["tree_stopped"] = job.active_process_count() == 0
+        # Production real gates are Windows-only. POSIX test control does not
+        # fabricate a Job Object tree-empty assertion.
+        facts["confirmed_at_utc"] = datetime.now(UTC).isoformat()
+    except (OSError, subprocess.TimeoutExpired):
+        facts["exit_code"] = process.poll()
+    return facts
+
+
 def _directory_size(directory: Path) -> int:
     total = 0
     for path in directory.iterdir():
@@ -387,6 +449,7 @@ def _write_receipt(
     pid: int | None = None,
     created: float | None = None,
     memory_limit_bytes: int | None = None,
+    stop_facts: dict | None = None,
 ) -> int:
     for name in ("stdout.out", "stderr.err"):
         if not (directory / name).exists():
@@ -402,6 +465,7 @@ def _write_receipt(
         "orca_created_at": created,
         "host_identity": host_identity(),
         "physical_start_count": int(pid is not None),
+        "stop_facts": stop_facts,
         "resource_enforcement": {
             "process_tree": "windows_job_object" if os.name == "nt" else "posix_process_group",
             "job_memory_limit_bytes": memory_limit_bytes,
