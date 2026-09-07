@@ -14,6 +14,7 @@ FORBIDDEN_TOP_LEVEL = {
 ADAPTER_ALLOWLIST = {
     "identity/rdkit_normalizer.py": {"rdkit"},
     "identity/geometry.py": {"rdkit"},
+    "identity/optimized_compatibility.py": {"rdkit"},
     "identity/http_pubchem.py": {"httpx"},
     "execution/local_backend.py": {"subprocess"},
     "execution/local_runner.py": {"subprocess"},
