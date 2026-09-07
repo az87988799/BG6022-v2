@@ -236,13 +236,19 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 reason = "cancel_requested" if cancel else "wall_time_deadline"
                 stop_facts = _controlled_stop(process, job, start_marker, reason)
                 exit_code = stop_facts["exit_code"]
-                if stop_facts["stop_confirmed"]:
+                if (
+                    job is not None
+                    and stop_facts["request_sent"]
+                    and not stop_facts["tree_stopped"]
+                ):
+                    status, reason = "needs_reconciliation", "process_tree_stop_unconfirmed"
+                elif stop_facts["stop_confirmed"]:
                     status = "cancelled" if cancel else "timed_out"
                 elif exit_code is not None:
                     status = "succeeded" if exit_code == 0 else "failed"
                     reason = "natural_exit_during_control"
                 else:
-                    status, reason = "interrupted", "stop_unconfirmed"
+                    status, reason = "needs_reconciliation", "stop_unconfirmed"
                 break
             time.sleep(0.25)
     except Exception:

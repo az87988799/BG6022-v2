@@ -39,7 +39,8 @@ See [RDKit 3D stereochemistry API](https://www.rdkit.org/docs/source/rdkit.Chem.
 Runner polls natural exit before evaluating control conditions, then the stop
 helper rechecks both creation identity and natural exit immediately before
 requesting control. The receipt records request-time identity/liveness, OS
-request, observed exit, confirmation times, and Windows Job Object active count.
+request, observed exit, confirmation times, and the Windows Job Object
+`tree_stopped` observation (not a stored numeric active-process count).
 A dedicated termination code connects the observed exit to this stop operation;
 an arbitrary nonzero return code is not sufficient. A racing natural exit keeps
 its natural outcome. OS errors or unavailable identity cannot generate PASS.

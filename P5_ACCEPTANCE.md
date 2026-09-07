@@ -3,6 +3,8 @@
 Status: `PENDING_OWNER_ACCEPTANCE` — P6 remains blocked.
 
 Current review baseline: `c7cd1eab7da646f885fbc6bf040f559d974ae6f2`.
+Latest closeout review baseline: `f5991d07f6e25d192a65e3b6bdb705dc1dc6cf22`.
+Limited follow-up repair: [closeout repair](docs/P5_CLOSEOUT_REPAIR.md).
 Minimal C1–C3 changes: [completion repair](docs/P5_C_COMPLETION_REPAIR.md).
 Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md).
 
@@ -41,7 +43,7 @@ outcomes:
 
 - First: `.tmp/p5-water-audit`.
 - Additional: `.tmp/p5-water-audit-retry`.
-- Separately authorized, unused final cancellation: `.tmp/p5-water-audit-final-cancel` (one job, 30 seconds).
+- Separately authorized final cancellation, executed once and PASS at 97a8fc2: `.tmp/p5-water-audit-final-cancel` (one job, 30 seconds).
 - Byte-preserving real Opt fixture: `tests/p5/fixtures/orca_6_1_1_water_opt`.
 
 Synthetic fixtures and controlled Python processes are **not** real ORCA

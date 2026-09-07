@@ -7,7 +7,7 @@ P5_ENGINE_VERSION = "p5-local-orca-v1"
 P5_POLICY_VERSION = 5
 P5_REGISTRY_VERSION = "p5-execution-registry-v1"
 P5_COMPILER_VERSION = "orca-compiler-v2"
-P5_PARSER_VERSION = "orca-parser-v3"
+P5_PARSER_VERSION = "orca-parser-v4"
 P5_GEOMETRY_VERSION = "rdkit-etkdgv3-geometry-v1"
 
 __all__ = [

@@ -1,0 +1,65 @@
+# f5991d0 review: limited closeout repair
+
+Status: implementation verification in progress; **PENDING_OWNER_ACCEPTANCE**.
+This does not authorize merge, P5 PASS or starting P6.
+
+## Parser v4: translation-only Hessian binding
+
+After validating atom count, element ordering and default atomic masses (existing
+0.02 amu tolerance), convert Hessian `$atoms` Bohr coordinates with
+`0.529177210903 Å/Bohr`. For each coordinate set, calculate the center of mass
+using the **same validated Hessian mass for each corresponding atom**:
+`COM[k] = sum(m[i] * xyz[i][k]) / sum(m[i])`. Subtract that set's COM, then compare
+every corresponding Cartesian component with the unchanged `2e-6 Å` tolerance.
+Only a common translation is allowed. No rotation, reflection, atom permutation,
+unit guessing or enlarged geometry tolerance is introduced.
+
+Finite-number, 3N matrix completeness/symmetry, frequency and atom/mass checks
+remain intact. Original XYZ, stdout and Hessian bytes/hashes are never normalized
+or rewritten. `orca-parser-v4` records the changed contract; compiler, ticket,
+shared worker and database migrations are unchanged.
+
+`tests/p5/test_p5_closeout_review.py` replays the committed real Freq packet and
+tests common translation (PASS), one-atom movement, wrong units, wrong H-atom
+correspondence and rotation (REJECT). Existing damaged-Hessian tests remain.
+`scripts/replay_p5_frozen_freq.py` verifies the original file hashes and creates
+a separate offline replay record; it cannot launch ORCA or update historical runs.
+
+## Unconfirmed Windows tree remains pending
+
+The actual `_controlled_stop` mechanism is unchanged: same identity checks,
+TerminateJobObject request, dedicated exit code, bounded Job query and final
+handle cleanup. Only interpretation of incomplete observations is tightened.
+After a stop request, nonempty Job or failed Job query leads to
+`needs_reconciliation` **before** any natural-exit fallback, even when the parent
+already returned the dedicated termination code. An unconfirmed live process
+also remains pending rather than being archived as interrupted/failed.
+
+The backend still validates trusted execution identity first, then checks new
+Windows stop facts. Contradictory labels cannot convert unconfirmed tree state
+into success, failure, cancellation or timeout. Collection is refused and
+cancel reports `stopped=false`; service preserves current execution identity,
+creates no result/downstream action and does not physically relaunch it.
+
+Fault injection runs the production supervisor, stop helper, receipt writer,
+backend and service for both cancellation/timeout and nonempty/query-error Job
+states. No actual process is spawned in these injection tests. Existing Windows
+Python process/descendant cancellation, timeout, natural-race and crash tests
+remain the OS-level checks. The previously recorded successful R03/R04 have
+`tree_stopped=true`; the tightened failure branch does not change their stopping
+mechanism. Retain those original receipts without blind real reruns.
+
+## Real and release gates
+
+The original rejected Freq and incomplete R01/R02 remain historical failures.
+Offline replay is not a completed real chain. A **new** Water R01/R02 needs new
+per-action owner approval: Opt, then exit/restart CLI, replay without duplicate
+Opt start, approve Freq and SP separately. Use the same verified ORCA 6.1.1,
+one core / 2048 MB, 900/1800/300-second ceilings, at most three new tasks and no
+automatic retry. Preserve this chain's own Opt/Freq/SP outputs, input/final XYZ,
+Hessian, receipts, budget/identity bindings and recovery/replay observations.
+
+After full technical evidence, request Owner acceptance. A single-maintainer
+Owner is sufficient; no new independent-reviewer requirement is imposed. PR
+readiness/merge and main CI follow explicit owner direction. P5 PASS and P6
+remain blocked until those gates are actually met.

@@ -23,6 +23,7 @@ from orca_agent.domain.p5 import (
     P5JobStatus,
 )
 
+from .control_evidence import control_gate_status
 from .launch_ticket import consume_ticket, permit_fields
 from .orca_parser import ATOMIC_MASSES
 from .output_contract import BOHR_TO_ANGSTROM, HESSIAN_NAME, OPTIMIZED_XYZ_NAME
@@ -282,6 +283,25 @@ class LocalOrcaBackend(_BackendBase):
             or job.host_identity != host_identity()
         ):
             raise LaunchStateUnknown("runner receipt does not match trusted execution identity")
+        facts = receipt.get("stop_facts")
+        enforcement = receipt.get("resource_enforcement") or {}
+        windows_control = os.name == "nt" or (
+            isinstance(enforcement, dict)
+            and enforcement.get("process_tree") == "windows_job_object"
+        )
+        if facts is not None and not isinstance(facts, dict):
+            return {**receipt, "status": "needs_reconciliation"}
+        if isinstance(facts, dict) and windows_control:
+            status = receipt.get("status")
+            if (
+                (facts.get("request_sent") and facts.get("tree_stopped") is not True)
+                or (
+                    status in {"cancelled", "timed_out"}
+                    and control_gate_status(receipt, status) != "PASS"
+                )
+                or (facts.get("stop_confirmed") and status not in {"cancelled", "timed_out"})
+            ):
+                receipt = {**receipt, "status": "needs_reconciliation"}
         return receipt
 
     def _trusted_job(self, execution_id):
@@ -468,6 +488,7 @@ class LocalOrcaBackend(_BackendBase):
         while time.monotonic() < deadline:
             observation = self.poll(execution_ref)
             if observation.status in {
+                P5JobStatus.NEEDS_RECONCILIATION,
                 P5JobStatus.CANCELLED,
                 P5JobStatus.TIMED_OUT,
                 P5JobStatus.SUCCEEDED,

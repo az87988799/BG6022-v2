@@ -342,20 +342,35 @@ def _parse_hessian(value: bytes, geometry: GeometryRecord, frequencies: tuple[fl
             or len(atoms) != len(geometry.atom_symbols) + 1
         ):
             raise ValueError("incomplete Hessian atom section")
-        for row, symbol, xyz in zip(
-            atoms[1:], geometry.atom_symbols, geometry.coordinates, strict=True
-        ):
+        masses = []
+        hessian_coordinates = []
+        for row, symbol in zip(atoms[1:], geometry.atom_symbols, strict=True):
             if len(row) != 5 or row[0] != symbol:
                 raise GeometryBindingMismatch("Hessian atom order differs from input")
-            if abs(_finite_number(row[1]) - ATOMIC_MASSES[symbol]) > 0.02:
+            mass = _finite_number(row[1])
+            if abs(mass - ATOMIC_MASSES[symbol]) > 0.02:
                 raise GeometryBindingMismatch("Hessian atomic mass differs from approved default")
-            if any(
-                abs(_finite_number(v) * BOHR_TO_ANGSTROM - c) > 2e-6
-                for v, c in zip(row[2:], xyz, strict=True)
-            ):
-                raise GeometryBindingMismatch(
-                    "Hessian Bohr coordinates differ from input Angstrom geometry"
-                )
+            masses.append(mass)
+            hessian_coordinates.append(tuple(_finite_number(v) * BOHR_TO_ANGSTROM for v in row[2:]))
+        # Translation only: identical validated masses and atom correspondence
+        # define both centers. No rotation, reflection or permutation fitting.
+        total_mass = math.fsum(masses)
+        centers = [
+            tuple(
+                math.fsum(m * xyz[axis] for m, xyz in zip(masses, coordinates, strict=True))
+                / total_mass
+                for axis in range(3)
+            )
+            for coordinates in (hessian_coordinates, geometry.coordinates)
+        ]
+        if any(
+            abs((h[axis] - centers[0][axis]) - (g[axis] - centers[1][axis])) > 2e-6
+            for h, g in zip(hessian_coordinates, geometry.coordinates, strict=True)
+            for axis in range(3)
+        ):
+            raise GeometryBindingMismatch(
+                "Hessian coordinates differ from input geometry after center-of-mass translation"
+            )
         modes = sections["vibrational_frequencies"]
         if modes[0] != [str(dimension)] or len(modes) != dimension + 1:
             raise ValueError("incomplete Hessian frequencies")

@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from orca_agent.application.p5_errors import GeometryBindingMismatch, P5Error
+from orca_agent.application.p5_errors import (
+    GeometryBindingMismatch,
+    OutputTruncated,
+    P5Error,
+    RequiredOutputMissing,
+)
 from orca_agent.application.p5_service import P5ApplicationService
 from orca_agent.execution.control_evidence import control_gate_status
 from orca_agent.execution.local_backend import FakeExecutionBackend
@@ -41,14 +46,18 @@ def test_c1_real_opt_rejects_calculation_after_termination(tmp_path, tail):
 
 def test_c1_scf_heading_and_previous_cycle_do_not_prove_success(tmp_path):
     _, _, view = _prepare(tmp_path, "p5.sp_initial.r2scan3c.v1")
-    for output in (
-        _stdout("sp").replace(b"SCF CONVERGED", b"SCF CONVERGENCE"),
-        _stdout("sp").replace(b"****ORCA", b"FINAL SINGLE POINT ENERGY -74.0\n****ORCA"),
+    for output, error, message in (
+        (_stdout("sp").replace(b"SCF CONVERGED", b"SCF CONVERGENCE"), RequiredOutputMissing, "SCF"),
+        (
+            _stdout("sp").replace(b"****ORCA", b"FINAL SINGLE POINT ENERGY -74.0\n****ORCA"),
+            OutputTruncated,
+            "multiple ambiguous final energies",
+        ),
     ):
-        with pytest.raises(P5Error):
+        with pytest.raises(error, match=message):
             parse_orca_output(
                 output,
-                primitive="opt",
+                primitive="sp",
                 geometry=view.geometry[0],
                 input_manifest_hash="0" * 64,
                 exit_code=0,
