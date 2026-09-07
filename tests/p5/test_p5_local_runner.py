@@ -3,7 +3,7 @@
 import hashlib
 import json
 import os
-import shutil
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -32,9 +32,14 @@ def _controlled_run(
     state_root, _, source = _source(tmp_path)
     executable = Path(sys.executable)
     if os.name != "nt":
-        # Preserve the production .exe allowlist with an explicit test binary.
+        # uv's relocatable CPython cannot be copied away from its runtime tree.
+        # This explicit fixture launcher preserves the production .exe allowlist
+        # and invokes the installed interpreter in place (not real ORCA).
         executable = tmp_path / "controlled.exe"
-        shutil.copy2(sys.executable, executable)
+        executable.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', encoding="utf-8"
+        )
+        executable.chmod(0o700)
     monkeypatch.setattr(orca_config, "probe_orca_version", lambda _path: "6.1.0")
     original_compile = p5_service.compile_orca_input
 
