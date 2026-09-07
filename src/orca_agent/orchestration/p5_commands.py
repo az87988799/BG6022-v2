@@ -31,6 +31,7 @@ class P5CommandType(StrEnum):
     REQUEST_CANCEL = "p5.request_cancel"
     RECONCILE_EXECUTION = "p5.reconcile_execution"
     COMPLETE_CANCEL = "p5.complete_cancel"
+    COMPLETE_EFFECT = "p5.complete_effect"
 
 
 class P5EventType(StrEnum):
@@ -44,6 +45,8 @@ class P5EventType(StrEnum):
     RUN_CANCELLED = "p5.run_cancelled"
     RECONCILED = "p5.reconciled"
     RUN_FAILED = "p5.run_failed"
+    EFFECT_SUCCEEDED = "effect_succeeded"
+    EFFECT_DEAD_LETTERED = "effect_dead_lettered"
 
 
 class P5CommandBase(P5Model):
@@ -75,6 +78,7 @@ class P5CommandBase(P5Model):
 
 
 class PrepareExecution(P5CommandBase):
+    wall_time_seconds: int | None = Field(default=None, ge=1, le=3600)
     command_type: Literal[P5CommandType.CREATE_EXECUTION] = P5CommandType.CREATE_EXECUTION
     source_run_id: RunId
     protocol_id: str
@@ -88,6 +92,7 @@ class PrepareExecution(P5CommandBase):
         protocol_id: str,
         run_id: RunId | None = None,
         external_opt_result_id: WorkflowRecordId | None = None,
+        wall_time_seconds: int | None = None,
         command_id: CommandId | None = None,
         requested_at_utc: datetime,
     ) -> PrepareExecution:
@@ -101,6 +106,7 @@ class PrepareExecution(P5CommandBase):
             source_run_id=source_run_id,
             protocol_id=protocol_id,
             external_opt_result_id=external_opt_result_id,
+            wall_time_seconds=wall_time_seconds,
         )
 
 

@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -19,24 +20,35 @@ from pathlib import Path
 from orca_agent.domain.ids import ExecutionId
 from orca_agent.domain.p5 import P5ExecutionBinding
 from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRepository
+from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 
+from .launch_ticket import consume_ticket
+from .output_contract import INPUT_NAME
 from .windows_job import WindowsJobObject, host_identity, process_start_marker
+from .work_paths import execution_directory
 
 
 def run_supervisor(state_root: str | Path, execution_id: str) -> int:
     root = Path(state_root).resolve()
-    work_root = (root / "work").resolve()
-    directory = (work_root / execution_id).resolve()
     try:
-        directory.relative_to(work_root)
-    except ValueError:
-        return 2
-    if not directory.is_dir() or directory.is_symlink():
+        directory = execution_directory(root, execution_id)
+    except (OSError, ValueError):
         return 2
     try:
         spec = json.loads((directory / "launch.json").read_text(encoding="utf-8"))
-        _validate_launch_ticket(root, spec, execution_id)
+        trusted_job = _validate_launch_ticket(root, spec, execution_id)
+        receipt_path = directory / "exit_receipt.json"
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if all(
+                receipt.get(key) == spec.get(key)
+                for key in ("execution_id", "job_id", "launch_token", "host_identity")
+            ):
+                return 0 if receipt.get("status") == "succeeded" else 1
+            return 2
+        if trusted_job.launch_consumed_at_utc is not None:
+            return 2
         executable = Path(str(spec["executable"])).resolve()
         if executable.suffix.casefold() != ".exe" or not executable.is_file():
             return _write_receipt(
@@ -61,13 +73,14 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                     model_type=P5ExecutionBinding,
                 )
             )
-            if binding is None or binding.executable_sha256 != hashlib.sha256(
-                executable.read_bytes()
-            ).hexdigest():
+            if (
+                binding is None
+                or binding.executable_sha256 != hashlib.sha256(executable.read_bytes()).hexdigest()
+            ):
                 raise ValueError("launch executable hash does not match the trusted binding")
             uow.commit()
         input_name = str(spec["input"])
-        if input_name != "input.inp":
+        if input_name != INPUT_NAME:
             return _write_receipt(
                 directory,
                 "failed",
@@ -77,7 +90,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 job_id=str(spec.get("job_id", "")),
                 launch_token=str(spec.get("launch_token", "")),
             )
-        deadline = datetime.fromisoformat(str(spec["deadline_utc"]).replace("Z", "+00:00"))
+        deadline = job.deadline_utc
         input_path = directory / input_name
         if not input_path.is_file() or input_path.is_symlink():
             return _write_receipt(
@@ -129,6 +142,22 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
             launch_token=str(spec.get("launch_token", "")),
         )
 
+    try:
+        consume_ticket(root, spec)
+    except Exception:
+        return 2
+
+    if _cancel_pending(root, directory, execution_id):
+        return _write_receipt(
+            directory,
+            "cancelled",
+            None,
+            "cancel_before_spawn",
+            execution_id=execution_id,
+            job_id=str(spec["job_id"]),
+            launch_token=str(spec["launch_token"]),
+        )
+
     stdout_handle = (directory / "stdout.out").open("wb")
     stderr_handle = (directory / "stderr.err").open("wb")
     job: WindowsJobObject | None = None
@@ -137,14 +166,12 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
     status = "failed"
     exit_code = 126
     reason = "runner_failed"
-    monotonic_deadline = time.monotonic() + max(
-        0.0, (deadline - datetime.now(UTC)).total_seconds()
-    )
+    monotonic_deadline = time.monotonic() + max(0.0, (deadline - datetime.now(UTC)).total_seconds())
     output_limit = binding.budget.stdout_stderr_limit_bytes
     workdir_limit = binding.budget.workdir_limit_bytes
     try:
         if os.name == "nt":
-            job = WindowsJobObject()
+            job = WindowsJobObject(memory_limit_bytes=binding.budget.total_memory_mb * 1024 * 1024)
             process = subprocess.Popen(
                 [str(executable), str(input_path)],
                 cwd=str(directory),
@@ -152,11 +179,12 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 stdout=stdout_handle,
                 stderr=stderr_handle,
                 shell=False,
-                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x4,
                 close_fds=True,
             )
             try:
                 job.assign_pid(process.pid)
+                job.resume_pid(process.pid)
             except Exception:
                 process.kill()
                 process.wait(timeout=5)
@@ -196,7 +224,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 status = "failed"
                 reason = "resource_limit_exceeded"
                 break
-            if (directory / "cancel.requested").exists():
+            if _cancel_pending(root, directory, execution_id):
                 _stop_process(process, job)
                 exit_code = process.wait(timeout=10)
                 status = "cancelled"
@@ -240,10 +268,13 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
         launch_token=str(spec.get("launch_token")),
         pid=None if process is None else process.pid,
         created=start_marker,
+        memory_limit_bytes=binding.budget.total_memory_mb * 1024 * 1024
+        if os.name == "nt"
+        else None,
     )
 
 
-def _validate_launch_ticket(root: Path, spec: dict[str, object], execution_id: str) -> None:
+def _validate_launch_ticket(root: Path, spec: dict[str, object], execution_id: str):
     if spec.get("execution_id") != execution_id:
         raise ValueError("launch execution identity does not match runner arguments")
     if not isinstance(spec.get("job_id"), str) or not str(spec["job_id"]).startswith("job_"):
@@ -270,8 +301,18 @@ def _validate_launch_ticket(root: Path, spec: dict[str, object], execution_id: s
             or job.binding_hash != spec["binding_hash"]
             or spec.get("host_identity") != job.host_identity
             or job.host_identity != host_identity()
-            or job.launch_consumed_at_utc is None
-            or job.status.value not in {"starting", "running"}
+            or job.status.value
+            not in {
+                "reserved",
+                "starting",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "timed_out",
+                "interrupted",
+                "needs_reconciliation",
+            }
         ):
             raise ValueError("launch ticket does not match the trusted local job")
         binding = P5RecordRepository(uow.connection).get_exact_p5(
@@ -291,16 +332,32 @@ def _validate_launch_ticket(root: Path, spec: dict[str, object], execution_id: s
         if binding.executable_sha256 is None:
             raise ValueError("launch executable hash is missing")
         uow.commit()
+        return job
+
+
+def _cancel_pending(root: Path, directory: Path, execution_id: str) -> bool:
+    if (directory / "cancel.requested").exists():
+        return True
+    connection = sqlite3.connect(
+        resolve_database_path(root).as_uri() + "?mode=ro", uri=True, timeout=0.05
+    )
+    try:
+        row = connection.execute(
+            "SELECT cancel_requested FROM local_jobs WHERE execution_id = ?", (execution_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError("runner lost its trusted job")
+        return bool(row[0])
+    finally:
+        connection.close()
 
 
 def _stop_process(process: subprocess.Popen[bytes], job: WindowsJobObject | None) -> None:
-    if process.poll() is not None:
-        return
     if job is not None:
         job.terminate(1)
     elif os.name != "nt":
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     else:
@@ -329,7 +386,11 @@ def _write_receipt(
     launch_token: str,
     pid: int | None = None,
     created: float | None = None,
+    memory_limit_bytes: int | None = None,
 ) -> int:
+    for name in ("stdout.out", "stderr.err"):
+        if not (directory / name).exists():
+            (directory / name).touch()
     payload = {
         "status": status,
         "execution_id": execution_id,
@@ -340,7 +401,13 @@ def _write_receipt(
         "orca_pid": pid,
         "orca_created_at": created,
         "host_identity": host_identity(),
-        "physical_start_count": 1,
+        "physical_start_count": int(pid is not None),
+        "resource_enforcement": {
+            "process_tree": "windows_job_object" if os.name == "nt" else "posix_process_group",
+            "job_memory_limit_bytes": memory_limit_bytes,
+            "memory_enforced": memory_limit_bytes is not None,
+            "deadline_clock": "monotonic",
+        },
         "finished_at_utc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
     temporary = directory / ".exit_receipt.json.tmp"

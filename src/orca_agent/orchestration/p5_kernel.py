@@ -21,6 +21,7 @@ from orca_agent.domain.hashing import (
 from orca_agent.domain.ids import CommandId, EventId, RunId, new_id
 from orca_agent.domain.json_types import FrozenJsonObject, JsonObject, freeze_json_object, thaw_json
 from orca_agent.domain.p5 import P5WorkflowState
+from orca_agent.orchestration.effects import EffectSpec
 from orca_agent.orchestration.p5_commands import P5CommandType, P5EventType
 from orca_agent.orchestration.p5_versions import P5_ENGINE_VERSION, P5_SCHEMA_VERSION
 from orca_agent.orchestration.state import KernelModel
@@ -99,6 +100,8 @@ class P5KernelEvent(KernelModel):
             P5EventType.RUN_CANCELLED: P5CommandType.COMPLETE_CANCEL,
             P5EventType.RECONCILED: P5CommandType.RECONCILE_EXECUTION,
             P5EventType.RUN_FAILED: P5CommandType.COLLECT_RESULT,
+            P5EventType.EFFECT_SUCCEEDED: P5CommandType.COMPLETE_EFFECT,
+            P5EventType.EFFECT_DEAD_LETTERED: P5CommandType.COMPLETE_EFFECT,
         }
         if allowed[self.event_type] is not self.command_type:
             raise ValueError("P5 event type is not valid for its command type")
@@ -201,6 +204,8 @@ class P5KernelEvent(KernelModel):
 
 class P5Transition(KernelModel):
     next_state: P5WorkflowState
+    effects: tuple[EffectSpec, ...] = ()
+    interrupt_operations: tuple = ()
 
 
 def reduce_p5_event(prior_state: P5WorkflowState | None, event: P5KernelEvent) -> P5Transition:
@@ -224,7 +229,11 @@ def reduce_p5_event(prior_state: P5WorkflowState | None, event: P5KernelEvent) -
         raise InvalidTransitionError("P5 event next_state is invalid") from error
     if state.run_id != event.run_id:
         raise InvalidTransitionError("P5 next_state run ID does not match event")
-    return P5Transition(next_state=state)
+    effects = tuple(
+        EffectSpec.model_validate_json(json.dumps(thaw_json(raw)), strict=True)
+        for raw in event.payload.get("effects", ())
+    )
+    return P5Transition(next_state=state, effects=effects)
 
 
 def expected_p5_application_result(

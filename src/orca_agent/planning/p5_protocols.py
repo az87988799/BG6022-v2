@@ -125,6 +125,7 @@ def expand_p5_execution_plan(
     protocol_id: str,
     record_id: WorkflowRecordId | None = None,
     external_opt_result_id: WorkflowRecordId | None = None,
+    wall_time_seconds: int | None = None,
 ) -> P5ExecutionPlan:
     spec = get_p5_protocol(protocol_id)
     if spec.source_from_opt and external_opt_result_id is None:
@@ -149,7 +150,9 @@ def expand_p5_execution_plan(
                 source_node_id=source_node_id,
                 method_profile_id=METHOD_R2SCAN3C.registry_id,
                 method_profile_hash=METHOD_R2SCAN3C.entry_hash,
-                budget=P5Budget.defaults_for(kind),
+                budget=P5Budget.defaults_for(kind)
+                if wall_time_seconds is None
+                else P5Budget(wall_time_seconds=wall_time_seconds),
             )
         )
     values = {

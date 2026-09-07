@@ -1,64 +1,57 @@
 # P5 Acceptance Record
 
-Status: `PENDING_OWNER_ACCEPTANCE`
+Status: `PENDING_OWNER_ACCEPTANCE` — P6 remains blocked.
 
-This file records implementation and verification status only. It does not
-authorize a real ORCA run and does not claim that the Water real-execution
-gates have passed. Scientific assessment, minimum-energy claims, and report
-generation remain out of scope until P6.
+Baseline under repair: `3be5bb271c103807bb0c1d93fcbf0c95f3291ca5`.
+Repair details and the T01–T30 evidence map: [P5 audit repair](docs/P5_AUDIT_REPAIR.md).
 
-## Implemented scope
+## Verification
 
-- Schema 4, engine `p5-local-orca-v1`, policy 5, and migration v7
-  (`local_jobs`) are implemented.
-- The closed r2SCAN-3c/TightSCF SP, Opt, Freq compiler and parser are
-  implemented with the five protocol IDs from the P5 plan.
-- Deterministic ETKDGv3 geometry generation uses explicit hydrogens and seed
-  `6022`; P4 `plan_ready` source ownership is checked.
-- Fake execution, owner-scoped immutable artifacts, launch tickets, local
-  runner supervision, Windows Job Object integration, cancel/timeout/reconcile
-  handling, CLI request replay, and read-only evidence collection are present.
-- Fake results are marked `fake_fixture`; all P5 exports keep
-  `scientific_assessment=not_evaluated` and `claim_status=not_generated`.
-
-## Verification status
-
-| Gate | Status | Evidence or limitation |
+| Gate | Status | Evidence |
 |---|---|---|
-| P5 offline workflow tests | `PASS` | `scripts/verify_p5.ps1`: 14 passed. |
-| P1–P4 regression suite | `PASS` | Full suite: 433 passed, 1 expected socket-block warning. |
-| Ruff / compileall | `PASS` | Run against `src`, `tests`, and `scripts`. |
-| Wheel build | `PASS` | `python -m build --wheel --no-isolation`; `uv` is not installed on this host, so `uv lock --check` is not claimed. |
-| Evidence collector | `PASS` on a generated fake P5 run | Read-only source DB/artifact verification succeeded; evidence is not real-ORCA evidence. |
-| R01 Water real execution | `NOT_RUN` | Requires explicit owner authorization and a verified ORCA 6.1 `.exe`. |
-| R02 restart/recovery | `NOT_RUN` | Requires the authorized Water real run. |
-| R03 real cancellation | `NOT_EXERCISED` | Must not be inferred from a job that finishes normally. |
-| R04 real timeout | `NOT_EXERCISED` | Must not be inferred from a job that finishes normally. |
-| Owner acceptance | `PENDING` | Only the owner can change this record to accepted. |
+| Offline full suite | Revalidation in progress | Previous clean run: 483 passed, branch coverage 80.83%; latest P5 targeted suites: 77 passed, 1 Windows symlink-privilege skip |
+| Coverage policy | Unchanged 80% threshold | All current `src/orca_agent` modules; historical checkout not double-counted |
+| Windows control | PASS in controlled tests | Non-destructive poll, PID identity, one-shot launch, long job, descendant cancel/timeout, supervisor crash, Job memory/output/workdir limits |
+| Ruff / format / compileall | PASS | Latest source, tests and scripts |
+| Locked dependencies / build | PASS; final rebuild pending | `uv sync --locked --extra p5`, `uv lock --check`, wheel and sdist |
+| R01 Water Opt→Freq→SP | Pending authorized additional attempt | First Opt exit 0; application rejected CRLF. Original failed record retained; genuine fixture replay now passes |
+| R02 process restart and command replay | Pending | Embedded in R01 without extra numerical jobs |
+| R03 real cancellation | PASS | First authorization, `execution_db3395b82c1542e7bac04d2a6a18a933`; real child stopped and partial output retained |
+| R04 real timeout | NOT_EXERCISED; additional attempt authorized | First 1-second limit expired before spawn; zero physical starts. New attempt ceiling is 3 seconds |
+| PR / Windows–Ubuntu matrix | Pending | Will bind results to pushed repair SHA |
+| Main merge / main CI | NOT_RUN | No automatic merge or P6 start |
+| Owner acceptance | PENDING | Only the owner can accept this phase |
 
-## Real Gate authorization boundary
+## Real execution authorization and provenance
 
-The real gate is prepared by:
+ORCA executable: `E:\orca\orca.exe`, exact version `6.1.1`.
+SHA-256: `8d6b51bf4093c967dbed997cc651f0212b8f94313ee77ea56f548f000672c42f`.
 
-```powershell
-pwsh -File scripts/verify_p5_real_orca.ps1 -OrcaExecutable C:\path\to\orca.exe -OrcaVersion 6.1.0
-```
+First authorization: Water, 1 core / 2048 MB, Opt/Freq/SP ceilings
+900/1800/300 seconds, one cancellation within 30 seconds and one 1-second
+timeout attempt, at most five tasks, no automatic rerun.
+Actual first-round reservations: three; physical ORCA starts: two.
 
-The command remains preview-only unless both `-EnableReal` and
-`-ConfirmWaterGate` are supplied. Do not run that execution form without
-explicit authorization for the displayed Water protocol, executable path,
-version, budgets, and state root.
+Additional explicit owner authorization: at most four new Water tasks on the
+same executable/resources: Opt/Freq/SP 900/1800/300 seconds and one 3-second
+timeout attempt, no automatic rerun. Separate state roots preserve all earlier
+outcomes:
 
-## Owner acceptance checklist
+- First: `.tmp/p5-water-audit`.
+- Additional: `.tmp/p5-water-audit-retry`.
+- Byte-preserving real Opt fixture: `tests/p5/fixtures/orca_6_1_1_water_opt`.
 
-- [ ] Offline and regression verification reviewed.
-- [ ] Real ORCA executable path, version, and SHA-256 reviewed.
-- [ ] R01 Water `opt_freq_sp` reviewed, including exact Opt geometry reuse.
-- [ ] R02 restart/recovery reviewed.
-- [ ] R03 cancellation evidence reviewed, or explicitly recorded as not exercised.
-- [ ] R04 timeout evidence reviewed, or explicitly recorded as not exercised.
-- [ ] Main-branch CI result reviewed after the pushed commit.
-- [ ] Owner accepts P5 and authorizes the status to be changed from pending.
+Synthetic fixtures and controlled Python processes are **not** real ORCA
+acceptance evidence. P5 exports retain `scientific_assessment=not_evaluated`
+and `claim_status=not_generated`.
 
-Until the final checklist is accepted, P5 must be reported as implemented but
-not accepted, and this task must not be marked complete.
+## Owner checklist
+
+- [ ] Review repaired implementation, T01–T30 map and platform CI.
+- [ ] Review R01–R04 original evidence and exact executable/budget binding.
+- [ ] Confirm all required real gates passed; NOT_EXERCISED is not a pass.
+- [ ] Authorize acceptance; until then retain pending status.
+- [ ] Review main CI after an explicitly authorized merge.
+
+No scientific-PASS, minimum-energy claim, P6 readiness or owner acceptance is
+inferred from implementation/test completion.

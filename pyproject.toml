@@ -52,6 +52,9 @@ target-version = "py311"
 src = ["src", "tests"]
 extend-exclude = ["build", "dist"]
 
+[tool.coverage.run]
+patch = ["subprocess"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 

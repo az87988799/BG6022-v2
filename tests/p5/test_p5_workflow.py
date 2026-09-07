@@ -38,7 +38,7 @@ class _CorruptingFakeBackend(FakeExecutionBackend):
         return observation
 
 
-def _source(tmp_path: Path) -> tuple[Path, FrozenClock, RunId]:
+def _source(tmp_path: Path, smiles: str = "O") -> tuple[Path, FrozenClock, RunId]:
     state_root = tmp_path / "state"
     clock = FrozenClock(BASE_TIME)
     service = P4ApplicationService(
@@ -49,7 +49,7 @@ def _source(tmp_path: Path) -> tuple[Path, FrozenClock, RunId]:
     started = service.start(
         StartPlanningRun.create(
             input_kind=MoleculeInputKind.SMILES,
-            raw_input="O",
+            raw_input=smiles,
             charge=0,
             multiplicity=1,
             provider=IdentityProvider.LOCAL,

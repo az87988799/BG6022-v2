@@ -12,9 +12,11 @@ from orca_agent.domain.hashing import effect_spec_hash, sha256_hex
 from orca_agent.domain.ids import EffectId, EventId, InterruptId
 from orca_agent.domain.p3 import P3WorkflowState
 from orca_agent.domain.p4 import P4WorkflowState
+from orca_agent.domain.p5 import P5WorkflowState
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent, reduce_p3_event
 from orca_agent.orchestration.p4_kernel import P4KernelEvent, reduce_p4_event
+from orca_agent.orchestration.p5_kernel import reduce_p5_event
 from orca_agent.orchestration.schema1_read import reduce_event
 from orca_agent.orchestration.state import RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
@@ -60,6 +62,8 @@ def verify_run_projections(
         reducer = reduce_p3_event
     elif isinstance(snapshot.state, P4WorkflowState):
         reducer = reduce_p4_event
+    elif isinstance(snapshot.state, P5WorkflowState):
+        reducer = reduce_p5_event
     else:
         reducer = reduce_event
     _verify_interrupts(snapshot=snapshot, events=events, actual=interrupts, reducer=reducer)
@@ -112,7 +116,7 @@ def _verify_interrupts(
             or pending[0].interrupt_id != snapshot.state.pending_interrupt_id
         ):
             raise StateIntegrityError("waiting run does not have its matching pending interrupt")
-    elif pending or snapshot.state.pending_interrupt_id is not None:
+    elif pending or getattr(snapshot.state, "pending_interrupt_id", None) is not None:
         raise StateIntegrityError("non-waiting run has a pending interrupt projection")
 
 

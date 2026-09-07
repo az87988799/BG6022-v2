@@ -42,7 +42,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
         run: >-
           uv run --offline --no-sync pytest
-          --cov=orca_agent
+          --cov=src/orca_agent
           --cov-branch
           --cov-report=term-missing
           --cov-fail-under=80

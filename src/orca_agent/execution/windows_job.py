@@ -11,9 +11,12 @@ from ctypes import wintypes
 class WindowsJobObject:
     """Own a process tree and kill it when the supervisor closes unexpectedly."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, memory_limit_bytes: int = 2048 * 1024 * 1024) -> None:
         if os.name != "nt":
             raise OSError("Windows Job Objects are only available on Windows")
+        if type(memory_limit_bytes) is not int or memory_limit_bytes <= 0:
+            raise ValueError("job memory limit must be positive")
+        self.memory_limit_bytes = memory_limit_bytes
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         create = self._kernel32.CreateJobObjectW
         create.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
@@ -62,7 +65,8 @@ class WindowsJobObject:
             ]
 
         info = ExtendedLimitInformation()
-        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x00002000 | 0x00000200
+        info.JobMemoryLimit = self.memory_limit_bytes
         fn = self._kernel32.SetInformationJobObject
         fn.argtypes = [wintypes.HANDLE, wintypes.INT, ctypes.c_void_p, wintypes.DWORD]
         fn.restype = wintypes.BOOL
@@ -98,6 +102,55 @@ class WindowsJobObject:
             terminate.restype = wintypes.BOOL
             terminate(self._handle, exit_code)
 
+    def resume_pid(self, pid: int) -> None:
+        """Resume the initial thread only after the suspended child joins this job."""
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        api = self._kernel32
+        api.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        api.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        api.Thread32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        api.Thread32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+        api.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        api.OpenThread.restype = wintypes.HANDLE
+        api.ResumeThread.argtypes = [wintypes.HANDLE]
+        api.ResumeThread.restype = wintypes.DWORD
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        snapshot = api.CreateToolhelp32Snapshot(0x4, 0)
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), "thread snapshot failed")
+        resumed = 0
+        try:
+            entry = ThreadEntry()
+            entry.dwSize = ctypes.sizeof(entry)
+            present = api.Thread32First(snapshot, ctypes.byref(entry))
+            while present:
+                if entry.th32OwnerProcessID == pid:
+                    thread = api.OpenThread(0x2, False, entry.th32ThreadID)
+                    if not thread:
+                        raise OSError(ctypes.get_last_error(), "OpenThread failed")
+                    try:
+                        if api.ResumeThread(thread) != 1:
+                            raise OSError("child initial thread was not suspended exactly once")
+                        resumed += 1
+                    finally:
+                        api.CloseHandle(thread)
+                present = api.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            api.CloseHandle(snapshot)
+        if resumed != 1:
+            raise OSError("expected one suspended initial thread")
+
     def close(self) -> None:
         if getattr(self, "_handle", None):
             close_handle = self._kernel32.CloseHandle
@@ -122,10 +175,11 @@ def process_start_marker(pid: int) -> float | None:
 
     if os.name != "nt":
         try:
-            import psutil  # type: ignore[import-not-found]
+            from pathlib import Path
 
-            return float(psutil.Process(pid).create_time())
-        except Exception:
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return None if fields[0] == "Z" else float(fields[19])
+        except (OSError, ValueError, IndexError):
             return None
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     open_process = kernel32.OpenProcess
@@ -135,6 +189,14 @@ def process_start_marker(pid: int) -> float | None:
     if not process:
         return None
     try:
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(process, ctypes.byref(code)) or code.value != 259:
+            return None
+        kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+            ctypes.POINTER(wintypes.FILETIME)
+        ] * 4
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
         created = wintypes.FILETIME()
         exit_time = wintypes.FILETIME()
         kernel_time = wintypes.FILETIME()

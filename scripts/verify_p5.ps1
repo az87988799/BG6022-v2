@@ -20,9 +20,8 @@ try {
     & $Python -m orca_agent.interfaces.cli --state-root $StateRoot doctor --workflow p5 --json
     if ($LASTEXITCODE -ne 0) { throw "P5 doctor failed" }
 
-    # The test invokes several independent CLI processes and uses only the
-    # deterministic fake execution backend.  No ORCA path or network flag is
-    # supplied here.
+    # Independent CLI, fake outputs and controlled Python child processes.
+    # These test process control, not real ORCA scientific acceptance.
     & $Python -m pytest -q tests/p5
     if ($LASTEXITCODE -ne 0) { throw "P5 offline verification failed" }
 }

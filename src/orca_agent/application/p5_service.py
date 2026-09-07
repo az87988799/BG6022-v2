@@ -17,6 +17,7 @@ from orca_agent.application.errors import (
     RevisionConflictError,
     StateIntegrityError,
 )
+from orca_agent.application.p5_dispatch import P5EffectCompletion
 from orca_agent.application.p5_errors import (
     ApprovalExpired,
     ApprovalMismatch,
@@ -43,6 +44,14 @@ from orca_agent.domain.ids import (
     new_id,
 )
 from orca_agent.domain.json_types import thaw_json
+from orca_agent.domain.models import (
+    BackendKind,
+    Budget,
+    ExecutionEnvelope,
+    PrimitiveKind,
+    PrimitiveSpec,
+    ValidatedAction,
+)
 from orca_agent.domain.p4 import P4Phase
 from orca_agent.domain.p5 import (
     GeometryRecord,
@@ -86,6 +95,9 @@ from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRep
 from orca_agent.infrastructure.repositories import RunSnapshot
 from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+from orca_agent.infrastructure.worker import HandlerResult, OutboxWorker
+from orca_agent.orchestration.dispatch_policy import P5_EFFECT_REGISTRY
+from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.p5_commands import P5CommandType, P5EventType
 from orca_agent.orchestration.p5_kernel import P5KernelEvent, expected_p5_application_result
 from orca_agent.orchestration.p5_versions import (
@@ -160,6 +172,7 @@ class P5ApplicationService:
         run_id: RunId | None = None,
         command_id: CommandId | None = None,
         external_opt_result_id: WorkflowRecordId | None = None,
+        wall_time_seconds: int | None = None,
     ) -> ApplicationResult:
         actual_run_id = run_id or new_id(RunId)
         actual_command_id = command_id or new_id(CommandId)
@@ -172,6 +185,11 @@ class P5ApplicationService:
                 "external_opt_result_id": None
                 if external_opt_result_id is None
                 else str(external_opt_result_id),
+                **(
+                    {"wall_time_seconds": wall_time_seconds}
+                    if wall_time_seconds is not None
+                    else {}
+                ),
             }
         )
         try:
@@ -192,6 +210,7 @@ class P5ApplicationService:
                 raise SourceIntegrityError("P5 source must be a verified P4 plan_ready run")
             get_p5_protocol(protocol_id)
             execution_plan = expand_p5_execution_plan(
+                wall_time_seconds=wall_time_seconds,
                 run_id=actual_run_id,
                 source_run_id=source_run_id,
                 source_plan_id=source.prepared_plan.record_id,
@@ -344,6 +363,14 @@ class P5ApplicationService:
                         "action_id": str(action_id),
                         "grant_id": str(grant_id),
                         "binding_hash": binding_hash,
+                        "effects": [
+                            EffectSpec(
+                                effect_index=0,
+                                effect_type="external.p5.launch_orca",
+                                effect_class=EffectClass.EXTERNAL,
+                                payload={"action_id": str(action_id), "binding_hash": binding_hash},
+                            ).model_dump(mode="json")
+                        ],
                     },
                 )
                 records.append_p5(
@@ -471,6 +498,7 @@ class P5ApplicationService:
             }
         )
         try:
+            self._restore_execution_runtime(run_id)
             with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
                 uow.begin()
                 replayed = self._replayed_command(uow, actual_command_id, command_hash)
@@ -514,7 +542,12 @@ class P5ApplicationService:
                     event_type=P5EventType.CANCEL_REQUESTED,
                     outcome_code="cancel_requested",
                     now=now,
-                    details={"reason_code": reason_code},
+                    details={
+                        "reason_code": reason_code,
+                        "effects": []
+                        if state.current_execution_id is None
+                        else [self._cancel_effect(state.current_execution_id)],
+                    },
                 )
                 if state.current_execution_id is None and state.current_action_id is not None:
                     uow.connection.execute(
@@ -524,27 +557,18 @@ class P5ApplicationService:
                     )
                 uow.commit()
             if state.current_execution_id is not None:
-                observation = self.backend.cancel(
-                    str(state.current_execution_id), str(actual_command_id)
-                )
-                if observation.stopped:
-                    terminal = self.backend.poll(str(state.current_execution_id))
-                    if terminal.status in {
-                        P5JobStatus.CANCELLED,
-                        P5JobStatus.TIMED_OUT,
-                        P5JobStatus.INTERRUPTED,
-                    }:
-                        self._collect_execution(run_id, terminal)
-                    else:
-                        self._complete_cancel(
-                            run_id=run_id,
-                            execution_id=state.current_execution_id,
-                            command_id=new_id(CommandId),
-                            prior_command=actual_command_id,
-                        )
+                from .p5_control import deliver_control
+
+                deliver_control(self, run_id, enqueue=False)
             return result
         except Exception as error:
             return self._rejected(run_id, error)
+
+    @staticmethod
+    def _cancel_effect(execution_id):
+        from .p5_control import control_effect
+
+        return control_effect(execution_id, cancel=True)
 
     def reconcile(
         self,
@@ -561,6 +585,7 @@ class P5ApplicationService:
             }
         )
         try:
+            self._restore_execution_runtime(run_id)
             if command_id is not None:
                 with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
                     self._require_p5_kernel(uow)
@@ -792,6 +817,45 @@ class P5ApplicationService:
 
         return P4ApplicationService(self.state_root).inspect(source_run_id)
 
+    def _restore_execution_runtime(self, run_id: RunId) -> None:
+        """Recover local routing from the verified event, never CLI defaults or output data."""
+        with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
+            snapshot = self._verified_snapshot(uow, run_id)
+            events = uow.events.list_for_run(snapshot.run_id)
+            runtime = events[0].event.payload.get("runtime")
+        if runtime is None:
+            view = self.inspect(run_id)
+            if view.job is None or view.binding.backend_kind != "local_orca":
+                return
+            spec = json.loads(
+                (self.state_root / "work" / str(view.job.execution_id) / "launch.json").read_text()
+            )
+            candidate = Path(spec["executable"])
+            if (
+                spec.get("execution_id") != str(view.job.execution_id)
+                or spec.get("launch_token") != view.job.launch_token
+                or spec.get("binding_hash") != view.binding.binding_hash
+                or bytes_sha256(candidate.read_bytes()) != view.binding.executable_sha256
+            ):
+                raise ExecutableVersionMismatch("historical runtime does not match trusted binding")
+            runtime = {
+                "backend_kind": "local_orca",
+                "executable": str(candidate),
+                "orca_version": view.binding.orca_version,
+            }
+        kind = runtime["backend_kind"]
+        if kind == "local_orca":
+            self.backend_kind = kind
+            self.orca_executable = Path(runtime["executable"])
+            self.orca_version = runtime["orca_version"]
+            if not isinstance(self.backend, LocalOrcaBackend):
+                self.backend = LocalOrcaBackend(self.state_root)
+        elif self.backend_kind != "fake":
+            self.backend_kind = "fake"
+            self.orca_executable = None
+            self.orca_version = None
+            self.backend = FakeExecutionBackend(self.state_root)
+
     def _load_external_opt_source(
         self,
         external_result_id: WorkflowRecordId | None,
@@ -919,6 +983,13 @@ class P5ApplicationService:
                 details={
                     "source_run_id": str(source.run_id),
                     "protocol_id": execution_plan.protocol_id,
+                    "runtime": {
+                        "backend_kind": self.backend_kind,
+                        "executable": None
+                        if self.orca_executable is None
+                        else str(self.orca_executable),
+                        "orca_version": self.orca_version,
+                    },
                 },
             )
             records = P5RecordRepository(uow.connection)
@@ -1047,7 +1118,7 @@ class P5ApplicationService:
             executable=self.orca_executable,
             orca_version=self.orca_version,
             profile_hash=compiled.feature_profile_hash,
-            probe=False,
+            probe=self.backend_kind == "local_orca",
         )
         binding_values = {
             "record_id": str(new_id(WorkflowRecordId)),
@@ -1086,6 +1157,27 @@ class P5ApplicationService:
             "recovery_strategy": "reconcile_no_auto_retry",
         }
         binding = P5ExecutionBinding(**binding_values, binding_hash=sha256_hex(binding_values))
+        validated = ValidatedAction.create(
+            action_id=action_id,
+            proposal_hash=execution_plan.plan_hash,
+            primitive=PrimitiveSpec.create(
+                kind=PrimitiveKind(node.kind.value),
+                molecule_ref=geometry.canonical_isomeric_smiles,
+                method_profile_id=node.method_profile_id,
+                parameters={"binding_hash": binding.binding_hash, "node_id": node.node_id},
+            ),
+            execution_envelope=ExecutionEnvelope(
+                backend_kind=BackendKind.LOCAL
+                if self.backend_kind == "local_orca"
+                else BackendKind.FAKE,
+                artifact_namespace_id=input_artifact.artifact_id,
+            ),
+            budget=Budget(
+                wall_time_seconds=node.budget.wall_time_seconds,
+                memory_mb=node.budget.total_memory_mb,
+                cores=node.budget.nprocs,
+            ),
+        )
         action_values = {
             "record_id": str(new_id(WorkflowRecordId)),
             "run_id": str(run_id),
@@ -1093,14 +1185,9 @@ class P5ApplicationService:
             "action_id": str(action_id),
             "node_id": node.node_id,
             "primitive_id": node.node_id,
-            "action_hash": "0" * 64,
-            "envelope_hash": sha256_hex(
-                {
-                    "input_sha256": compiled.input_sha256,
-                    "geometry_sha256": geometry.xyz_bytes_sha256,
-                }
-            ),
-            "budget_hash": node.budget.budget_hash(),
+            "action_hash": validated.action_hash,
+            "envelope_hash": sha256_hex(validated.execution_envelope),
+            "budget_hash": sha256_hex(validated.budget),
             "binding_id": str(binding.record_id),
             "binding_hash": binding.binding_hash,
             "input_artifact_id": str(input_artifact.artifact_id),
@@ -1116,9 +1203,6 @@ class P5ApplicationService:
             "status": P5ActionStatus.PLANNED.value,
             "created_at_utc": format_utc(now),
         }
-        action_values["action_hash"] = sha256_hex(
-            {key: value for key, value in action_hash_values.items() if key != "action_hash"}
-        )
         action_record_hash_values = {
             **action_hash_values,
             "action_hash": action_values["action_hash"],
@@ -1139,7 +1223,7 @@ class P5ApplicationService:
                     str(run_id),
                     str(conversation_id),
                     json.dumps(
-                        action_record.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                        validated.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
                     ),
                     action_record.action_hash,
                     action_record.envelope_hash,
@@ -1287,6 +1371,20 @@ class P5ApplicationService:
         ):
             raise RevisionConflictError("P5 state revision changed during transition")
         uow.events.append(event, command_hash=command_hash)
+        if next_state.status.is_terminal:
+            uow.outbox.cancel_pending_for_run(run_id=next_state.run_id, now=now)
+        if details.get("effects"):
+            effects = tuple(
+                EffectSpec.model_validate_json(json.dumps(item), strict=True)
+                for item in details["effects"]
+            )
+            uow.outbox.register_effects(
+                event=event,
+                run_id=next_state.run_id,
+                effects=effects,
+                available_at_utc=now,
+                created_at_utc=now,
+            )
         return event, result
 
     @staticmethod
@@ -1416,6 +1514,11 @@ class P5ApplicationService:
                 hessian_bytes = (
                     None if output.hessian_path is None else output.hessian_path.read_bytes()
                 )
+                optimized_xyz_bytes = (
+                    None
+                    if output.optimized_xyz_path is None
+                    else output.optimized_xyz_path.read_bytes()
+                )
                 artifact_store = ArtifactStore(self.state_root, clock=self.clock)
                 execution_ref = ExecutionId(observation.execution_id)
 
@@ -1470,8 +1573,8 @@ class P5ApplicationService:
                     )
                     return stdout_ref, stderr_ref, hessian_ref, optimized_ref
 
-                stdout_artifact, stderr_artifact, hessian_artifact, _ = (
-                    archive_output_artifacts()
+                stdout_artifact, stderr_artifact, hessian_artifact, _ = archive_output_artifacts(
+                    optimized_xyz_bytes
                 )
                 optimized_artifact = None
                 optimized_geometry = None
@@ -1499,14 +1602,14 @@ class P5ApplicationService:
                         input_manifest_hash=binding.input_manifest_hash,
                         exit_code=output.exit_code if output.exit_code is not None else 1,
                         hessian_bytes=hessian_bytes,
+                        optimized_xyz_bytes=optimized_xyz_bytes,
                         data_origin=output.data_origin,
                         stderr_bytes=stderr_bytes,
                     )
                     if binding.backend_kind == "local_orca" and (
                         parsed.orca_version is None
-                        or not parsed.orca_version.startswith("6.1")
                         or binding.orca_version is None
-                        or not binding.orca_version.startswith("6.1")
+                        or parsed.orca_version != binding.orca_version
                     ):
                         raise ExecutableVersionMismatch(
                             "local ORCA output version is not the approved ORCA 6.1 version"
@@ -1974,9 +2077,49 @@ class P5Worker:
                         P5DeliveryReport(None, "awaiting_execution_approval", state.phase.value)
                     )
                     continue
-                if state.phase is P5Phase.DISPATCH_PENDING:
-                    report = self._dispatch(candidate, view)
-                    reports.append(report)
+                with SQLiteUnitOfWork(self.service.database_path) as uow:
+                    outstanding_launch = any(
+                        effect.effect_type == "external.p5.launch_orca"
+                        and effect.status.value in {"pending", "leased", "dispatching"}
+                        for effect in uow.outbox.list_for_run(candidate)
+                    )
+                if state.phase is P5Phase.DISPATCH_PENDING or outstanding_launch:
+                    if view.binding.backend_kind == "local_orca" and not self.allow_real_orca:
+                        reports.append(
+                            P5DeliveryReport(None, "real_execution_disabled", state.phase.value)
+                        )
+                        continue
+
+                    def handle(permit, candidate=candidate):
+                        report = self._dispatch(candidate, self.service.inspect(candidate), permit)
+                        reports.append(report)
+                        return HandlerResult(
+                            success=report.outcome
+                            in {
+                                "succeeded",
+                                "starting",
+                                "running",
+                                "needs_reconciliation",
+                                "launch_state_unknown",
+                                "launch_acknowledged",
+                            }
+                        )
+
+                    OutboxWorker(
+                        self.service.database_path,
+                        handler=handle,
+                        clock=self.service.clock,
+                        registry=P5_EFFECT_REGISTRY,
+                        completion_service_factory=lambda: P5EffectCompletion(self.service),
+                        readiness_check=lambda effect, _snapshot, _now, candidate=candidate: (
+                            effect.run_id == candidate
+                        ),
+                    ).run_once(limit=1)
+                    collected = self.service.inspect(candidate)
+                    if collected.state.phase is P5Phase.COLLECTING:
+                        from .p5_control import deliver_control
+
+                        deliver_control(self.service, candidate)
                     continue
                 if (
                     state.phase
@@ -1988,7 +2131,11 @@ class P5Worker:
                     }
                     and state.current_execution_id is not None
                 ):
-                    result = self.service.reconcile(candidate)
+                    from .p5_control import deliver_control
+
+                    result = deliver_control(self.service, candidate)
+                    if result is None:
+                        continue
                     refreshed = self.service.inspect(candidate)
                     reports.append(
                         P5DeliveryReport(
@@ -2004,7 +2151,7 @@ class P5Worker:
                 )
         return tuple(reports)
 
-    def _dispatch(self, run_id: RunId, view: P5RunView) -> P5DeliveryReport:
+    def _dispatch(self, run_id: RunId, view: P5RunView, permit) -> P5DeliveryReport:
         if view.action is None or view.binding is None or view.state.current_action_id is None:
             return P5DeliveryReport(None, "action_missing", "failed")
         if view.binding.backend_kind == "local_orca" and not self.allow_real_orca:
@@ -2020,8 +2167,28 @@ class P5Worker:
         try:
             with SQLiteUnitOfWork(self.service.database_path, clock=self.service.clock) as uow:
                 uow.begin()
+                uow.outbox.validate_handler_permit(permit=permit, now=self.service.clock.now_utc())
                 snapshot = self.service._verified_snapshot(uow, run_id)
                 state = self.service._p5_state(snapshot)
+                if permit.effect.payload.get("action_id") != str(state.current_action_id):
+                    raise LaunchStateUnknown("dispatch action or phase has changed")
+                if state.phase is not P5Phase.DISPATCH_PENDING:
+                    # Recover only the short delivery acknowledgement. Never
+                    # call start_or_reconcile from this crash-recovery branch.
+                    existing = LocalJobRepository(uow.connection).get_by_action(
+                        state.current_action_id
+                    )
+                    if (
+                        existing is None
+                        or existing.execution_id != state.current_execution_id
+                        or existing.launch_consumed_at_utc is None
+                        or existing.binding_hash != permit.effect.payload.get("binding_hash")
+                    ):
+                        raise LaunchStateUnknown("no consumed reservation to acknowledge")
+                    uow.commit()
+                    return P5DeliveryReport(
+                        existing.execution_id, "launch_acknowledged", state.phase.value, 0
+                    )
                 if state.current_grant_id is None:
                     raise ApprovalMismatch("P5 action has no approval grant")
                 records = P5RecordRepository(uow.connection)
@@ -2076,7 +2243,7 @@ class P5Worker:
                         geometry_hash=binding.geometry_hash,
                         backend_kind=binding.backend_kind,
                         launch_token=uuid.uuid4().hex,
-                        launch_generation=1,
+                        launch_generation=permit.generation,
                         launch_reserved_at_utc=self.service.clock.now_utc(),
                         status=P5JobStatus.RESERVED,
                         host_identity=host_identity(),
@@ -2109,31 +2276,6 @@ class P5Worker:
                     state = self.service._p5_state(snapshot)
                 else:
                     execution_id = job.execution_id
-                if job.status is P5JobStatus.RESERVED:
-                    if not LocalJobRepository(uow.connection).consume_launch_ticket(
-                        execution_id=execution_id,
-                        generation=job.launch_generation,
-                        now=self.service.clock.now_utc(),
-                    ):
-                        revision = snapshot.revision
-                        uow.commit()
-                        result = self.service._mark_needs_reconciliation(
-                            run_id=run_id,
-                            execution_id=execution_id,
-                            command_id=None,
-                            command_hash=sha256_hex(
-                                {"launch_state_unknown": str(execution_id)}
-                            ),
-                            expected_revision=revision,
-                            reason="launch ticket could not be consumed exactly once",
-                        )
-                        refreshed = self.service.inspect(run_id)
-                        return P5DeliveryReport(
-                            execution_id,
-                            result.code,
-                            refreshed.state.phase.value,
-                        )
-                    job = LocalJobRepository(uow.connection).get_by_execution(execution_id)
                 uow.commit()
             request = LaunchRequest(
                 state_root=self.service.state_root,
@@ -2145,6 +2287,7 @@ class P5Worker:
                 executable=self.service.orca_executable,
                 allow_real=self.allow_real_orca,
                 requested_at_utc=self.service.clock.now_utc(),
+                permit=permit,
             )
             observation = self.service.backend.start_or_reconcile(request)
             if observation.status is P5JobStatus.NEEDS_RECONCILIATION:
@@ -2226,21 +2369,6 @@ class P5Worker:
                     details={"execution_id": str(execution_id), "status": observation.status.value},
                 )
                 uow.commit()
-            if observation.status in {
-                P5JobStatus.SUCCEEDED,
-                P5JobStatus.FAILED,
-                P5JobStatus.CANCELLED,
-                P5JobStatus.TIMED_OUT,
-            }:
-                self.service._collect_execution(
-                    run_id,
-                    JobObservation(
-                        execution_id=str(execution_id),
-                        status=observation.status,
-                        exit_code=0 if observation.status is P5JobStatus.SUCCEEDED else 1,
-                        data_origin=observation.data_origin,
-                    ),
-                )
             refreshed = self.service.inspect(run_id)
             return P5DeliveryReport(
                 execution_id,
@@ -2281,7 +2409,10 @@ class P5Worker:
             uow.begin()
             rows = uow.connection.execute(
                 "SELECT run_id FROM runs WHERE schema_version = ? "
-                "AND engine_version = ? ORDER BY run_id",
+                "AND engine_version = ? AND json_extract(state_json, '$.phase') IN "
+                "('dispatch_pending', 'running', 'collecting', 'cancelling', "
+                "'needs_reconciliation') "
+                "ORDER BY updated_at_utc, run_id",
                 (P5_SCHEMA_VERSION, P5_ENGINE_VERSION),
             ).fetchall()
             values = [RunId(str(row[0])) for row in rows]

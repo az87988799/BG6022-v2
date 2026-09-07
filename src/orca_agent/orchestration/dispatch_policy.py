@@ -287,7 +287,15 @@ def evaluate_dispatch(
             return DispatchDecision.BLOCK
         required_phases = {
             "internal.p5.prepare_node": {P5Phase.PREPARING},
-            "external.p5.launch_orca": {P5Phase.DISPATCH_PENDING},
+            # Outside DISPATCH_PENDING the handler may only acknowledge an
+            # already-consumed reservation; consume_ticket still forbids spawn.
+            "external.p5.launch_orca": {
+                P5Phase.DISPATCH_PENDING,
+                P5Phase.RUNNING,
+                P5Phase.COLLECTING,
+                P5Phase.CANCELLING,
+                P5Phase.NEEDS_RECONCILIATION,
+            },
             "internal.p5.observe_job": {
                 P5Phase.RUNNING,
                 P5Phase.COLLECTING,

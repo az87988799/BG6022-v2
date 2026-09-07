@@ -116,7 +116,8 @@ class RunRepository:
                 stored_run_id != run_id
                 or state.run_id != run_id
                 or state.status.value != str(row[4])
-                or engine_version not in (
+                or engine_version
+                not in (
                     ENGINE_VERSION,
                     P3_ENGINE_VERSION,
                     P4_ENGINE_VERSION,
@@ -252,7 +253,6 @@ class RunRepository:
                     stored_last_event_id=snapshot.last_event_id,
                     events=event_values,  # type: ignore[arg-type]
                 )
-                return snapshot
             else:
                 if not all(isinstance(event, KernelEvent) for event in event_values):
                     raise StateIntegrityError("P2 run contains a non-P2 event")

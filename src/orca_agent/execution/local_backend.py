@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,6 +23,9 @@ from orca_agent.domain.p5 import (
     P5JobStatus,
 )
 
+from .launch_ticket import consume_ticket, permit_fields
+from .orca_parser import ATOMIC_MASSES
+from .output_contract import BOHR_TO_ANGSTROM, HESSIAN_NAME, OPTIMIZED_XYZ_NAME
 from .ports import (
     CancellationObservation,
     JobObservation,
@@ -29,7 +33,8 @@ from .ports import (
     LaunchRequest,
     OutputManifest,
 )
-from .windows_job import host_identity
+from .windows_job import host_identity, process_start_marker
+from .work_paths import execution_directory
 
 
 class _BackendBase:
@@ -39,20 +44,7 @@ class _BackendBase:
         self.work_root.mkdir(parents=True, exist_ok=True)
 
     def _workdir(self, execution_id: str) -> Path:
-        if not execution_id.startswith("execution_") or any(
-            part in execution_id for part in ("..", "/", "\\")
-        ):
-            raise ValueError("execution ID cannot be used as a work directory name")
-        directory = self.work_root / execution_id
-        directory.mkdir(parents=True, exist_ok=True)
-        if directory.is_symlink():
-            raise ResourceLimitExceeded("execution work directory is a symlink")
-        resolved = directory.resolve()
-        try:
-            resolved.relative_to(self.work_root)
-        except ValueError as error:
-            raise ResourceLimitExceeded("execution work directory escapes state root") from error
-        return resolved
+        return execution_directory(self.state_root, str(execution_id), create=True)
 
     @staticmethod
     def _write_atomic(path: Path, content: bytes) -> None:
@@ -113,9 +105,7 @@ class FakeExecutionBackend(_BackendBase):
 
     def start_or_reconcile(self, launch_request: LaunchRequest) -> LaunchObservation:
         directory = self._materialize(launch_request)
-        receipt = self._read_receipt(
-            directory, execution_id=str(launch_request.job.execution_id)
-        )
+        receipt = self._read_receipt(directory, execution_id=str(launch_request.job.execution_id))
         if receipt is not None:
             return LaunchObservation(
                 execution_id=str(launch_request.job.execution_id),
@@ -131,6 +121,16 @@ class FakeExecutionBackend(_BackendBase):
         count = int(count_path.read_text(encoding="utf-8")) if count_path.exists() else 0
         if count >= 1:
             raise RuntimeError("fake launch evidence exists without a terminal receipt")
+        consume_ticket(
+            self.state_root,
+            {
+                "execution_id": str(launch_request.job.execution_id),
+                "launch_token": launch_request.job.launch_token,
+                "binding_hash": launch_request.binding.binding_hash,
+                "permit": permit_fields(launch_request.permit),
+            },
+            now=launch_request.requested_at_utc,
+        )
         self._write_atomic(count_path, b"1\n")
         kind = launch_request.node.kind.value
         digest = hashlib.sha256(launch_request.geometry_bytes + kind.encode()).hexdigest()
@@ -141,22 +141,41 @@ class FakeExecutionBackend(_BackendBase):
             f"FINAL {'SINGLE POINT ' if kind == 'sp' else ''}ENERGY     {energy:.12f}",
         ]
         if kind == "opt":
+            self._write_atomic(directory / OPTIMIZED_XYZ_NAME, launch_request.geometry_bytes)
             lines.extend(
                 [
                     "THE OPTIMIZATION HAS CONVERGED",
-                    "P5 OPTIMIZED XYZ BEGIN",
-                    launch_request.geometry_bytes.decode("utf-8").rstrip("\n"),
-                    "P5 OPTIMIZED XYZ END",
+                    "CARTESIAN COORDINATES (ANGSTROEM)",
+                    "---------------------------------",
+                    "\n".join(launch_request.geometry_bytes.decode("utf-8").splitlines()[2:]),
+                    "",
                 ]
             )
         if kind == "freq":
+            atoms = launch_request.geometry_bytes.decode("utf-8").splitlines()[2:]
+            dimension = len(atoms) * 3
+            values = [0.0] * (dimension - 3) + [1595.321, 3657.223, 3755.120]
             lines.extend(
-                ["VIBRATIONAL FREQUENCIES", "  1:  1595.3210", "  2:  3657.2230", "  3:  3755.1200"]
+                ["VIBRATIONAL FREQUENCIES"] + [f"{i}: {v:.6f} cm**-1" for i, v in enumerate(values)]
             )
-            dimension = len(launch_request.geometry_bytes.decode("utf-8").splitlines()) - 2
-            self._write_atomic(
-                directory / "frequency.hess", f"$hessian\n{dimension * 3}\n$end\n".encode()
+            hess = ["$hessian", str(dimension), " ".join(map(str, range(dimension)))]
+            hess.extend(
+                f"{i} " + " ".join("1.000000" if i == j else "0.000000" for j in range(dimension))
+                for i in range(dimension)
             )
+            hess.extend(
+                ["$vibrational_frequencies", str(dimension)]
+                + [f"{i} {v:.6f}" for i, v in enumerate(values)]
+            )
+            hess.extend(["$atoms", str(len(atoms))])
+            for atom in atoms:
+                symbol, *xyz = atom.split()
+                hess.append(
+                    f"{symbol} {ATOMIC_MASSES[symbol]} "
+                    + " ".join(f"{float(c) / BOHR_TO_ANGSTROM:.12f}" for c in xyz)
+                )
+            hess.append("$end")
+            self._write_atomic(directory / HESSIAN_NAME, ("\n".join(hess) + "\n").encode())
         lines.append("****ORCA TERMINATED NORMALLY****")
         self._write_atomic(directory / "stdout.out", ("\n".join(lines) + "\n").encode("utf-8"))
         self._write_atomic(directory / "stderr.err", b"")
@@ -202,10 +221,12 @@ class FakeExecutionBackend(_BackendBase):
             data_origin=P5DataOrigin.FAKE_FIXTURE,
             stdout_path=directory / "stdout.out",
             stderr_path=directory / "stderr.err",
-            hessian_path=(directory / "frequency.hess")
-            if (directory / "frequency.hess").exists()
+            hessian_path=(directory / HESSIAN_NAME)
+            if (directory / HESSIAN_NAME).exists()
             else None,
-            optimized_xyz_path=None,
+            optimized_xyz_path=(directory / OPTIMIZED_XYZ_NAME)
+            if (directory / OPTIMIZED_XYZ_NAME).exists()
+            else None,
         )
 
     def cancel(self, execution_ref: str, cancellation_ref: str) -> CancellationObservation:
@@ -247,6 +268,36 @@ class LocalOrcaBackend(_BackendBase):
 
     backend_kind = "local_orca"
 
+    def _read_receipt(self, directory, *, execution_id=None):
+        receipt = super()._read_receipt(directory, execution_id=execution_id)
+        if receipt is None:
+            return None
+        job = self._trusted_job(execution_id)
+        if (
+            job is None
+            or job.backend_kind != "local_orca"
+            or receipt.get("job_id") != str(job.job_id)
+            or receipt.get("launch_token") != job.launch_token
+            or receipt.get("host_identity") != job.host_identity
+            or job.host_identity != host_identity()
+        ):
+            raise LaunchStateUnknown("runner receipt does not match trusted execution identity")
+        return receipt
+
+    def _trusted_job(self, execution_id):
+        from orca_agent.domain.ids import ExecutionId
+        from orca_agent.infrastructure.p5_records import LocalJobRepository
+        from orca_agent.infrastructure.sqlite import resolve_database_path
+
+        connection = sqlite3.connect(
+            resolve_database_path(self.state_root).as_uri() + "?mode=ro", uri=True
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            return LocalJobRepository(connection).get_by_execution(ExecutionId(execution_id))
+        finally:
+            connection.close()
+
     def start_or_reconcile(self, launch_request: LaunchRequest) -> LaunchObservation:
         if not launch_request.allow_real:
             raise RealExecutionDisabled("real ORCA execution is disabled")
@@ -258,7 +309,8 @@ class LocalOrcaBackend(_BackendBase):
             raise ExecutableVersionMismatch("P5 accepts only a verified ORCA .exe")
         if launch_request.job.backend_kind != self.backend_kind:
             raise LaunchStateUnknown("job backend kind does not match the local ORCA backend")
-        if launch_request.job.launch_consumed_at_utc is None or launch_request.job.status not in {
+        if launch_request.job.status not in {
+            P5JobStatus.RESERVED,
             P5JobStatus.STARTING,
             P5JobStatus.RUNNING,
         }:
@@ -283,9 +335,7 @@ class LocalOrcaBackend(_BackendBase):
         if launch_request.binding.executable_sha256 != actual_hash:
             raise ExecutableVersionMismatch("ORCA executable hash changed after approval")
         directory = self._materialize(launch_request)
-        receipt = self._read_receipt(
-            directory, execution_id=str(launch_request.job.execution_id)
-        )
+        receipt = self._read_receipt(directory, execution_id=str(launch_request.job.execution_id))
         if receipt is not None:
             return LaunchObservation(
                 execution_id=str(launch_request.job.execution_id),
@@ -312,6 +362,7 @@ class LocalOrcaBackend(_BackendBase):
             "geometry_hash": launch_request.binding.geometry_hash,
             "xyz_bytes_sha256": launch_request.binding.xyz_bytes_sha256,
             "host_identity": host_identity(),
+            "permit": permit_fields(launch_request.permit),
         }
         self._write_atomic(
             directory / "launch.json", json.dumps(launch_spec, sort_keys=True).encode("utf-8")
@@ -334,23 +385,51 @@ class LocalOrcaBackend(_BackendBase):
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             close_fds=True,
         )
-        self._write_atomic(directory / "supervisor.pid", f"{supervisor.pid}\n".encode("ascii"))
+        self._write_atomic(
+            directory / "supervisor.json",
+            json.dumps(
+                {
+                    "pid": supervisor.pid,
+                    "created": process_start_marker(supervisor.pid),
+                    "execution_id": str(launch_request.job.execution_id),
+                    "launch_token": launch_request.job.launch_token,
+                    "host_identity": host_identity(),
+                }
+            ).encode(),
+        )
         return LaunchObservation(
             execution_id=str(launch_request.job.execution_id),
             job_id=str(launch_request.job.job_id),
-            status=P5JobStatus.STARTING,
+            status=self._await_consumed(launch_request, supervisor),
             started=True,
             physical_start_count=1,
             supervisor_pid=supervisor.pid,
             data_origin=P5DataOrigin.ORCA_LOCAL,
         )
 
+    def _await_consumed(self, request, supervisor):
+        from orca_agent.domain.ids import ExecutionId
+        from orca_agent.infrastructure.p5_records import LocalJobRepository
+        from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+
+        until = time.monotonic() + 5.0
+        while time.monotonic() < until:
+            with SQLiteUnitOfWork(self.state_root) as uow:
+                current = LocalJobRepository(uow.connection).get_by_execution(
+                    ExecutionId(request.job.execution_id)
+                )
+            if current is not None and current.launch_consumed_at_utc is not None:
+                return P5JobStatus.STARTING
+            if supervisor.poll() is not None:
+                raise LaunchStateUnknown("supervisor exited before consuming its launch permit")
+            time.sleep(0.025)
+        raise LaunchStateUnknown("supervisor did not acknowledge launch before handshake deadline")
+
     def poll(self, execution_ref: str) -> JobObservation:
         directory = self._workdir(execution_ref)
         receipt = self._read_receipt(directory, execution_id=execution_ref)
         if receipt is None:
-            supervisor_pid = _read_pid(directory / "supervisor.pid")
-            if supervisor_pid is None or not _pid_is_alive(supervisor_pid):
+            if not _supervisor_is_alive(directory, execution_ref):
                 return JobObservation(
                     execution_id=execution_ref,
                     status=P5JobStatus.NEEDS_RECONCILIATION,
@@ -374,10 +453,12 @@ class LocalOrcaBackend(_BackendBase):
             data_origin=P5DataOrigin.ORCA_LOCAL,
             stdout_path=directory / "stdout.out",
             stderr_path=directory / "stderr.err",
-            hessian_path=(directory / "frequency.hess")
-            if (directory / "frequency.hess").exists()
+            hessian_path=(directory / HESSIAN_NAME)
+            if (directory / HESSIAN_NAME).exists()
             else None,
-            optimized_xyz_path=None,
+            optimized_xyz_path=(directory / OPTIMIZED_XYZ_NAME)
+            if (directory / OPTIMIZED_XYZ_NAME).exists()
+            else None,
         )
 
     def cancel(self, execution_ref: str, cancellation_ref: str) -> CancellationObservation:
@@ -444,13 +525,18 @@ def _read_pid(path: Path) -> int | None:
     return value if value > 0 else None
 
 
-def _pid_is_alive(pid: int) -> bool:
+def _supervisor_is_alive(directory: Path, execution_id: str) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        record = json.loads((directory / "supervisor.json").read_text())
+        spec = json.loads((directory / "launch.json").read_text())
+        return (
+            record["execution_id"] == execution_id == spec["execution_id"]
+            and record["launch_token"] == spec["launch_token"]
+            and record["host_identity"] == spec["host_identity"] == host_identity()
+            and type(record["pid"]) is int
+            and record["pid"] > 0
+            and record["created"] is not None
+            and process_start_marker(record["pid"]) == record["created"]
+        )
+    except (OSError, ValueError, KeyError, TypeError):
         return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True

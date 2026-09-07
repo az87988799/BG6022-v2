@@ -27,6 +27,7 @@ class LaunchRequest:
     executable: Path | None
     allow_real: bool
     requested_at_utc: datetime
+    permit: object | None = None
 
 
 @dataclass(frozen=True)

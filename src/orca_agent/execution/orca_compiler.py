@@ -12,14 +12,16 @@ from orca_agent.domain.p5 import GeometryRecord, P5Budget, P5ExecutionNode, P5No
 from orca_agent.orchestration.p5_versions import P5_COMPILER_VERSION
 from orca_agent.planning.registry import METHOD_R2SCAN3C
 
+from .output_contract import GEOMETRY_NAME, HESSIAN_NAME, INPUT_NAME, OPTIMIZED_XYZ_NAME
+
 
 class CompiledInputBundle(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     input_bytes: bytes
     geometry_bytes: bytes
-    input_filename: str = "input.inp"
-    geometry_filename: str = "geometry.xyz"
+    input_filename: str = INPUT_NAME
+    geometry_filename: str = GEOMETRY_NAME
     input_sha256: str
     geometry_sha256: str
     feature_profile: dict[str, object]
@@ -92,8 +94,9 @@ def compile_orca_input(
         "method_profile_hash": METHOD_R2SCAN3C.entry_hash,
         "primitive_id": node.node_id,
         "primitive_kind": node.kind.value,
-        "input_filename": "input.inp",
-        "geometry_filename": "geometry.xyz",
+        "input_filename": INPUT_NAME,
+        "geometry_filename": GEOMETRY_NAME,
+        "expected_outputs": {"opt": OPTIMIZED_XYZ_NAME, "freq": HESSIAN_NAME},
         "files": {
             "input.inp": {"sha256": bytes_sha256(input_bytes), "size_bytes": len(input_bytes)},
             "geometry.xyz": {

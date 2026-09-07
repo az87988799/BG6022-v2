@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Literal
 
@@ -26,6 +27,22 @@ from orca_agent.domain.p5 import (
 )
 from orca_agent.identity.geometry import parse_xyz_bytes
 from orca_agent.orchestration.p5_versions import P5_PARSER_VERSION
+
+from .output_contract import BOHR_TO_ANGSTROM
+
+# Frozen default ORCA masses (amu); isotope substitution is outside P5.
+ATOMIC_MASSES = {
+    "H": 1.008,
+    "C": 12.011,
+    "N": 14.007,
+    "O": 15.999,
+    "F": 18.998403,
+    "P": 30.973762,
+    "S": 32.06,
+    "Cl": 35.45,
+    "Br": 79.904,
+    "I": 126.90447,
+}
 
 
 class ParsedOrcaResult(BaseModel):
@@ -72,6 +89,7 @@ def parse_orca_output(
     input_manifest_hash: str,
     exit_code: int,
     hessian_bytes: bytes | None = None,
+    optimized_xyz_bytes: bytes | None = None,
     data_origin: P5DataOrigin = P5DataOrigin.ORCA_LOCAL,
     stderr_bytes: bytes = b"",
 ) -> ParsedOrcaResult:
@@ -125,23 +143,37 @@ def parse_orca_output(
         )
         if not optimization_converged:
             raise OptimizationNotConverged("ORCA optimization convergence marker is missing")
-        optimized_xyz = _extract_optimized_xyz(text, geometry)
+        if optimized_xyz_bytes is None:
+            raise RequiredOutputMissing("final input.xyz artifact is missing")
+        optimized_xyz = optimized_xyz_bytes
         _validate_geometry_binding(optimized_xyz, geometry)
+        # Convergence is necessary but not sufficient: bind the actual XYZ file
+        # to the single final coordinate section after convergence.
+        final_stdout = _extract_optimized_xyz(text, geometry)
+        _, actual = parse_xyz_bytes(optimized_xyz)
+        _, expected = parse_xyz_bytes(final_stdout)
+        if any(
+            abs(a - b) > 2e-6
+            for p, q in zip(actual, expected, strict=True)
+            for a, b in zip(p, q, strict=True)
+        ):
+            raise GeometryBindingMismatch("final XYZ differs from converged stdout coordinates")
     frequencies: tuple[float, ...] = ()
     hessian_dimension: int | None = None
     frequency_unit: str | None = None
     if kind is P5NodeKind.FREQ:
-        frequencies = _extract_frequencies(text)
+        frequencies = _extract_frequencies(text, 3 * len(geometry.atom_symbols))
         if not frequencies:
             raise RequiredOutputMissing("ORCA vibrational frequencies are missing")
         frequency_unit = "cm^-1"
         if hessian_bytes is None:
             raise RequiredOutputMissing("ORCA Hessian bytes are missing")
-        hessian_dimension = _parse_hessian(hessian_bytes, len(geometry.atom_symbols))
+        hessian_dimension = _parse_hessian(hessian_bytes, geometry, frequencies)
     manifest = {
         "output_sha256": bytes_sha256(output_bytes),
         "stderr_sha256": bytes_sha256(stderr_bytes),
         "hessian_sha256": None if hessian_bytes is None else bytes_sha256(hessian_bytes),
+        "optimized_xyz_sha256": None if optimized_xyz is None else bytes_sha256(optimized_xyz),
         "normal_termination_offset": normal_matches[0].start(),
         "energy_offset": energy_match.start(),
     }
@@ -190,18 +222,22 @@ def _kind(value: P5ExecutionNode | P5NodeKind | str) -> P5NodeKind:
 
 
 def _extract_optimized_xyz(text: str, geometry: GeometryRecord) -> bytes:
-    match = re.search(
-        r"P5\s+OPTIMIZED\s+XYZ\s+BEGIN\s*\n(.*?)\nP5\s+OPTIMIZED\s+XYZ\s+END", text, re.I | re.S
+    converged = list(re.finditer(r"(?:THE\s+)?OPTIMIZATION\s+(?:HAS\s+)?CONVERGED", text, re.I))
+    if len(converged) != 1:
+        raise OptimizationNotConverged("a unique optimization convergence section is required")
+    tail = text[converged[0].end() :]
+    tail = tail.split("ORCA TERMINATED NORMALLY")[0]
+    matches = list(
+        re.finditer(
+            r"CARTESIAN COORDINATES \(ANGSTROEM\).*?\r?\n[- ]+\r?\n"
+            r"(.*?)(?:\r?\n\s*\r?\n|\r?\n\s*-{3,})",
+            tail,
+            re.I | re.S,
+        )
     )
-    if match is not None:
-        return match.group(1).strip("\n").encode("utf-8") + b"\n"
-    match = re.search(
-        r"CARTESIAN COORDINATES \(ANGSTROEM\).*?\n[- ]+\n(.*?)(?:\n\s*\n|\n\s*-{3,})",
-        text,
-        re.I | re.S,
-    )
-    if match is None:
-        raise RequiredOutputMissing("optimized Cartesian coordinates are missing")
+    if len(matches) != 1:
+        raise RequiredOutputMissing("unique final converged Cartesian coordinates are missing")
+    match = matches[0]
     rows = []
     for line in match.group(1).splitlines():
         parts = line.split()
@@ -220,36 +256,92 @@ def _validate_geometry_binding(value: bytes, geometry: GeometryRecord) -> None:
         raise GeometryBindingMismatch("optimized geometry contains implausible coordinates")
 
 
-def _extract_frequencies(text: str) -> tuple[float, ...]:
+def _extract_frequencies(text: str, dimension: int) -> tuple[float, ...]:
     marker = re.search(r"VIBRATIONAL FREQUENCIES", text, re.I)
     if marker is None:
         return ()
     tail = text[marker.end() :]
-    values: list[float] = []
-    for line in tail.splitlines():
-        if not line.strip() and values:
-            break
-        match = re.search(r"(?:^|\s)(?:\d+\s*:\s*|\d+\s+)(-?\d+(?:\.\d+)?(?:[Ee][+-]?\d+)?)", line)
-        if match:
-            values.append(float(match.group(1)))
-        elif values and re.search(r"NORMAL|HESSIAN", line, re.I):
-            break
-    return tuple(values)
+    tail = re.split(r"NORMAL MODES|THERMOCHEMISTRY|ORCA TERMINATED", tail, flags=re.I)[0]
+    matches = re.findall(r"^\s*(\d+)\s*:\s*([^\s]+)\s+cm\*\*-1", tail, re.M)
+    if [int(i) for i, _ in matches] != list(range(dimension)):
+        raise RequiredOutputMissing("complete indexed raw 3N frequency table is required")
+    return tuple(_finite_number(value) for _, value in matches)
 
 
-def _parse_hessian(value: bytes, atom_count: int) -> int:
+def _finite_number(token: str) -> float:
+    try:
+        number = float(token.replace("D", "E").replace("d", "e"))
+    except ValueError as error:
+        raise RequiredOutputMissing("invalid Hessian/frequency numeric token") from error
+    if not math.isfinite(number):
+        raise RequiredOutputMissing("nonfinite Hessian/frequency value")
+    return number
+
+
+def _parse_hessian(value: bytes, geometry: GeometryRecord, frequencies: tuple[float, ...]) -> int:
     try:
         text = value.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise RequiredOutputMissing("Hessian bytes are not valid UTF-8") from error
-    if "$hessian" not in text.casefold():
-        raise RequiredOutputMissing("Hessian section is missing")
-    match = re.search(r"\$hessian\s*\n\s*(\d+)", text, re.I)
-    if match is None:
-        raise RequiredOutputMissing("Hessian dimension is missing")
-    dimension = int(match.group(1))
-    if dimension != 3 * atom_count:
-        raise GeometryBindingMismatch("Hessian dimension does not match geometry")
+    sections = {}
+    for match in re.finditer(r"^\s*\$([a-z_]+)[ \t]*\r?\n([^$]*)", text, re.I | re.M):
+        name = match.group(1).lower()
+        if name in sections:
+            raise RequiredOutputMissing("duplicate Hessian section")
+        sections[name] = [line.split() for line in match.group(2).splitlines() if line.strip()]
+    dimension = 3 * len(geometry.atom_symbols)
+    try:
+        matrix = sections["hessian"]
+        if matrix[0] != [str(dimension)]:
+            raise GeometryBindingMismatch("Hessian dimension does not match geometry")
+        entries = {}
+        columns = []
+        for row in matrix[1:]:
+            if all(re.fullmatch(r"\d+", token) for token in row):
+                columns = [int(token) for token in row]
+                if not columns or len(set(columns)) != len(columns):
+                    raise ValueError("invalid matrix columns")
+                continue
+            if len(row) != len(columns) + 1 or not columns:
+                raise ValueError("truncated Hessian matrix row")
+            index = int(row[0])
+            for column, token in zip(columns, row[1:], strict=True):
+                key = (index, column)
+                if key in entries or not 0 <= index < dimension or not 0 <= column < dimension:
+                    raise ValueError("duplicate or invalid Hessian matrix cell")
+                entries[key] = _finite_number(token)
+        if len(entries) != dimension * dimension:
+            raise ValueError("incomplete Hessian matrix")
+        if any(abs(v - entries[j, i]) > 1e-7 for (i, j), v in entries.items()):
+            raise ValueError("Hessian matrix is not symmetric")
+        atoms = sections["atoms"]
+        if (
+            atoms[0] != [str(len(geometry.atom_symbols))]
+            or len(atoms) != len(geometry.atom_symbols) + 1
+        ):
+            raise ValueError("incomplete Hessian atom section")
+        for row, symbol, xyz in zip(
+            atoms[1:], geometry.atom_symbols, geometry.coordinates, strict=True
+        ):
+            if len(row) != 5 or row[0] != symbol:
+                raise GeometryBindingMismatch("Hessian atom order differs from input")
+            if abs(_finite_number(row[1]) - ATOMIC_MASSES[symbol]) > 0.02:
+                raise GeometryBindingMismatch("Hessian atomic mass differs from approved default")
+            if any(
+                abs(_finite_number(v) * BOHR_TO_ANGSTROM - c) > 2e-6
+                for v, c in zip(row[2:], xyz, strict=True)
+            ):
+                raise GeometryBindingMismatch(
+                    "Hessian Bohr coordinates differ from input Angstrom geometry"
+                )
+        modes = sections["vibrational_frequencies"]
+        if modes[0] != [str(dimension)] or len(modes) != dimension + 1:
+            raise ValueError("incomplete Hessian frequencies")
+        for i, (row, expected) in enumerate(zip(modes[1:], frequencies, strict=True)):
+            if len(row) != 2 or int(row[0]) != i or abs(_finite_number(row[1]) - expected) > 0.02:
+                raise ValueError("Hessian frequencies differ from raw stdout modes")
+    except (KeyError, IndexError, ValueError) as error:
+        raise RequiredOutputMissing(f"invalid or incomplete Hessian: {error}") from error
     return dimension
 
 

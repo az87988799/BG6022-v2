@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from orca_agent.domain.hashing import sha256_hex
@@ -30,15 +31,20 @@ def probe_orca_version(path: str | Path, *, timeout_seconds: float = 5.0) -> str
     if timeout_seconds <= 0 or timeout_seconds > 30:
         raise ValueError("ORCA probe timeout must be bounded")
     try:
-        completed = subprocess.run(
-            [str(target)],
-            input=b"",
-            capture_output=True,
-            cwd=str(target.parent),
-            shell=False,
-            timeout=timeout_seconds,
-            check=False,
-        )
+        # ORCA 6.1 prints no banner without an argument, and treats --version
+        # as an input filename. An absent file in a fresh directory yields the
+        # banner and an input-open error without starting any calculation.
+        with tempfile.TemporaryDirectory(prefix="orca-version-probe-") as directory:
+            completed = subprocess.run(
+                [str(target), "missing-version-probe.inp"],
+                input=b"",
+                capture_output=True,
+                cwd=directory,
+                shell=False,
+                timeout=timeout_seconds,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise RuntimeError("ORCA version probe failed") from error
     text = (completed.stdout + b"\n" + completed.stderr).decode("utf-8", errors="replace")
@@ -71,6 +77,10 @@ def runtime_config(
         target = Path(executable).expanduser().resolve()
         digest = executable_sha256(target)
         version = probe_orca_version(target) if probe else orca_version
+        if probe and (version != orca_version or re.fullmatch(r"6\.1\.\d+", version) is None):
+            raise ValueError("probed full ORCA version differs from the requested version")
+        if probe and executable_sha256(target) != digest:
+            raise ValueError("ORCA executable changed during version probing")
         result.update(
             {"executable": str(target), "executable_sha256": digest, "orca_version": version}
         )

@@ -47,7 +47,7 @@ def test_connection_policy_and_fresh_schema(tmp_path) -> None:
                 connection,
                 clock=FrozenClock(datetime(2026, 9, 4, tzinfo=UTC)),
             )
-                == 7
+            == 7
         )
         tables = {
             row[0]

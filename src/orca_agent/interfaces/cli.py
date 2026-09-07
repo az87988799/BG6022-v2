@@ -116,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--limit", "--max-effects", dest="limit", type=int, default=1)
+    worker.add_argument("--run-id", type=RunId)
     worker.add_argument("--drain", action="store_true")
     worker.add_argument("--workflow", choices=("p3", "p4", "p5"), default="p3")
     worker.add_argument("--allow-network", action="store_true")
@@ -179,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--json", action="store_true")
 
     prepare_execution = subparsers.add_parser("prepare-execution")
+    prepare_execution.add_argument("--wall-time-seconds", type=int)
     prepare_execution.add_argument("--source-run-id", type=RunId, required=True)
     prepare_execution.add_argument("--protocol", dest="protocol_id", required=True)
     prepare_execution.add_argument("--run-id", type=RunId)
@@ -237,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                 protocol_id=args.protocol_id,
                 run_id=args.run_id,
                 external_opt_result_id=args.external_opt_result_id,
+                wall_time_seconds=args.wall_time_seconds,
                 command_id=args.command_id,
                 requested_at_utc=service.clock.now_utc(),
             )
@@ -247,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=command.run_id,
                 command_id=command.command_id,
                 external_opt_result_id=command.external_opt_result_id,
+                wall_time_seconds=command.wall_time_seconds,
             )
             return _emit(result.model_dump(mode="json"), result.accepted, args.json)
         if args.operation == "approve" and args.workflow == "p5":
@@ -298,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
             worker = service.create_worker(allow_real_orca=args.allow_real_orca)
             reports = []
             while True:
-                batch = worker.run_once(limit=max(args.limit, 1))
+                batch = worker.run_once(run_id=args.run_id, limit=max(args.limit, 1))
                 reports.extend(asdict(item) for item in batch)
                 if not args.drain or not batch:
                     break
@@ -495,6 +499,7 @@ def main(argv: list[str] | None = None) -> int:
                     run_id=command.run_id,
                     command_id=command.command_id,
                     external_opt_result_id=command.external_opt_result_id,
+                    wall_time_seconds=command.wall_time_seconds,
                 )
                 return _emit(result.model_dump(mode="json"), result.accepted, args.json)
             if isinstance(command, ApproveP5Action):
