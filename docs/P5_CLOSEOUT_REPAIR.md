@@ -9,7 +9,10 @@ is fully green: Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only
 skips; Ubuntu branch coverage 80.31% with the unchanged 80% gate; quality PASS.
 Targeted local suite: 67 passed, including Windows process tests; final backend
 guard replay: 10 passed. Ruff, format, compileall, lock check and wheel/sdist
-build passed. [Separate offline replay and new preview](evidence/p5-closeout/README.md).
+build passed. The final evidence-only PR CI [34119947306](https://github.com/az87988799/BG6022-v2/actions/runs/34119947306)
+is also green: Ubuntu 3.14 526 passed, 2 skipped, 25 warnings; Windows 3.14,
+Ubuntu 3.11 and the 80% branch-coverage gate passed. [Separate offline replay
+and new preview](evidence/p5-closeout/README.md).
 
 ## Parser v4: translation-only Hessian binding
 
@@ -60,18 +63,18 @@ mechanism. Retain those original receipts without blind real reruns.
 ## Real and release gates
 
 The original rejected Freq and incomplete R01/R02 remain historical failures.
-The new Water chain's separately approved Opt and Freq each completed once
+The new Water chain's separately approved Opt, Freq and SP each completed once
 with one physical start. The first Freq collection attempt exposed a byte
 preservation defect while preparing SP; commit `7c68e6a` now validates and
 reuses the current action's frozen geometry artifact bytes. The existing Freq
 receipt was collected after that repair without a relaunch or automatic retry;
 the [Freq packet](evidence/p5-closeout/r01-freq/README.md) retains both the
-raw output and recovery record. CLI approval/reconcile replay did not create a
-duplicate execution. SP remains a separate owner approval gate. Use the same
-verified ORCA 6.1.1, one core / 2048 MB and a 300-second ceiling with no
-automatic retry. Preserve this chain's own Opt/Freq/SP outputs, input/final
-XYZ, Hessian, receipts, budget/identity bindings and recovery/replay
-observations.
+raw output and recovery record. The terminal SP was then approved separately,
+executed once within its 300-second ceiling, collected successfully, and
+recorded in the [SP packet](evidence/p5-closeout/r01-sp/README.md). CLI
+approval/reconcile replay did not create a duplicate execution. Preserve this
+chain's own Opt/Freq/SP outputs, input/final XYZ, Hessian, receipts,
+budget/identity bindings and recovery/replay observations.
 
 After full technical evidence, request Owner acceptance. A single-maintainer
 Owner is sufficient; no new independent-reviewer requirement is imposed. PR

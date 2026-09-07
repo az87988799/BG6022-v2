@@ -1,8 +1,8 @@
 # Water R01 Freq evidence
 
 This packet records the separately approved Freq action of the new Water
-R01/R02 chain. It is not a complete R01/R02 pass: SP remains unapproved and
-unstarted.
+R01/R02 chain. The terminal SP action is preserved in its own packet; this
+packet contains only the Freq action's evidence.
 
 - Run: `run_3e96adc04ed048f2aefee660908eaab2`
 - Execution: `execution_476b19928f774dd69674b613b23bd4d4`
@@ -29,6 +29,6 @@ retry occurred.
 
 Approval and reconcile requests were replayed in fresh CLI processes. The
 original accepted events were returned, physical start count remained 1, and
-no duplicate execution was created. The run now waits for separate owner
-authorization of SP. Scientific assessment remains `not_evaluated`; no
-minimum-energy or scientific claim is made.
+no duplicate execution was created. SP was later separately approved and
+completed once; see [SP evidence](../r01-sp/README.md). Scientific assessment
+remains `not_evaluated`; no minimum-energy or scientific claim is made.

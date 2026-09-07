@@ -1,6 +1,7 @@
 # Closeout evidence (not phase acceptance)
 
-Implementation: `7c68e6a` (parser v4, pending-tree repair and frozen geometry-byte repair).
+Implementation: `880869f` (parser v4, pending-tree repair and frozen geometry-byte repair;
+the final commit also preserves raw Hessian evidence attributes).
 
 `frozen-freq-replay.json` is a **new offline** replay of the unchanged
 `../p5-freq-blocker` files, created by `scripts/replay_p5_frozen_freq.py`.
@@ -10,7 +11,7 @@ raw frequencies. The recorded control receipts still classify as PASS.
 This starts zero ORCA tasks, leaves the old rejected run unchanged, and does
 not constitute a new R01/R02 PASS or a scientific minimum assessment.
 
-## New Water chain — Opt and Freq completed; SP pending approval
+## New Water chain — Opt, Freq and SP completed; Owner acceptance pending
 
 Local state: `E:\BG6022-v2\.tmp\p5-water-closeout`.
 Preview: `water-gate-preview.json` in that state root.
@@ -36,11 +37,21 @@ The Freq action was then separately approved and executed once:
 - [Freq evidence packet](r01-freq/README.md): normal exit, one physical
   start, complete parse, 9x9 Hessian and nine raw frequencies.
 
+The terminal SP action was then separately approved and executed once:
+
+- Action: `action_782d990dee74468da38bbe7cacfe4bc9`.
+- Execution: `execution_b2545f5127a94985886ef48539946834`.
+- [SP evidence packet](r01-sp/README.md): normal exit, one physical start,
+  complete parse, SCF converged, and finite energy `-76.418938721035 Eh`.
+
 The first post-exit collection attempt exposed a geometry-byte preservation
 bug while preparing SP. The minimal repair was committed as `7c68e6a`; the
 existing Freq receipt was collected afterward without a relaunch or automatic
 retry. Both Opt and Freq approval/reconcile commands were replayed idempotently;
 each physical start count remained one and no duplicate execution was created.
-The run now presents a newly bound SP action for separate owner approval.
-Earlier bounded authorizations are not reused for this new action. No merge,
-P5 acceptance or Owner acceptance is inferred.
+The SP action used the exact frozen optimized geometry bytes and had its own
+approval grant. The saved SP approval was replayed in a fresh CLI process and
+returned the original event; the final state has three jobs and three complete
+results with no duplicate physical execution. Earlier bounded authorizations
+were not reused for this action. The technical R01/R02 evidence is complete,
+but no merge, P5 acceptance or Owner acceptance is inferred.

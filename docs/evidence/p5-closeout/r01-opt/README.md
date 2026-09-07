@@ -1,7 +1,8 @@
 # Water R01 Opt evidence
 
-This is the first, separately approved action of the new R01/R02 chain. It is
-not a complete R01/R02 pass: Freq and SP remain unapproved and unstarted.
+This is the first, separately approved action of the new R01/R02 chain. The
+complete three-action chain is recorded in the closeout index; this packet
+contains only the Opt action's evidence.
 
 - Run: `run_3e96adc04ed048f2aefee660908eaab2`
 - Execution: `execution_e91e54c4b2a84d6a809dbc824cf9e8f1`
@@ -22,6 +23,7 @@ replays returned the original accepted event and revision; physical start count
 remained 1, no new execution or downstream job was created, and results did not
 change. This is command idempotency/restart evidence, not a second computation.
 
-The run is now waiting for separate owner authorization of the Freq action. No
-Freq or SP job exists in this packet. Scientific assessment remains
-`not_evaluated`; no minimum-energy or scientific claim is made.
+The Freq and SP actions were separately approved later and are preserved in
+their own packets. No Freq or SP job is represented in this packet. Scientific
+assessment remains `not_evaluated`; no minimum-energy or scientific claim is
+made.
