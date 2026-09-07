@@ -1,7 +1,13 @@
 # c7cd1ea completion review: minimal C1–C3 repair
 
-Status: implemented, verification in progress; **PENDING_OWNER_ACCEPTANCE**.
+Status: C1–C3 implemented and verified; **PENDING_OWNER_ACCEPTANCE**.
 No replacement of shared worker, schema, ticket, compiler or historical migrations.
+
+Repair SHA: `97a8fc2197d8027559f4fb58b66463aded5a91cb` (source repair `8d89f58`).
+[CI 34086229322](https://github.com/az87988799/BG6022-v2/actions/runs/34086229322):
+Windows 517 passed; Ubuntu 3.11/3.14 515 passed, 2 skipped; Ubuntu coverage
+80.16%; quality PASS. Local full suite: 516 passed, 1 permission-related file
+symlink skip, coverage 80.97%. No threshold lowering or current-module exclusion.
 
 ## C1 — bound calculation segment
 
@@ -67,6 +73,9 @@ same absolute frame. It did not run SP or pass R01/R02. Raw Hessian suggests a
 coordinate-frame translation; that is a separate output-contract investigation,
 not silently relaxed as part of C1–C3. No failed computation is auto-retried.
 
-Previously authorized, unused 3-second timeout and 30-second cancellation tests
-may be executed only once each after these checks. R01/R02 remain blocked on the
-separate Freq failure. `P5_ACCEPTANCE.md` records final numbers and evidence.
+Previously authorized 3-second timeout and 30-second cancellation tests were each
+executed exactly once on `97a8fc2` after targeted Windows and corrected import
+boundary checks. Both passed the new control-facts classifier. The old receipt
+still does not qualify. [Raw control packet](evidence/p5-c-controls/README.md).
+R01/R02 remain blocked on the [separate Freq failure](evidence/p5-freq-blocker/README.md).
+`P5_ACCEPTANCE.md` records final numbers and evidence.

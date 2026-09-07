@@ -10,17 +10,17 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Offline full suite | C1–C3 revalidation in progress | Prior c7cd1ea local run: 496 passed, 1 skipped, 80.97%; original CI collected 497 |
+| Offline full suite | PASS at 97a8fc2 | 516 passed, 1 file-symlink privilege skip, 25 warnings; branch coverage 80.97% |
 | Coverage policy | Unchanged 80% threshold | All current `src/orca_agent` modules; historical checkout not double-counted |
 | Windows control | PASS in controlled tests | Non-destructive poll, PID identity, one-shot launch, long job, descendant cancel/timeout, supervisor crash, Job memory/output/workdir limits |
 | Ruff / format / compileall | PASS | Latest source, tests and scripts |
 | Locked dependencies / build | PASS | Locked sync/check; C1–C3 wheel and sdist built |
-| R01 Water Opt→Freq→SP | FAIL / unresolved | Additional Opt parsed successfully; Freq rejected for Hessian coordinate-frame mismatch; SP not launched. No automatic retry |
+| R01 Water Opt→Freq→SP | FAIL / unresolved | Additional Opt parsed successfully; Freq rejected for Hessian coordinate-frame mismatch; SP not launched. [Original evidence](docs/evidence/p5-freq-blocker/README.md); no automatic retry |
 | R02 process restart and command replay | NOT_COMPLETED | Chain did not complete; no successful replay gate inferred |
-| R03 real cancellation | NOT_EXERCISED under C3 / recheck authorized | Old receipt lacks request-time control facts and is no longer counted PASS. One unused 30-second attempt authorized |
-| R04 real timeout | NOT_EXERCISED; unused attempt authorized | First 1-second limit expired before spawn; zero physical starts. Unused attempt ceiling is 3 seconds |
+| R03 real cancellation | PASS at 97a8fc2 | Authorized one-shot 30-second case; identity/liveness/request/stop/tree-empty facts and [raw evidence](docs/evidence/p5-c-controls/README.md). Old receipt is not reused as PASS |
+| R04 real timeout | PASS at 97a8fc2 | Authorized one-shot 3-second case physically started then stopped at deadline; [raw evidence](docs/evidence/p5-c-controls/README.md). Old zero-start attempt remains NOT_EXERCISED |
 | Prior PR / Windows–Ubuntu matrix | PASS at c7cd1ea | [CI 34080330125](https://github.com/az87988799/BG6022-v2/actions/runs/34080330125): Windows 497 passed; Ubuntu 3.11/3.14 495 passed, 2 skipped; Ubuntu branch coverage 80.19%; quality PASS |
-| C1–C3 PR matrix | Pending | Must verify the new repair SHA separately |
+| C1–C3 PR matrix | PASS at 97a8fc2 | [CI 34086229322](https://github.com/az87988799/BG6022-v2/actions/runs/34086229322): Windows 517 passed; Ubuntu 3.11/3.14 515 passed, 2 Windows-only skips; Ubuntu branch coverage 80.16%; quality PASS |
 | Main merge / main CI | NOT_RUN | No automatic merge or P6 start |
 | Owner acceptance | PENDING | Only the owner can accept this phase |
 
@@ -62,3 +62,7 @@ remains fail-closed; no PID-only fallback or broader Linux production claim.
 
 No scientific-PASS, minimum-energy claim, P6 readiness or owner acceptance is
 inferred from implementation/test completion.
+
+Repair source commits: `8d89f582b79add42d8b0236892a95f2a7290ccde` and
+`97a8fc2197d8027559f4fb58b66463aded5a91cb`. Subsequent documentation/evidence
+commits do not alter that tested execution source. PR remains [#6, Draft](https://github.com/az87988799/BG6022-v2/pull/6).

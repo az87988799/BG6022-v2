@@ -1,0 +1,42 @@
+{
+  "schema": "p5-freq-blocker-packet/v1",
+  "implementation_sha": "c7cd1eab7da646f885fbc6bf040f559d974ae6f2",
+  "original_hessian_filename": "input.hess",
+  "files": [
+    {
+      "size_bytes": 32619,
+      "sha256": "7e6ab20a29777cdb756e540952353ac1c3787082810ea9b55b71b97dc6996f11",
+      "path": "evidence.json"
+    },
+    {
+      "size_bytes": 552,
+      "sha256": "36b13ea9479efd9c53922d811fa4f211afda27bcfcd0548552abb30e1587037b",
+      "path": "exit_receipt.json"
+    },
+    {
+      "size_bytes": 365,
+      "sha256": "c1618145f0a4c89b4b154c750ee4cb2122695f133a1e83c27dd2bce4f9fcce79",
+      "path": "geometry.xyz"
+    },
+    {
+      "size_bytes": 5932,
+      "sha256": "de987e2af81d9ac9a2fc0463a23adcbe7d31eb45434e915ffb2300f061696f97",
+      "path": "hessian.txt"
+    },
+    {
+      "size_bytes": 67,
+      "sha256": "a51e07aac33cc89a17495e41ca291c30e9a3ff95cdaf20413b00083e70f271be",
+      "path": "input.inp"
+    },
+    {
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "path": "stderr.err"
+    },
+    {
+      "size_bytes": 64915,
+      "sha256": "3026ee32cf28419b782551625352ea5659fefeb6c706634352cdb550901515ac",
+      "path": "stdout.out"
+    }
+  ]
+}
