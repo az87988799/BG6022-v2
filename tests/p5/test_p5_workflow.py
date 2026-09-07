@@ -38,6 +38,15 @@ class _CorruptingFakeBackend(FakeExecutionBackend):
         return observation
 
 
+class _CrlfOptimizedFakeBackend(FakeExecutionBackend):
+    def start_or_reconcile(self, launch_request):
+        observation = super().start_or_reconcile(launch_request)
+        if launch_request.node.kind is P5NodeKind.OPT:
+            output = self._workdir(str(launch_request.job.execution_id)) / "input.xyz"
+            output.write_bytes(output.read_bytes().replace(b"\n", b"\r\n"))
+        return observation
+
+
 def _source(tmp_path: Path, smiles: str = "O") -> tuple[Path, FrozenClock, RunId]:
     state_root = tmp_path / "state"
     clock = FrozenClock(BASE_TIME)
@@ -335,4 +344,32 @@ def test_downstream_action_binds_the_exact_optimized_xyz_bytes(tmp_path):
         store = ArtifactStore(service.state_root)
         assert store.read(optimized) == store.read(downstream)
         assert after_opt.binding.xyz_bytes_sha256 == downstream.content_hash
+        uow.commit()
+
+
+def test_freq_collection_reuses_frozen_geometry_bytes_for_downstream_action(tmp_path):
+    service, _clock, view = _prepare(tmp_path, "p5.opt_freq_sp.r2scan3c.v1")
+    service.backend = _CrlfOptimizedFakeBackend(service.state_root)
+
+    after_opt = _approve_and_run(service, view)
+    assert after_opt.state.phase.value == "awaiting_execution_approval"
+    assert after_opt.action is not None and after_opt.binding is not None
+    freq_action = after_opt.action
+    freq_binding = after_opt.binding
+
+    after_freq = _approve_and_run(service, after_opt)
+    assert after_freq.state.phase.value == "awaiting_execution_approval"
+    assert len(after_freq.results) == 2
+    assert after_freq.action is not None and after_freq.binding is not None
+    assert after_freq.action.node_id.endswith(":node-3")
+
+    with SQLiteUnitOfWork(service.database_path) as uow:
+        uow.begin()
+        artifacts = ArtifactRecordRepository(uow.connection)
+        freq_geometry = artifacts.get(freq_action.geometry_artifact_id)
+        sp_geometry = artifacts.get(after_freq.action.geometry_artifact_id)
+        assert freq_geometry is not None and sp_geometry is not None
+        store = ArtifactStore(service.state_root)
+        assert store.read(sp_geometry) == store.read(freq_geometry)
+        assert freq_binding.xyz_bytes_sha256 == sp_geometry.content_hash
         uow.commit()

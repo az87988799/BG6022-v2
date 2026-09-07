@@ -1521,6 +1521,20 @@ class P5ApplicationService:
                 )
                 artifact_store = ArtifactStore(self.state_root, clock=self.clock)
                 execution_ref = ExecutionId(observation.execution_id)
+                current_geometry_artifact = ArtifactRecordRepository(uow.connection).get(
+                    action.geometry_artifact_id
+                )
+                if (
+                    current_geometry_artifact is None
+                    or current_geometry_artifact.run_id != run_id
+                    or current_geometry_artifact.artifact_id != binding.geometry_artifact_id
+                ):
+                    raise StateIntegrityError("P5 current geometry artifact is untrusted")
+                current_geometry_bytes = artifact_store.read(current_geometry_artifact)
+                if bytes_sha256(current_geometry_bytes) != binding.xyz_bytes_sha256:
+                    raise GeometryBindingMismatch(
+                        "P5 current geometry artifact does not match the frozen binding"
+                    )
 
                 def archive_output_artifacts(optimized_xyz: bytes | None = None):
                     stdout_ref = artifact_store.put_owned(
@@ -1869,7 +1883,7 @@ class P5ApplicationService:
                         geometry=downstream_geometry,
                         geometry_bytes=parsed.optimized_xyz_bytes
                         if optimized_geometry is not None
-                        else None,
+                        else current_geometry_bytes,
                         upstream_result=result_record,
                         now=now,
                     )
