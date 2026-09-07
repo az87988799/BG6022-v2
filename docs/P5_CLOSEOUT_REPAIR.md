@@ -9,7 +9,7 @@ is fully green: Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only
 skips; Ubuntu branch coverage 80.31% with the unchanged 80% gate; quality PASS.
 Targeted local suite: 67 passed, including Windows process tests; final backend
 guard replay: 10 passed. Ruff, format, compileall, lock check and wheel/sdist
-build passed. The final evidence-only PR CI [34119947306](https://github.com/az87988799/BG6022-v2/actions/runs/34119947306)
+build passed. The final evidence-only PR CI [34122009017](https://github.com/az87988799/BG6022-v2/actions/runs/34122009017)
 is also green: Ubuntu 3.14 526 passed, 2 skipped, 25 warnings; Windows 3.14,
 Ubuntu 3.11 and the 80% branch-coverage gate passed. [Separate offline replay
 and new preview](evidence/p5-closeout/README.md).

@@ -26,7 +26,7 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 | Prior PR / Windows–Ubuntu matrix | PASS at c7cd1ea | [CI 34080330125](https://github.com/az87988799/BG6022-v2/actions/runs/34080330125): Windows 497 passed; Ubuntu 3.11/3.14 495 passed, 2 skipped; Ubuntu branch coverage 80.19%; quality PASS |
 | C1–C3 PR matrix | PASS at 97a8fc2 | [CI 34086229322](https://github.com/az87988799/BG6022-v2/actions/runs/34086229322): Windows 517 passed; Ubuntu 3.11/3.14 515 passed, 2 Windows-only skips; Ubuntu branch coverage 80.16%; quality PASS |
 | Closeout PR matrix | PASS at e634305 | [CI 34100584094](https://github.com/az87988799/BG6022-v2/actions/runs/34100584094): Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only skips; Ubuntu branch coverage 80.31%; quality PASS. No main CI inferred |
-| Final evidence-only PR matrix | PASS at `880869f` | [CI 34119947306](https://github.com/az87988799/BG6022-v2/actions/runs/34119947306): quality, Windows 3.14, Ubuntu 3.11, Ubuntu 3.14 pytest and 80% branch-coverage gate all passed |
+| Final evidence-only PR matrix | PASS at evidence commit `44a9349` | [CI 34122009017](https://github.com/az87988799/BG6022-v2/actions/runs/34122009017): quality, Windows 3.14, Ubuntu 3.11, Ubuntu 3.14 pytest and 80% branch-coverage gate all passed |
 | Main merge / main CI | NOT_RUN | No automatic merge or P6 start |
 | Owner acceptance | PENDING | Only the owner can accept this phase |
 
