@@ -1,6 +1,6 @@
 # P5 Acceptance Record
 
-Status: `OWNER_ACCEPTED` — merge and main CI are explicitly authorized; P6 remains blocked until those release gates pass.
+Status: `PASS` — Owner acceptance recorded, PR #6 merged, and the actual main CI passed; P6 has not started.
 
 Current review baseline: `c7cd1eab7da646f885fbc6bf040f559d974ae6f2`.
 Latest closeout review baseline: `f5991d07f6e25d192a65e3b6bdb705dc1dc6cf22`.
@@ -18,6 +18,7 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 | Ruff / format / compileall | PASS | Latest source, tests and scripts |
 | Locked dependencies / build | PASS | Locked sync/check; C1–C3 wheel and sdist built |
 | Frozen real Freq replay | PASS at e634305 | Parser v4 allows translation only; 9x9 Hessian and 9 raw modes; [separate offline evidence](docs/evidence/p5-closeout/frozen-freq-replay.json). Historical run not rewritten |
+| R01-Freq Hessian evidence tracking | PASS | `docs/evidence/p5-closeout/r01-freq/input.hess` is tracked in the merged tree; 5932 bytes, SHA-256 `de987e2af81d9ac9a2fc0463a23adcbe7d31eb45434e915ffb2300f061696f97`, byte-matched to its manifest |
 | Unconfirmed Windows tree | PASS in targeted regression | Nonempty/query-error Job for cancel/timeout remains pending through runner, backend and service; no downstream result or physical relaunch |
 | R01 Water Opt→Freq→SP | TECHNICAL PASS / OWNER ACCEPTED | New chain Opt, Freq and SP each completed once with physical start count 1 and complete parse; exact optimized geometry bytes were bound to Freq/SP. [Opt evidence](docs/evidence/p5-closeout/r01-opt/README.md), [Freq evidence](docs/evidence/p5-closeout/r01-freq/README.md), [SP evidence](docs/evidence/p5-closeout/r01-sp/README.md), [chain status](docs/evidence/p5-closeout/README.md); no automatic retry |
 | R02 process restart and command replay | TECHNICAL PASS / OWNER ACCEPTED | Opt/Freq approval and reconcile replay plus SP approval replay returned original events; three jobs/results remain, each physical start count is 1, and no duplicate execution was created. [SP replay record](docs/evidence/p5-closeout/r01-sp/command-replay.json) |
@@ -27,7 +28,7 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 | C1–C3 PR matrix | PASS at 97a8fc2 | [CI 34086229322](https://github.com/az87988799/BG6022-v2/actions/runs/34086229322): Windows 517 passed; Ubuntu 3.11/3.14 515 passed, 2 Windows-only skips; Ubuntu branch coverage 80.16%; quality PASS |
 | Closeout PR matrix | PASS at e634305 | [CI 34100584094](https://github.com/az87988799/BG6022-v2/actions/runs/34100584094): Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only skips; Ubuntu branch coverage 80.31%; quality PASS. No main CI inferred |
 | Final evidence-only PR matrix | PASS at evidence commit `44a9349` | [CI 34122009017](https://github.com/az87988799/BG6022-v2/actions/runs/34122009017): quality, Windows 3.14, Ubuntu 3.11, Ubuntu 3.14 pytest and 80% branch-coverage gate all passed |
-| Main merge / main CI | AUTHORIZED / NOT_RUN | Explicit Owner authorization recorded in this task; merge and main CI must still complete before final P5 PASS |
+| Main merge / main CI | PASS | PR #6 merged to `main` as `bd529eaf37437283fb1744657b210c9a224ff130`; actual main push CI [34124888613](https://github.com/az87988799/BG6022-v2/actions/runs/34124888613) passed all four jobs, including the Ubuntu branch-coverage gate |
 | Owner acceptance | ACCEPTED (2026-09-07) | Explicit Owner acceptance and authorization to merge PR #6 and run the actual main CI |
 
 ## Real execution authorization and provenance
@@ -68,19 +69,19 @@ broader Linux production claim is made. All three real results retain
 - [x] Review R01–R04 original evidence and exact executable/budget binding.
 - [x] Confirm all required real gates passed; NOT_EXERCISED is not a pass.
 - [x] Authorize acceptance and authorize PR #6 merge plus actual main CI.
-- [ ] Review main CI after an explicitly authorized merge.
+- [x] Review main CI after the explicitly authorized merge; main CI 34124888613 passed.
 
-Owner acceptance is explicitly recorded in this task. P5 final PASS remains
-gated by the authorized PR #6 merge and successful main CI; no scientific-PASS
-or minimum-energy claim is made, and P6 has not started.
+Owner acceptance is explicitly recorded in this task. P5 final PASS is now
+recorded after PR #6 merged and main CI 34124888613 passed. No
+scientific-PASS or minimum-energy claim is made, and P6 has not started.
 
 Repair source commits: `8d89f582b79add42d8b0236892a95f2a7290ccde`,
 `97a8fc2197d8027559f4fb58b66463aded5a91cb`, `e6343052911e030a6eaf7eb03b68f7cc12ff8870`
 and `7c68e6a9b26d49e825b45db1784360ec366119a0`. Documentation/evidence commits
 are `fd29dadffc267ba0f1b92d2ad6dd0d35bb3d6876` and
-`880869fc5eab9dc4fdb30628f647e846958e3d6d`. The latest repair preserves
+`880869fc5eab9dc4fdb30628f647e846958e3d6d`, `20f80f3` and `158a411`. The latest repair preserves
 the exact frozen geometry artifact bytes when preparing a downstream action;
 the Freq and SP receipts were collected with no relaunch or automatic retry.
 Subsequent documentation/evidence commits do not alter the tested execution
-source. PR [#6](https://github.com/az87988799/BG6022-v2/pull/6) is authorized
-for merge and main-CI verification.
+source. PR [#6](https://github.com/az87988799/BG6022-v2/pull/6) merged to
+`main` as `bd529eaf`; the actual main CI is recorded above.

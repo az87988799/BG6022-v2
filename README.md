@@ -2,13 +2,13 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current phase: V2-P5 (pending Owner acceptance)
+## Current phase: V2-P5 (PASS; merged to main)
 
-P5 local ORCA implementation is under acceptance on `codex/v2-p5-local-orca`;
-the accepted main baseline remains P4 until an authorized merge. See
+P5 local ORCA implementation has been Owner-accepted and merged to `main`;
+the actual post-merge main CI passed. See
 [P5 acceptance](P5_ACCEPTANCE.md) and the [limited closeout repair](docs/P5_CLOSEOUT_REPAIR.md)
-for current verification and remaining real/release gates. P5 is not marked
-complete and P6 has not started. Real execution requires explicit bounded
+for the complete verification record and release evidence. P5 is marked
+complete; P6 has not started. Real execution requires explicit bounded
 approval; offline fixtures and parser replay do not replace real acceptance.
 
 ## V2-P0–P3 foundation
