@@ -51,6 +51,7 @@ orca-artifacts/
 *.gbw
 *.hess
 *.engrad
+!docs/evidence/p5-closeout/r01-freq/input.hess
 
 # IDE and editor-private files
 .idea/
