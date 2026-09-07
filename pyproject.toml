@@ -24,6 +24,9 @@ p5 = [
     "rdkit==2026.3.5",
     "httpx==0.28.1",
 ]
+p6 = [
+    "numpy>=2.4,<3",
+]
 
 [dependency-groups]
 dev = [

@@ -11,11 +11,13 @@ from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.p3 import P3WorkflowState, WorkflowPhase
 from orca_agent.domain.p4 import P4Phase, P4WorkflowState
 from orca_agent.domain.p5 import P5Phase, P5WorkflowState
+from orca_agent.domain.p6 import P6Phase, P6WorkflowState
 
 from .effects import EffectClass
 from .p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
 from .p4_versions import P4_ENGINE_VERSION, P4_POLICY_VERSION, P4_SCHEMA_VERSION
 from .p5_versions import P5_ENGINE_VERSION, P5_POLICY_VERSION, P5_SCHEMA_VERSION
+from .p6_versions import P6_ENGINE_VERSION, P6_POLICY_VERSION, P6_SCHEMA_VERSION
 from .state import KernelState, RunStatus
 
 
@@ -217,13 +219,30 @@ P5_POLICY_RULES = MappingProxyType(
         )
     }
 )
+P6_POLICY_RULES = MappingProxyType(
+    {
+        P6_POLICY_VERSION: (
+            EffectRegistration(
+                effect_type="internal.p6.assess",
+                effect_class=EffectClass.INTERNAL,
+                allowed_statuses=frozenset({RunStatus.READY}),
+            ),
+            EffectRegistration(
+                effect_type="internal.p6.render_report",
+                effect_class=EffectClass.INTERNAL,
+                allowed_statuses=frozenset({RunStatus.READY}),
+            ),
+        )
+    }
+)
 ALL_FIXED_POLICY_RULES = MappingProxyType(
-    {**P2_POLICY_RULES, **P3_POLICY_RULES, **P4_POLICY_RULES, **P5_POLICY_RULES}
+    {**P2_POLICY_RULES, **P3_POLICY_RULES, **P4_POLICY_RULES, **P5_POLICY_RULES, **P6_POLICY_RULES}
 )
 DEFAULT_EFFECT_REGISTRY = EffectRegistry()
 P3_EFFECT_REGISTRY = EffectRegistry(policy_version=3)
 P4_EFFECT_REGISTRY = EffectRegistry(policy_version=P4_POLICY_VERSION)
 P5_EFFECT_REGISTRY = EffectRegistry(policy_version=P5_POLICY_VERSION)
+P6_EFFECT_REGISTRY = EffectRegistry(policy_version=P6_POLICY_VERSION)
 
 
 def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, object]):
@@ -233,7 +252,7 @@ def _registration_for(effect_type: str, registry: EffectRegistry | Mapping[str, 
 
 
 def evaluate_dispatch(
-    state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState,
+    state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState | P6WorkflowState,
     effect: object,
     registry: EffectRegistry | Mapping[str, object] = DEFAULT_EFFECT_REGISTRY,
 ) -> DispatchDecision:
@@ -313,6 +332,17 @@ def evaluate_dispatch(
         }
         if state.phase not in required_phases.get(effect_type, set()):
             return DispatchDecision.BLOCK
+    if isinstance(registry, EffectRegistry) and registry.policy_version == P6_POLICY_VERSION:
+        if not isinstance(state, P6WorkflowState):
+            return DispatchDecision.BLOCK
+        if state.schema_version != P6_SCHEMA_VERSION or state.engine_version != P6_ENGINE_VERSION:
+            return DispatchDecision.BLOCK
+        required_phase = {
+            "internal.p6.assess": P6Phase.ASSESSMENT_PENDING,
+            "internal.p6.render_report": P6Phase.REPORT_PENDING,
+        }.get(effect_type)
+        if state.phase is not required_phase:
+            return DispatchDecision.BLOCK
     effective_status = (
         RunStatus(state.status.value) if isinstance(state, P3WorkflowState) else state.status
     )
@@ -341,5 +371,7 @@ __all__ = [
     "P4_EFFECT_REGISTRY",
     "P5_POLICY_RULES",
     "P5_EFFECT_REGISTRY",
+    "P6_POLICY_RULES",
+    "P6_EFFECT_REGISTRY",
     "evaluate_dispatch",
 ]

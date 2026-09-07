@@ -15,7 +15,7 @@ from orca_agent.application.errors import (
     StorageBusyError,
     StorageError,
 )
-from orca_agent.domain.ids import EffectId, WorkerId, new_id
+from orca_agent.domain.ids import EffectId, RunId, WorkerId, new_id
 from orca_agent.orchestration.codes import HandlerErrorCode
 from orca_agent.orchestration.dispatch_policy import (
     DEFAULT_EFFECT_REGISTRY,
@@ -90,7 +90,12 @@ class OutboxWorker:
         self.completion_service_factory = completion_service_factory
         self.readiness_check = readiness_check
 
-    def run_once(self, *, limit: int = 1) -> tuple[DeliveryReport, ...]:
+    def run_once(
+        self,
+        *,
+        limit: int = 1,
+        run_id: RunId | None = None,
+    ) -> tuple[DeliveryReport, ...]:
         """Deliver at most ``limit`` effects without invoking a handler pre-authorization."""
 
         if type(limit) is not int or limit < 1:
@@ -115,6 +120,7 @@ class OutboxWorker:
                         now=now,
                         lease_duration=self.lease_duration,
                         limit=1,
+                        run_id=run_id,
                         registry=self.registry,
                         readiness_check=self.readiness_check,
                     )

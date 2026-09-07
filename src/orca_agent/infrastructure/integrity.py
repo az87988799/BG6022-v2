@@ -13,10 +13,12 @@ from orca_agent.domain.ids import EffectId, EventId, InterruptId
 from orca_agent.domain.p3 import P3WorkflowState
 from orca_agent.domain.p4 import P4WorkflowState
 from orca_agent.domain.p5 import P5WorkflowState
+from orca_agent.domain.p6 import P6WorkflowState
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent, reduce_p3_event
 from orca_agent.orchestration.p4_kernel import P4KernelEvent, reduce_p4_event
-from orca_agent.orchestration.p5_kernel import reduce_p5_event
+from orca_agent.orchestration.p5_kernel import P5KernelEvent, reduce_p5_event
+from orca_agent.orchestration.p6_kernel import P6KernelEvent, reduce_p6_event
 from orca_agent.orchestration.schema1_read import reduce_event
 from orca_agent.orchestration.state import RunStatus
 from orca_agent.orchestration.transitions import InterruptProjectionOperation, InterruptStatus
@@ -52,7 +54,7 @@ class _ExpectedInterrupt:
 def verify_run_projections(
     *,
     snapshot: RunSnapshot,
-    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent],
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent],
     interrupts: Sequence[InterruptRecord],
     outbox: Sequence[OutboxRecord],
 ) -> None:
@@ -64,6 +66,8 @@ def verify_run_projections(
         reducer = reduce_p4_event
     elif isinstance(snapshot.state, P5WorkflowState):
         reducer = reduce_p5_event
+    elif isinstance(snapshot.state, P6WorkflowState):
+        reducer = reduce_p6_event
     else:
         reducer = reduce_event
     _verify_interrupts(snapshot=snapshot, events=events, actual=interrupts, reducer=reducer)
@@ -73,7 +77,7 @@ def verify_run_projections(
 def _verify_interrupts(
     *,
     snapshot: RunSnapshot,
-    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent],
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent],
     actual: Sequence[InterruptRecord],
     reducer: object,
 ) -> None:
@@ -121,7 +125,9 @@ def _verify_interrupts(
 
 
 def _expected_interrupts(
-    events: Sequence[KernelEvent | P3KernelEvent], *, reducer: object
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent],
+    *,
+    reducer: object,
 ) -> dict[InterruptId, _ExpectedInterrupt]:
     expected: dict[InterruptId, _ExpectedInterrupt] = {}
     state: object | None = None
@@ -177,7 +183,7 @@ def _expected_interrupts(
 def _verify_outbox(
     *,
     snapshot: RunSnapshot,
-    events: Sequence[KernelEvent],
+    events: Sequence[KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent],
     actual: Sequence[OutboxRecord],
     reducer: object,
 ) -> None:
