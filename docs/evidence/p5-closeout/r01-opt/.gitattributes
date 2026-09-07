@@ -1,0 +1,6 @@
+# Preserve original ORCA evidence bytes across Windows/Ubuntu checkouts.
+*.out binary
+*.err binary
+*.xyz -text
+*.inp -text
+*.json -text

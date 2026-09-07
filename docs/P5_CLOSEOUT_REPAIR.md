@@ -60,10 +60,11 @@ mechanism. Retain those original receipts without blind real reruns.
 ## Real and release gates
 
 The original rejected Freq and incomplete R01/R02 remain historical failures.
-Offline replay is not a completed real chain. A **new** Water R01/R02 needs new
-per-action owner approval: Opt, then exit/restart CLI, replay without duplicate
-Opt start, approve Freq and SP separately. Use the same verified ORCA 6.1.1,
-one core / 2048 MB, 900/1800/300-second ceilings, at most three new tasks and no
+The new Water chain's separately approved Opt completed once with one physical
+start, and CLI approval/reconcile replay did not create a duplicate or
+downstream job. Offline replay is not a completed real chain. The next step
+needs separate owner approval for Freq, then separate approval for SP. Use the
+same verified ORCA 6.1.1, one core / 2048 MB, 1800/300-second ceilings and no
 automatic retry. Preserve this chain's own Opt/Freq/SP outputs, input/final XYZ,
 Hessian, receipts, budget/identity bindings and recovery/replay observations.
 
