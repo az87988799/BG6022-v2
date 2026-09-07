@@ -1,0 +1,36 @@
+{
+  "schema": "p5-r01-freq-command-replay/v1",
+  "run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "approval": {
+    "request": "approve-request.json",
+    "response": {
+      "accepted": true,
+      "code": "action_approved",
+      "revision": 9,
+      "event_id": "event_7e4393061e2c494084319e6ec8c72bd4",
+      "phase": "dispatch_pending"
+    },
+    "replayed_in_fresh_cli_process": true
+  },
+  "reconcile": {
+    "request": "reconcile-request.json",
+    "response": {
+      "accepted": true,
+      "code": "reconciled",
+      "revision": 13,
+      "event_id": "event_b6679a7042fe4f5dafff3f7b4efa59f9",
+      "phase": "running"
+    },
+    "replayed_in_fresh_cli_process": true
+  },
+  "post_replay_state": {
+    "revision": 18,
+    "phase": "awaiting_execution_approval",
+    "current_node": "p5.opt_freq_sp.r2scan3c.v1:node-3",
+    "completed_result_count": 2,
+    "freq_physical_start_count": 1,
+    "sp_execution_id": null
+  },
+  "scientific_assessment": "not_evaluated",
+  "claim_status": "not_generated"
+}

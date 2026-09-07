@@ -1,6 +1,6 @@
 # Closeout evidence (not phase acceptance)
 
-Implementation: `e634305` (parser v4 and pending-tree repair).
+Implementation: `7c68e6a` (parser v4, pending-tree repair and frozen geometry-byte repair).
 
 `frozen-freq-replay.json` is a **new offline** replay of the unchanged
 `../p5-freq-blocker` files, created by `scripts/replay_p5_frozen_freq.py`.
@@ -10,7 +10,7 @@ raw frequencies. The recorded control receipts still classify as PASS.
 This starts zero ORCA tasks, leaves the old rejected run unchanged, and does
 not constitute a new R01/R02 PASS or a scientific minimum assessment.
 
-## New Water chain — Opt completed; Freq/SP pending approval
+## New Water chain — Opt and Freq completed; SP pending approval
 
 Local state: `E:\BG6022-v2\.tmp\p5-water-closeout`.
 Preview: `water-gate-preview.json` in that state root.
@@ -29,8 +29,18 @@ The initial Opt was approved and executed once:
 - [Opt evidence packet](r01-opt/README.md): normal exit, one physical start,
   complete parse, and no downstream job.
 
-The CLI was restarted after execution; approval and reconcile commands replayed
-idempotently, physical start count remained one, and no downstream job was
-created. The run now presents a newly bound Freq action for separate owner
-approval. SP also requires separate approval. Earlier bounded authorizations are
-not reused for this new chain. No merge or Owner acceptance is inferred.
+The Freq action was then separately approved and executed once:
+
+- Action: `action_9039ee63cd9647ba840b1534b26b4c20`.
+- Execution: `execution_476b19928f774dd69674b613b23bd4d4`.
+- [Freq evidence packet](r01-freq/README.md): normal exit, one physical
+  start, complete parse, 9x9 Hessian and nine raw frequencies.
+
+The first post-exit collection attempt exposed a geometry-byte preservation
+bug while preparing SP. The minimal repair was committed as `7c68e6a`; the
+existing Freq receipt was collected afterward without a relaunch or automatic
+retry. Both Opt and Freq approval/reconcile commands were replayed idempotently;
+each physical start count remained one and no duplicate execution was created.
+The run now presents a newly bound SP action for separate owner approval.
+Earlier bounded authorizations are not reused for this new action. No merge,
+P5 acceptance or Owner acceptance is inferred.

@@ -19,8 +19,8 @@ Earlier B1–B5 and T01–T30 mapping: [P5 audit repair](docs/P5_AUDIT_REPAIR.md
 | Locked dependencies / build | PASS | Locked sync/check; C1–C3 wheel and sdist built |
 | Frozen real Freq replay | PASS at e634305 | Parser v4 allows translation only; 9x9 Hessian and 9 raw modes; [separate offline evidence](docs/evidence/p5-closeout/frozen-freq-replay.json). Historical run not rewritten |
 | Unconfirmed Windows tree | PASS in targeted regression | Nonempty/query-error Job for cancel/timeout remains pending through runner, backend and service; no downstream result or physical relaunch |
-| R01 Water Opt→Freq→SP | IN_PROGRESS / Opt PASS only | New chain Opt completed once and parsed completely; Freq/SP remain unapproved and unstarted. [Opt evidence](docs/evidence/p5-closeout/r01-opt/README.md), [chain status](docs/evidence/p5-closeout/README.md); no automatic retry |
-| R02 process restart and command replay | PARTIAL | Approval/reconcile replay returned original events, physical Opt start remained 1 and no downstream job was created; full chain replay remains incomplete |
+| R01 Water Opt→Freq→SP | IN_PROGRESS / Opt+Freq PASS; SP pending | New chain Opt and separately approved Freq each completed once and parsed completely; SP remains unapproved and unstarted. [Opt evidence](docs/evidence/p5-closeout/r01-opt/README.md), [Freq evidence](docs/evidence/p5-closeout/r01-freq/README.md), [chain status](docs/evidence/p5-closeout/README.md); no automatic retry |
+| R02 process restart and command replay | PARTIAL | Approval/reconcile replay returned original events for the approved Opt and Freq actions; each physical start count remained 1 and no duplicate execution was created. Full chain replay remains incomplete because SP is pending approval |
 | R03 real cancellation | PASS at 97a8fc2 | Authorized one-shot 30-second case; identity/liveness/request/stop/tree-empty facts and [raw evidence](docs/evidence/p5-c-controls/README.md). Old receipt is not reused as PASS |
 | R04 real timeout | PASS at 97a8fc2 | Authorized one-shot 3-second case physically started then stopped at deadline; [raw evidence](docs/evidence/p5-c-controls/README.md). Old zero-start attempt remains NOT_EXERCISED |
 | Prior PR / Windows–Ubuntu matrix | PASS at c7cd1ea | [CI 34080330125](https://github.com/az87988799/BG6022-v2/actions/runs/34080330125): Windows 497 passed; Ubuntu 3.11/3.14 495 passed, 2 skipped; Ubuntu branch coverage 80.19%; quality PASS |
@@ -53,7 +53,9 @@ Synthetic fixtures and controlled Python processes are **not** real ORCA
 acceptance evidence. P5 exports retain `scientific_assessment=not_evaluated`
 and `claim_status=not_generated`.
 
-The reviewer's isolated Linux/Python 3.12 run had four process-identity failures;
+The closeout Water chain has completed the separately authorized Opt and Freq
+actions only. SP remains a separately gated action and has not started. The
+reviewer's isolated Linux/Python 3.12 run had four process-identity failures;
 these were not GitHub CI failures. Missing/denied/disappearing `/proc` identity
 remains fail-closed; no PID-only fallback or broader Linux production claim.
 
@@ -68,6 +70,10 @@ remains fail-closed; no PID-only fallback or broader Linux production claim.
 No scientific-PASS, minimum-energy claim, P6 readiness or owner acceptance is
 inferred from implementation/test completion.
 
-Repair source commits: `8d89f582b79add42d8b0236892a95f2a7290ccde` and
-`97a8fc2197d8027559f4fb58b66463aded5a91cb`. Subsequent documentation/evidence
-commits do not alter that tested execution source. PR remains [#6, Draft](https://github.com/az87988799/BG6022-v2/pull/6).
+Repair source commits: `8d89f582b79add42d8b0236892a95f2a7290ccde`,
+`97a8fc2197d8027559f4fb58b66463aded5a91cb`, `e6343052911e030a6eaf7eb03b68f7cc12ff8870`
+and `7c68e6a9b26d49e825b45db1784360ec366119a0`. The latest repair preserves
+the exact frozen geometry artifact bytes when preparing a downstream action;
+the Freq receipt was collected after this repair without a relaunch. Subsequent
+documentation/evidence commits do not alter the tested execution source. PR
+remains [#6, Draft](https://github.com/az87988799/BG6022-v2/pull/6).

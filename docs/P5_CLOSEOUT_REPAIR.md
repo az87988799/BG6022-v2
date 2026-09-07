@@ -3,7 +3,7 @@
 Status: limited code repair verified; **PENDING_OWNER_ACCEPTANCE**.
 This does not authorize merge, P5 PASS or starting P6.
 
-Implementation: `e6343052911e030a6eaf7eb03b68f7cc12ff8870`.
+Implementation: `7c68e6a9b26d49e825b45db1784360ec366119a0`.
 [CI 34100584094](https://github.com/az87988799/BG6022-v2/actions/runs/34100584094)
 is fully green: Windows 527 passed; Ubuntu 3.11/3.14 525 passed, 2 Windows-only
 skips; Ubuntu branch coverage 80.31% with the unchanged 80% gate; quality PASS.
@@ -60,13 +60,18 @@ mechanism. Retain those original receipts without blind real reruns.
 ## Real and release gates
 
 The original rejected Freq and incomplete R01/R02 remain historical failures.
-The new Water chain's separately approved Opt completed once with one physical
-start, and CLI approval/reconcile replay did not create a duplicate or
-downstream job. Offline replay is not a completed real chain. The next step
-needs separate owner approval for Freq, then separate approval for SP. Use the
-same verified ORCA 6.1.1, one core / 2048 MB, 1800/300-second ceilings and no
-automatic retry. Preserve this chain's own Opt/Freq/SP outputs, input/final XYZ,
-Hessian, receipts, budget/identity bindings and recovery/replay observations.
+The new Water chain's separately approved Opt and Freq each completed once
+with one physical start. The first Freq collection attempt exposed a byte
+preservation defect while preparing SP; commit `7c68e6a` now validates and
+reuses the current action's frozen geometry artifact bytes. The existing Freq
+receipt was collected after that repair without a relaunch or automatic retry;
+the [Freq packet](evidence/p5-closeout/r01-freq/README.md) retains both the
+raw output and recovery record. CLI approval/reconcile replay did not create a
+duplicate execution. SP remains a separate owner approval gate. Use the same
+verified ORCA 6.1.1, one core / 2048 MB and a 300-second ceiling with no
+automatic retry. Preserve this chain's own Opt/Freq/SP outputs, input/final
+XYZ, Hessian, receipts, budget/identity bindings and recovery/replay
+observations.
 
 After full technical evidence, request Owner acceptance. A single-maintainer
 Owner is sufficient; no new independent-reviewer requirement is imposed. PR
