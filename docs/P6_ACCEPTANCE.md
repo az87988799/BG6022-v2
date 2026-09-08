@@ -5,8 +5,8 @@ Status: **REVIEW REPAIRS — REAL ACCEPTANCE GATES PENDING — NOT ACCEPTED**
 This supersedes the premature `IMPLEMENTED — OWNER ACCEPTANCE PENDING`
 description at `a2a31a4`. Technical closure is not merely an Owner signature.
 P5 remains accepted; its records, parser v4 and historical fixture hashes are
-not migrated. P6 is on `codex/v2-p6-science-report`. No merge, P6 PASS or P7
-start is authorized by this record.
+not migrated. P6 is on `codex/v2-p6-science-report`, latest repair head
+`01eb170`. No merge, P6 PASS or P7 start is authorized by this record.
 
 ## Review repairs
 
@@ -41,6 +41,10 @@ start is authorized by this record.
 - C: a trusted terminal local-ORCA receipt is reconciled before the new-start
   memory gate; an untrusted receipt or prior launch evidence remains an
   unknown state and cannot trigger a second start.
+- C2 closeout: ordinary P5 worker collection now read-only verifies the
+  execution work-directory `input.inp` and `geometry.xyz` against the current
+  binding before publishing a result. Missing or changed files reject the
+  collection, preserve the work directory and cannot relaunch the job.
 - The historical Ethanol four-core protocol
   `p5.opt_freq_sp.r2scan3c.4core.v2` remains immutable at 4096 MB. The current
   default is the registered
@@ -147,9 +151,9 @@ implementation checks are not a claim that every acceptance scenario was run.
 | R6-01 Water | New packet independently verified; zero new P5 starts |
 | R6-02 Ethanol real chain | Three serial real ORCA nodes completed once each under the 4-core/2048 MB default; no automatic rerun |
 | R6-03 restart | Water fresh-process record; unchanged source fingerprint |
-| R6-04 negative checks | Review tests; final results below |
+| R6-04 negative checks | Review tests plus ordinary worker frozen-file mutation/missing regressions; final results below |
 | R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol packet independently verified in a disposable restored ledger |
-| Corresponding SHA CI | [Run 34221187405](https://github.com/az87988799/BG6022-v2/actions/runs/34221187405) for `833eb827b6d9a74a8e7edc7334b7ef0aded9b719`; quality, Ubuntu 3.11/3.14 and Windows 3.14 all passed |
+| Corresponding SHA CI | [Run 34245017986](https://github.com/az87988799/BG6022-v2/actions/runs/34245017986) for repair commit `01eb170f446f9dbdcb8d616eaaa7ddff5a12c3cf`; quality, Ubuntu 3.11/3.14 and Windows 3.14 all passed |
 | Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
 The prior four-core 4096 MB preview was inspected and left unstarted because
@@ -163,18 +167,29 @@ remains historical evidence only.
 The historical [single-core preview](evidence/p6-ethanol-preview.json) remains
 unchanged and is not reused as four-core authorization.
 
+## Final closeout repair — `01eb170`
+
+- The Ethanol preview entry now uses `P5_DEFAULT_PROTOCOL` and derives the
+  protocol, node budgets, parallel rank request and memory preflight from the
+  same verified v3 object. Its entry regression asserts v3 / 4 cores / 2048 MB
+  / `%maxcore 384` and a 2048 MB preflight requirement.
+- Ordinary worker collection regressions cover intact files, each frozen file
+  changed or missing, repeated worker delivery and zero additional starts.
+- No Water or Ethanol calculation was rerun. Both archived packets were
+  independently reverified after the repair with all five closure checks true.
+
 ## Final verification log
 
-- Current Windows P5/P6 regression suite: **191 passed, 1 skipped**. A first
-  complete run had one load-sensitive failure in
-  P5 `test_deadline_stops_the_controlled_process_tree`; its isolated rerun and
-  the complete rerun passed. The controlled test uses child processes as a
-  lifecycle surrogate; it is not an MPI or quantum-chemistry calculation.
+- Current Windows P5/P6 regression suite: **197 passed, 1 skipped**. The
+  suite includes the ordinary worker frozen-file collection cases and the
+  current-default Ethanol preview entry regression. The controlled test uses
+  child processes as a lifecycle surrogate; it is not an MPI or
+  quantum-chemistry calculation.
 - Four-core resource, compiler, runtime-hash, fixed-budget, worker handoff,
   low-memory receipt replay and controlled Windows child/Job Object coverage
   are included in that current P5/P6 result.
-- Ruff check, format check (**223 files**), compileall and diff whitespace all
-  passed. GitHub Actions run [34221187405](https://github.com/az87988799/BG6022-v2/actions/runs/34221187405)
+- Ruff check, format check (**192 files**), compileall and diff whitespace all
+  passed. GitHub Actions run [34245017986](https://github.com/az87988799/BG6022-v2/actions/runs/34245017986)
   passed quality, package build, Ubuntu 3.11/3.14 tests and the Ubuntu 3.14
   branch-coverage gate, plus Windows 3.14 tests.
 - Clean detached checkout at `1b1246d2fd2b378f79c09fe901ff39d13d0a4cde`:
@@ -182,7 +197,8 @@ unchanged and is not reused as four-core authorization.
   the working tree was clean, and archived Water verification returned true
   for manifests, typed records, raw artifacts, reports and restored ledger.
   No original `--state-root` was provided.
-- [PR #7](https://github.com/az87988799/BG6022-v2/pull/7) triggers the existing
-  Ubuntu 3.11/3.14, Windows 3.14 and quality jobs. Its actual head-SHA checks
-  are authoritative; a pending or failed check is not a passing gate.
+- [PR #7](https://github.com/az87988799/BG6022-v2/pull/7) at repair head
+  `01eb170` triggers the existing Ubuntu 3.11/3.14, Windows 3.14 and quality
+  jobs. Its actual head-SHA checks are authoritative; a pending or failed
+  check is not a passing gate.
   Old main CI and the old 565/80.45% figure are not repair evidence.
