@@ -7,12 +7,21 @@ from pathlib import Path
 import pytest
 
 from orca_agent.application.p5_service import P5ApplicationService
-from orca_agent.domain.p5 import P5NodeKind
+from orca_agent.domain.p5 import (
+    P5_DEFAULT_MAXCORE_MB,
+    P5_DEFAULT_NPROCS,
+    P5_DEFAULT_TOTAL_MEMORY_MB,
+    P5Budget,
+    P5NodeKind,
+)
 from orca_agent.execution.local_backend import FakeExecutionBackend
 from orca_agent.execution.orca_compiler import compile_orca_input
 from orca_agent.execution.orca_config import execution_environment, runtime_config
 from orca_agent.planning.p5_protocols import (
+    P5_DEFAULT_PROTOCOL,
+    P5_OPT_FREQ_SP,
     P5_OPT_FREQ_SP_4CORE,
+    P5_OPT_FREQ_SP_4CORE_2048,
     P5_PROTOCOLS_BY_ID,
 )
 from orca_agent.planning.registry import METHOD_R2SCAN3C
@@ -29,6 +38,38 @@ OLD_PROTOCOL_HASHES = {
         "785b6ff424c6c19af23646a9bf4ea8e83e4301ee1dce3c57efef1173c6c300e8"
     ),
 }
+
+
+def test_default_budget_is_four_core_2048mb_and_registered_protocol_is_v3():
+    assert (P5_DEFAULT_NPROCS, P5_DEFAULT_TOTAL_MEMORY_MB, P5_DEFAULT_MAXCORE_MB) == (
+        4,
+        2048,
+        384,
+    )
+    assert P5Budget.defaults_for(P5NodeKind.OPT).model_dump(mode="json") == {
+        "nprocs": 4,
+        "total_memory_mb": 2048,
+        "maxcore_mb": 384,
+        "wall_time_seconds": 900,
+        "run_wall_time_seconds": 3600,
+        "stdout_stderr_limit_bytes": 64 * 1024 * 1024,
+        "workdir_limit_bytes": 512 * 1024 * 1024,
+    }
+    assert P5_DEFAULT_PROTOCOL is P5_OPT_FREQ_SP_4CORE_2048
+    assert P5_DEFAULT_PROTOCOL.protocol_id == "p5.opt_freq_sp.r2scan3c.4core.v3"
+    assert P5_DEFAULT_PROTOCOL.version == "3"
+    assert P5_DEFAULT_PROTOCOL.protocol_hash == (
+        "734393597e09398b0436dcde78152f1a102d209144bdb53764c831c8b7c5dc37"
+    )
+    assert P5_DEFAULT_PROTOCOL.content["resource_profile"] == {
+        "nprocs": 4,
+        "total_memory_mb": 2048,
+        "maxcore_mb": 384,
+        "parallel": True,
+        "implicit_threads": 1,
+        "run_wall_time_seconds": 3600,
+        "wall_time_seconds": {"opt": 900, "freq": 1800, "sp": 300},
+    }
 
 
 class _CapturingFakeBackend(FakeExecutionBackend):
@@ -117,6 +158,25 @@ def test_four_core_plan_compiler_and_runtime_binding_are_consistent(tmp_path):
         "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
         "NUMEXPR_NUM_THREADS": "1",
+    }
+
+
+def test_compiler_uses_four_core_default_when_budget_and_profile_are_omitted(tmp_path):
+    _service, _clock, view = _prepare(tmp_path, P5_OPT_FREQ_SP.protocol_id)
+    node = view.plan.nodes[0]
+    compiled = compile_orca_input(
+        node,
+        METHOD_R2SCAN3C,
+        view.geometry[0],
+        None,
+        None,
+    )
+    assert b"%maxcore 384" in compiled.input_bytes
+    assert b"%pal nprocs 4 end" in compiled.input_bytes
+    assert compiled.feature_profile == {
+        "parallel": True,
+        "nprocs": 4,
+        "implicit_threads": 1,
     }
 
 

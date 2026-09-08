@@ -1,0 +1,12 @@
+{
+  "command_id": "command_5974ef9057fd4a138e5aa47d4cfc239e",
+  "schema_version": 4,
+  "engine_version": "p5-local-orca-v1",
+  "command_type": "p5.create_execution",
+  "run_id": "run_31b945eddf7e4cfdb823daba41c1e38e",
+  "requested_at_utc": "2026-09-08T14:42:24.839366Z",
+  "wall_time_seconds": null,
+  "source_run_id": "run_c8b55f6b8dc64ba7b81f7105f50ea021",
+  "protocol_id": "p5.opt_freq_sp.r2scan3c.4core.v3",
+  "external_opt_result_id": null
+}

@@ -41,12 +41,13 @@ start is authorized by this record.
 - C: a trusted terminal local-ORCA receipt is reconciled before the new-start
   memory gate; an untrusted receipt or prior launch evidence remains an
   unknown state and cannot trigger a second start.
-- The single active Ethanol four-core protocol is
-  `p5.opt_freq_sp.r2scan3c.4core.v2`. It keeps the historical single-core
-  protocol hashes unchanged and binds four ORCA processes, 4096 MB total
-  memory, `%maxcore 768`, fixed one-thread environment variables, and the
-  existing supervisor/Job Object. The retired `.4core.v1` registration is not
-  an active execution entry point.
+- The historical Ethanol four-core protocol
+  `p5.opt_freq_sp.r2scan3c.4core.v2` remains immutable at 4096 MB. The current
+  default is the registered
+  `p5.opt_freq_sp.r2scan3c.4core.v3`: four ORCA processes, 2048 MB total
+  memory, `%maxcore 384`, fixed one-thread environment variables, and the
+  existing supervisor/Job Object. Historical single-core protocol hashes and
+  the v2 four-core binding remain unchanged.
 
 ## Actual Water material — zero new ORCA calculations
 
@@ -68,6 +69,36 @@ Reproduce without the original database:
 
 ```powershell
 python scripts/verify_p6_evidence.py --mode archived_packet --run-id run_963622492d6c4e2fa3756367c6fd6a9a --evidence-root docs/evidence/p6-water/packet
+```
+
+## Actual Ethanol material — three new ORCA calculations
+
+- Default envelope: 4 cores / 2048 MB total / `%maxcore 384`; Opt/Freq/SP
+  ceilings are 900/1800/300 seconds, with one serial task at a time and no
+  automatic rerun.
+- P5 source: `run_31b945eddf7e4cfdb823daba41c1e38e`, protocol
+  `p5.opt_freq_sp.r2scan3c.4core.v3`.
+- Physical executions: Opt
+  `execution_2b3949e6f369407a9b609d1ca780c512`, Freq
+  `execution_c6f78f12a2514cf7b9fb28b2875d90ba`, SP
+  `execution_1aa416175feb4effbb31c83b3ff03bdd`; each started exactly once,
+  for three starts total. Final P5 state is complete with three complete,
+  normally terminated ORCA results.
+- Startup memory checks were 2861 MB, 2854 MB and 2818 MB respectively; all
+  exceeded the 2048 MB gate. The first Opt Job Object recorded a 2147483648
+  byte memory cap.
+- New P6: `run_215f4cad3ad442a7a0e6fc182d8a851e`; it was assessed without a
+  reference assessment. The report has 25 qualified claims, 0 comparisons,
+  and minimum status `supported_within_policy`.
+- [Report](evidence/p6-ethanol-4core-2048mb/packet/report.md),
+  [JSON](evidence/p6-ethanol-4core-2048mb/packet/report.json),
+  [packet manifest](evidence/p6-ethanol-4core-2048mb/packet/packet_manifest.json),
+  [fresh-process evidence](evidence/p6-ethanol-4core-2048mb/restart-evidence.json).
+- Independent archive verification passed all manifest, ledger, typed-record,
+  artifact-file and report checks:
+
+```powershell
+python scripts/verify_p6_evidence.py --mode archived_packet --run-id run_215f4cad3ad442a7a0e6fc182d8a851e --evidence-root docs/evidence/p6-ethanol-4core-2048mb/packet
 ```
 
 ## Original P6-plan-v1 test mapping
@@ -114,34 +145,28 @@ implementation checks are not a claim that every acceptance scenario was run.
 | Gate | Status |
 |---|---|
 | R6-01 Water | New packet independently verified; zero new P5 starts |
-| R6-02 Ethanol real chain | **NOT RUN**; replacement four-core preview passed fresh 4096 MB memory and MPI preflight, but no node has been approved or started |
+| R6-02 Ethanol real chain | Three serial real ORCA nodes completed once each under the 4-core/2048 MB default; no automatic rerun |
 | R6-03 restart | Water fresh-process record; unchanged source fingerprint |
 | R6-04 negative checks | Review tests; final results below |
-| R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol four-core archive absent |
+| R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol packet independently verified in a disposable restored ledger |
 | Corresponding SHA CI | [Run 34221187405](https://github.com/az87988799/BG6022-v2/actions/runs/34221187405) for `833eb827b6d9a74a8e7edc7334b7ef0aded9b719`; quality, Ubuntu 3.11/3.14 and Windows 3.14 all passed |
 | Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
-The prior four-core previews were inspected and cancelled because they used the
-retired budget; both had no job or execution. The replacement [Ethanol
-preview](evidence/p6-ethanol-4core-4096mb-preview.json) uses one deterministic
-local `CCO` neutral singlet, gas-phase r2SCAN-3c, ORCA 6.1.1, 4 cores, 4096 MB
-total memory, `%maxcore 768`, and a fixed one-thread environment. Its run is
-`run_4f5a953aba92448bbccc70ee66ca728b`; preview hash is
-`b7af08f341ae21215cf9c5a82cb519ab148632348db2b10897ba796b95726d38`.
-Opt/Freq/SP limits are 900/1800/300 seconds, total 3000 seconds, with at most
-one concurrent ORCA task and three physical starts. The fresh preflight
-observed 4234 MB available physical memory and passed the 4096 MB gate; the
-MPI rank smoke passed with MS-MPI 10.1.12498.18 and 31 ORCA MPI modules. The
-P5 protocol run budget remains 3600 seconds metadata. Preview generation did
-not approve or start a calculation (`new_orca_calculation_starts=0`).
+The prior four-core 4096 MB preview was inspected and left unstarted because
+the requested default had changed. The completed [Ethanol packet](evidence/p6-ethanol-4core-2048mb/packet/packet_manifest.json)
+uses one deterministic local `CCO` neutral singlet, gas-phase r2SCAN-3c,
+ORCA 6.1.1, four cores, 2048 MB total memory, `%maxcore 384`, and the fixed
+one-thread environment. It records three serial physical starts and no
+automatic rerun. The old [4096 MB preview](evidence/p6-ethanol-4core-4096mb-preview.json)
+remains historical evidence only.
 
 The historical [single-core preview](evidence/p6-ethanol-preview.json) remains
 unchanged and is not reused as four-core authorization.
 
 ## Final verification log
 
-- Current Windows P5/P6 regression suite: **186 passed, 1 skipped** in the
-  second complete run. A first complete run had one load-sensitive failure in
+- Current Windows P5/P6 regression suite: **191 passed, 1 skipped**. A first
+  complete run had one load-sensitive failure in
   P5 `test_deadline_stops_the_controlled_process_tree`; its isolated rerun and
   the complete rerun passed. The controlled test uses child processes as a
   lifecycle surrogate; it is not an MPI or quantum-chemistry calculation.

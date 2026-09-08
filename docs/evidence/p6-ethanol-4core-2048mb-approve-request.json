@@ -1,0 +1,15 @@
+{
+  "command_id": "command_3a997c8414014380a58ea74dc4eb8110",
+  "schema_version": 4,
+  "engine_version": "p5-local-orca-v1",
+  "command_type": "p5.approve_action",
+  "run_id": "run_31b945eddf7e4cfdb823daba41c1e38e",
+  "requested_at_utc": "2026-09-08T14:42:57.963426Z",
+  "conversation_id": "conversation_c5781005bca64defa20326c689cac0de",
+  "action_id": "action_62cdde07d81f4ba3a817db80633cb14b",
+  "action_hash": "d92571cc6c88ef829013dde215f91285824ff1023cee21e8678730867fc0e8cf",
+  "binding_hash": "ae80a17fcb29e3032b5d769256faa1f33beebdc1b2dcc152732c74423fd35265",
+  "envelope_hash": "5bf4e6e6fa297e816ee7b84fabd7ed9cd2b3f400364a37754b9025dc3b5d61a0",
+  "budget_hash": "f2f48d18b7dac6b4fca9c69486a31d792daa998cfeaea0c8361e691f9ccc9079",
+  "expected_revision": 2
+}
