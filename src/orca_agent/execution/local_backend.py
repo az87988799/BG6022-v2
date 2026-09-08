@@ -88,6 +88,24 @@ class _BackendBase:
         return directory
 
     @staticmethod
+    def _verify_frozen_files(directory: Path, *, input_bytes: bytes, geometry_bytes: bytes) -> None:
+        for name, expected, label in (
+            ("input.inp", input_bytes, "input"),
+            ("geometry.xyz", geometry_bytes, "geometry"),
+        ):
+            path = directory / name
+            try:
+                if path.is_symlink() or not path.is_file():
+                    raise FileNotFoundError(path)
+                actual = path.read_bytes()
+            except OSError as error:
+                raise ResourceLimitExceeded(
+                    f"frozen {label} file is missing or unreadable"
+                ) from error
+            if actual != expected:
+                raise ResourceLimitExceeded(f"frozen {label} bytes were changed")
+
+    @staticmethod
     def _read_receipt(
         directory: Path, *, execution_id: str | None = None
     ) -> dict[str, object] | None:
@@ -395,6 +413,11 @@ class LocalOrcaBackend(_BackendBase):
         if directory is not None:
             receipt_path = directory / "exit_receipt.json"
             if receipt_path.exists():
+                self._verify_frozen_files(
+                    directory,
+                    input_bytes=launch_request.input_bytes,
+                    geometry_bytes=launch_request.geometry_bytes,
+                )
                 receipt = self._read_receipt(directory, execution_id=execution_id)
                 if receipt is None:
                     raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
@@ -431,6 +454,11 @@ class LocalOrcaBackend(_BackendBase):
         directory = self._materialize(launch_request)
         receipt_path = directory / "exit_receipt.json"
         if receipt_path.exists():
+            self._verify_frozen_files(
+                directory,
+                input_bytes=launch_request.input_bytes,
+                geometry_bytes=launch_request.geometry_bytes,
+            )
             receipt = self._read_receipt(directory, execution_id=execution_id)
             if receipt is None:
                 raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
