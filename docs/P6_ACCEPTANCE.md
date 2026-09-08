@@ -1,12 +1,15 @@
 # V2-P6 review repair and acceptance record
 
-Status: **REVIEW REPAIRS — REAL ACCEPTANCE GATES PENDING — NOT ACCEPTED**
+Status: **P6 ACCEPTED BY OWNER — MERGE AUTHORIZED**
+
+Owner acceptance: **Accepted on 2026-09-09 (Asia/Hong_Kong).**
 
 This supersedes the premature `IMPLEMENTED — OWNER ACCEPTANCE PENDING`
 description at `a2a31a4`. Technical closure is not merely an Owner signature.
 P5 remains accepted; its records, parser v4 and historical fixture hashes are
-not migrated. P6 is on `codex/v2-p6-science-report`, latest repair head
-`01eb170`. No merge, P6 PASS or P7 start is authorized by this record.
+not migrated. P6 is on `codex/v2-p6-science-report`, latest acceptance head
+`a410e7f`. Owner acceptance authorizes the P6 merge; P7 start is not authorized
+by this record.
 
 ## Review repairs
 
@@ -154,7 +157,7 @@ implementation checks are not a claim that every acceptance scenario was run.
 | R6-04 negative checks | Review tests plus ordinary worker frozen-file mutation/missing regressions; final results below |
 | R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol packet independently verified in a disposable restored ledger |
 | Corresponding SHA CI | [Run 34245017986](https://github.com/az87988799/BG6022-v2/actions/runs/34245017986) for repair commit `01eb170f446f9dbdcb8d616eaaa7ddff5a12c3cf`; quality, Ubuntu 3.11/3.14 and Windows 3.14 all passed |
-| Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
+| Owner acceptance/merge/main CI | Owner accepted 2026-09-09; merge authorized; post-merge `main` CI pending |
 
 The prior four-core 4096 MB preview was inspected and left unstarted because
 the requested default had changed. The completed [Ethanol packet](evidence/p6-ethanol-4core-2048mb/packet/packet_manifest.json)
