@@ -1086,6 +1086,9 @@ class P5ApplicationService:
                 )
         artifact_store = ArtifactStore(self.state_root, clock=self.clock)
         action_geometry_bytes = geometry.xyz_bytes() if geometry_bytes is None else geometry_bytes
+        protocol = get_p5_protocol(execution_plan.protocol_id)
+        if not protocol.budget_is_registered(node.budget, node.kind):
+            raise StateIntegrityError("P5 node budget does not match its registered protocol")
         geometry_artifact = artifact_store.put_owned(
             connection=uow.connection,
             run_id=run_id,
@@ -1101,7 +1104,7 @@ class P5ApplicationService:
             self._method_profile(),
             geometry,
             node.budget,
-            {"parallel": False, "implicit_threads": 1},
+            protocol.feature_profile(),
             geometry_bytes=action_geometry_bytes,
         )
         action_id = new_id(ActionId)
@@ -1119,6 +1122,9 @@ class P5ApplicationService:
             orca_version=self.orca_version,
             profile_hash=compiled.feature_profile_hash,
             probe=self.backend_kind == "local_orca",
+            nprocs=node.budget.nprocs,
+            implicit_threads=protocol.implicit_threads,
+            parallel=protocol.parallel,
         )
         binding_values = {
             "record_id": str(new_id(WorkflowRecordId)),
@@ -2087,6 +2093,7 @@ class P5Worker:
         candidates = [run_id] if run_id is not None else self._pending_runs()
         for candidate in candidates[:limit]:
             try:
+                self.service._restore_execution_runtime(candidate)
                 view = self.service.inspect(candidate)
                 state = view.state
                 if state.phase is P5Phase.AWAITING_EXECUTION_APPROVAL:
@@ -2245,6 +2252,26 @@ class P5Worker:
                     raise StateIntegrityError("P5 action artifacts are missing")
                 geometry_bytes = artifacts.read(input_record)
                 input_bytes = artifacts.read(input_bytes_record)
+                node = next(item for item in plan.nodes if item.node_id == action.node_id)
+                protocol = get_p5_protocol(plan.protocol_id)
+                if not protocol.budget_is_registered(node.budget, node.kind):
+                    raise StateIntegrityError(
+                        "P5 node budget does not match its registered protocol"
+                    )
+                runtime = runtime_config(
+                    state_root=self.service.state_root,
+                    executable=self.service.orca_executable,
+                    orca_version=self.service.orca_version,
+                    profile_hash=binding.feature_profile_hash,
+                    probe=False,
+                    nprocs=node.budget.nprocs,
+                    implicit_threads=protocol.implicit_threads,
+                    parallel=protocol.parallel,
+                )
+                if runtime["runtime_config_hash"] != binding.runtime_config_hash:
+                    raise StateIntegrityError(
+                        "P5 runtime configuration does not match its trusted binding"
+                    )
                 job = LocalJobRepository(uow.connection).get_by_action(action.action_id)
                 if job is None:
                     execution_id = new_id(ExecutionId)
@@ -2298,13 +2325,14 @@ class P5Worker:
                 state_root=self.service.state_root,
                 job=job,
                 binding=binding,
-                node=next(item for item in plan.nodes if item.node_id == action.node_id),
+                node=node,
                 input_bytes=input_bytes,
                 geometry_bytes=geometry_bytes,
                 executable=self.service.orca_executable,
                 allow_real=self.allow_real_orca,
                 requested_at_utc=self.service.clock.now_utc(),
                 permit=permit,
+                runtime_config=runtime,
             )
             observation = self.service.backend.start_or_reconcile(request)
             if observation.status is P5JobStatus.NEEDS_RECONCILIATION:

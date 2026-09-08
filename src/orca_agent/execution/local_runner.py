@@ -24,6 +24,7 @@ from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 
 from .launch_ticket import consume_ticket
+from .orca_config import execution_environment, runtime_config
 from .output_contract import INPUT_NAME
 from .windows_job import WindowsJobObject, host_identity, process_start_marker
 from .work_paths import execution_directory
@@ -78,6 +79,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 or binding.executable_sha256 != hashlib.sha256(executable.read_bytes()).hexdigest()
             ):
                 raise ValueError("launch executable hash does not match the trusted binding")
+            runtime = _runtime_for_ticket(root, spec, binding)
             uow.commit()
         input_name = str(spec["input"])
         if input_name != INPUT_NAME:
@@ -171,6 +173,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
     output_limit = binding.budget.stdout_stderr_limit_bytes
     workdir_limit = binding.budget.workdir_limit_bytes
     try:
+        child_environment = execution_environment(runtime)
         if os.name == "nt":
             job = WindowsJobObject(memory_limit_bytes=binding.budget.total_memory_mb * 1024 * 1024)
             process = subprocess.Popen(
@@ -182,6 +185,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 shell=False,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | 0x4,
                 close_fds=True,
+                env=child_environment,
             )
             try:
                 job.assign_pid(process.pid)
@@ -208,6 +212,7 @@ def run_supervisor(state_root: str | Path, execution_id: str) -> int:
                 shell=False,
                 start_new_session=True,
                 close_fds=True,
+                env=child_environment,
             )
         start_marker = process_start_marker(process.pid)
         (directory / "orca.pid").write_text(f"{process.pid}\n", encoding="ascii")
@@ -340,8 +345,33 @@ def _validate_launch_ticket(root: Path, spec: dict[str, object], execution_id: s
             raise ValueError("launch geometry bytes hash does not match the binding")
         if binding.executable_sha256 is None:
             raise ValueError("launch executable hash is missing")
+        _runtime_for_ticket(root, spec, binding)
         uow.commit()
         return job
+
+
+def _runtime_for_ticket(root: Path, spec: dict[str, object], binding: P5ExecutionBinding):
+    executable = Path(str(spec["executable"])).resolve()
+    expected = runtime_config(
+        state_root=root,
+        executable=executable,
+        orca_version=binding.orca_version,
+        profile_hash=binding.feature_profile_hash,
+        probe=False,
+        nprocs=binding.budget.nprocs,
+        implicit_threads=1,
+        parallel=binding.budget.nprocs > 1,
+    )
+    if expected["runtime_config_hash"] != binding.runtime_config_hash:
+        raise ValueError("trusted binding runtime hash is invalid")
+    supplied = spec.get("runtime_config")
+    if supplied is None:
+        if binding.budget.nprocs > 1:
+            raise ValueError("multi-process launch is missing its runtime configuration")
+        return expected
+    if supplied != expected:
+        raise ValueError("launch runtime configuration does not match the trusted binding")
+    return expected
 
 
 def _cancel_pending(root: Path, directory: Path, execution_id: str) -> bool:

@@ -2,14 +2,55 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 
 from orca_agent.domain.hashing import sha256_hex
+
+_THREAD_ENVIRONMENT = {
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+}
+
+
+def available_physical_memory_mb() -> int | None:
+    """Return current physical memory available to the host, when measurable."""
+
+    if os.name == "nt":
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = _MemoryStatusEx()
+        status.dwLength = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullAvailPhys // (1024 * 1024))
+        return None
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // 1024
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def executable_sha256(path: str | Path) -> str:
@@ -65,14 +106,30 @@ def runtime_config(
     orca_version: str | None,
     profile_hash: str,
     probe: bool = False,
+    nprocs: int = 1,
+    implicit_threads: int = 1,
+    parallel: bool = False,
 ) -> dict[str, object]:
+    if type(nprocs) is not int or nprocs < 1:
+        raise ValueError("runtime nprocs must be a positive integer")
+    if type(implicit_threads) is not int or implicit_threads != 1:
+        raise ValueError("runtime implicit threads must be exactly one")
+    if type(parallel) is not bool or (nprocs > 1 and not parallel):
+        raise ValueError("multi-process runtime requires parallel mode")
     result: dict[str, object] = {
         "platform": os.name,
         "state_root": str(Path(state_root).resolve()),
         "profile_hash": profile_hash,
-        "nprocs": 1,
-        "implicit_threads": 1,
+        "nprocs": nprocs,
+        "implicit_threads": implicit_threads,
     }
+    if nprocs > 1 or parallel:
+        result.update(
+            {
+                "parallel": parallel,
+                "thread_environment": dict(_THREAD_ENVIRONMENT),
+            }
+        )
     if executable is not None:
         target = Path(executable).expanduser().resolve()
         digest = executable_sha256(target)
@@ -88,6 +145,50 @@ def runtime_config(
         result.update({"executable": None, "executable_sha256": None, "orca_version": None})
     result["runtime_config_hash"] = sha256_hex(result)
     return result
+
+
+def validate_runtime_config(
+    value: Mapping[str, object], *, expected_nprocs: int, expected_parallel: bool
+) -> dict[str, object]:
+    """Validate the immutable runtime envelope used by a trusted launch ticket."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("runtime config must be an object")
+    config = dict(value)
+    if config.get("nprocs") != expected_nprocs:
+        raise ValueError("runtime nprocs does not match the trusted budget")
+    if config.get("implicit_threads") != 1:
+        raise ValueError("runtime implicit threads must be exactly one")
+    has_parallel_fields = "parallel" in config or "thread_environment" in config
+    if expected_nprocs > 1 or expected_parallel:
+        if config.get("parallel") is not expected_parallel:
+            raise ValueError("runtime parallel mode does not match the trusted profile")
+        if config.get("thread_environment") != _THREAD_ENVIRONMENT:
+            raise ValueError("runtime thread environment is not the fixed one-thread profile")
+    elif has_parallel_fields:
+        raise ValueError("single-process runtime contains unexpected parallel fields")
+    supplied_hash = config.get("runtime_config_hash")
+    body = {key: item for key, item in config.items() if key != "runtime_config_hash"}
+    if supplied_hash != sha256_hex(body):
+        raise ValueError("runtime config hash does not match its content")
+    return config
+
+
+def execution_environment(value: Mapping[str, object]) -> dict[str, str]:
+    """Return the child environment, applying only the registered thread controls."""
+
+    config = validate_runtime_config(
+        value,
+        expected_nprocs=int(value.get("nprocs", 0)),
+        expected_parallel=bool(value.get("parallel", False)),
+    )
+    environment = os.environ.copy()
+    thread_environment = config.get("thread_environment")
+    if thread_environment is not None:
+        if not isinstance(thread_environment, Mapping):
+            raise ValueError("runtime thread environment must be an object")
+        environment.update({str(key): str(item) for key, item in thread_environment.items()})
+    return environment
 
 
 def doctor(
@@ -140,4 +241,12 @@ def doctor(
     return checks
 
 
-__all__ = ["doctor", "executable_sha256", "probe_orca_version", "runtime_config"]
+__all__ = [
+    "available_physical_memory_mb",
+    "doctor",
+    "executable_sha256",
+    "execution_environment",
+    "probe_orca_version",
+    "runtime_config",
+    "validate_runtime_config",
+]

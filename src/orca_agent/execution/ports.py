@@ -28,6 +28,7 @@ class LaunchRequest:
     allow_real: bool
     requested_at_utc: datetime
     permit: object | None = None
+    runtime_config: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

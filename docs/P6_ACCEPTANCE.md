@@ -35,6 +35,10 @@ start is authorized by this record.
   New complete-mode Water/Ethanol test backends preserve historical fixtures.
   Cancellation without any archived result/receipt is deliberately rejected as
   an incomplete source, not presented as verified diagnostics.
+- Ethanol-4core-v1 is a newly registered `p5.opt_freq_sp.r2scan3c.4core.v1`
+  protocol. It keeps the historical single-core protocol hashes unchanged and
+  binds four ORCA processes, 8192 MB total memory, `%maxcore 1536`, fixed
+  one-thread environment variables, and the existing supervisor/Job Object.
 
 ## Actual Water material — zero new ORCA calculations
 
@@ -101,25 +105,35 @@ implementation checks are not a claim that every acceptance scenario was run.
 | Gate | Status |
 |---|---|
 | R6-01 Water | New packet independently verified; zero new P5 starts |
-| R6-02 Ethanol real chain | **NOT RUN**; bounded preview prepared; explicit approval required |
+| R6-02 Ethanol real chain | **NOT RUN**; four-core bounded preview prepared; current memory preflight is 5240 MB < 8192 MB, so startup is blocked until the host is suitable or the owner explicitly changes the fixed plan |
 | R6-03 restart | Water fresh-process record; unchanged source fingerprint |
 | R6-04 negative checks | Review tests; final results below |
-| R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol archive absent |
+| R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol four-core archive absent |
 | Corresponding SHA CI | [PR #7 checks](https://github.com/az87988799/BG6022-v2/pull/7/checks); actual head SHA must pass |
 | Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
-Ethanol [preview](evidence/p6-ethanol-preview.json): one deterministic local
-`CCO` neutral singlet, gas-phase r2SCAN-3c, ORCA 6.1.1, 1 core, 2048 MB,
-at most three calculations, Opt/Freq/SP limits 900/1800/300 seconds,
-total 3000 seconds, no automatic retry or method/threshold adjustment.
-The existing protocol records a broader 3600-second run budget; requested
-acceptance authorization is the stricter 3000-second ceiling. No execution
-approval or calculation was submitted during preview preparation.
+Ethanol [four-core preview](evidence/p6-ethanol-4core-preview-v2.json): one
+deterministic local `CCO` neutral singlet, gas-phase r2SCAN-3c, ORCA 6.1.1,
+4 cores, 8192 MB total memory, `%maxcore 1536`, and a fixed one-thread
+environment. Opt/Freq/SP limits are 900/1800/300 seconds, total 3000 seconds,
+with at most one concurrent ORCA task and three physical starts. The existing
+P5 protocol run budget remains 3600 seconds metadata; it does not expand the
+node ceiling. The preview records `mpiexec` 10.1.12498.18 and 31 ORCA MPI
+modules, but its measured available physical memory was 5240 MB, below the
+required 8192 MB. No execution approval or calculation was submitted, and no
+budget was silently changed.
+
+The historical [single-core preview](evidence/p6-ethanol-preview.json) remains
+unchanged and is not reused as four-core authorization.
 
 ## Final verification log
 
 - P6 suite after the transaction/source/archive repairs: **56 passed**.
   Two additional semantic/version regressions were then added and tested.
+- Four-core resource, compiler, runtime-hash, fixed-budget, worker handoff and
+  controlled Windows child/Job Object tests: **9 passed**. The controlled test
+  uses four child processes as a lifecycle surrogate; it is not an MPI or
+  quantum-chemistry calculation.
 - Full Windows coverage run: **582 passed, 1 failed, 1 skipped, 31 warnings**;
   branch coverage **80.98%**, exceeding the unchanged 80% threshold.
   The failure was P5 `test_deadline_stops_the_controlled_process_tree`:

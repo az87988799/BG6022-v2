@@ -25,6 +25,11 @@ from orca_agent.domain.p5 import (
 
 from .control_evidence import control_gate_status
 from .launch_ticket import consume_ticket, permit_fields
+from .orca_config import (
+    available_physical_memory_mb,
+    runtime_config,
+    validate_runtime_config,
+)
 from .orca_parser import ATOMIC_MASSES
 from .output_contract import BOHR_TO_ANGSTROM, HESSIAN_NAME, OPTIMIZED_XYZ_NAME
 from .ports import (
@@ -354,6 +359,37 @@ class LocalOrcaBackend(_BackendBase):
         actual_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
         if launch_request.binding.executable_sha256 != actual_hash:
             raise ExecutableVersionMismatch("ORCA executable hash changed after approval")
+        expected_runtime = runtime_config(
+            state_root=self.state_root,
+            executable=executable,
+            orca_version=orca_version,
+            profile_hash=launch_request.binding.feature_profile_hash,
+            probe=False,
+            nprocs=launch_request.node.budget.nprocs,
+            implicit_threads=1,
+            parallel=launch_request.node.budget.nprocs > 1,
+        )
+        supplied_runtime = launch_request.runtime_config or expected_runtime
+        try:
+            supplied_runtime = validate_runtime_config(
+                supplied_runtime,
+                expected_nprocs=launch_request.node.budget.nprocs,
+                expected_parallel=launch_request.node.budget.nprocs > 1,
+            )
+        except (TypeError, ValueError) as error:
+            raise LaunchStateUnknown("local ORCA runtime configuration is invalid") from error
+        if supplied_runtime != expected_runtime:
+            raise LaunchStateUnknown("local ORCA runtime configuration does not match its binding")
+        if supplied_runtime["runtime_config_hash"] != launch_request.binding.runtime_config_hash:
+            raise LaunchStateUnknown("local ORCA runtime hash does not match its binding")
+        if launch_request.node.budget.nprocs > 1 and os.name == "nt":
+            available_mb = available_physical_memory_mb()
+            required_mb = launch_request.node.budget.total_memory_mb
+            if available_mb is None or available_mb < required_mb:
+                raise ResourceLimitExceeded(
+                    "four-core ORCA launch requires "
+                    f"{required_mb} MB available physical memory; observed {available_mb} MB"
+                )
         directory = self._materialize(launch_request)
         receipt = self._read_receipt(directory, execution_id=str(launch_request.job.execution_id))
         if receipt is not None:
@@ -383,6 +419,7 @@ class LocalOrcaBackend(_BackendBase):
             "xyz_bytes_sha256": launch_request.binding.xyz_bytes_sha256,
             "host_identity": host_identity(),
             "permit": permit_fields(launch_request.permit),
+            "runtime_config": supplied_runtime,
         }
         self._write_atomic(
             directory / "launch.json", json.dumps(launch_spec, sort_keys=True).encode("utf-8")

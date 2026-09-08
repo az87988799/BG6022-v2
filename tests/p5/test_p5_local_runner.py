@@ -25,6 +25,7 @@ def _controlled_run(
     wall_time_seconds=None,
     before_launch=None,
     expected_outcome="starting",
+    protocol_id="p5.sp_initial.r2scan3c.v1",
 ):
     from orca_agent.application import p5_service
     from orca_agent.execution import orca_config
@@ -63,7 +64,7 @@ def _controlled_run(
     )
     prepared = service.prepare_execution(
         source_run_id=source,
-        protocol_id="p5.sp_initial.r2scan3c.v1",
+        protocol_id=protocol_id,
         wall_time_seconds=wall_time_seconds,
     )
     assert prepared.accepted, prepared
