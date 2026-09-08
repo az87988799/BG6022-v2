@@ -26,6 +26,7 @@ from orca_agent.application.p5_errors import (
     GeometryBindingMismatch,
     Interrupted,
     LaunchStateUnknown,
+    ResourceLimitExceeded,
     SourceIntegrityError,
     TimedOut,
 )
@@ -74,7 +75,11 @@ from orca_agent.domain.p5 import (
     P5WorkflowState,
     bytes_sha256,
 )
-from orca_agent.execution.local_backend import FakeExecutionBackend, LocalOrcaBackend
+from orca_agent.execution.local_backend import (
+    FakeExecutionBackend,
+    LocalOrcaBackend,
+    verify_frozen_file_hashes,
+)
 from orca_agent.execution.orca_compiler import compile_orca_input
 from orca_agent.execution.orca_config import runtime_config
 from orca_agent.execution.orca_parser import parse_orca_output
@@ -83,6 +88,7 @@ from orca_agent.execution.ports import (
     LaunchRequest,
 )
 from orca_agent.execution.windows_job import host_identity
+from orca_agent.execution.work_paths import execution_directory
 from orca_agent.identity.geometry import (
     generate_initial_geometry,
     parse_xyz_bytes,
@@ -1541,6 +1547,19 @@ class P5ApplicationService:
                     raise GeometryBindingMismatch(
                         "P5 current geometry artifact does not match the frozen binding"
                     )
+                try:
+                    work_directory = execution_directory(
+                        self.state_root, observation.execution_id, create=False
+                    )
+                except (OSError, ValueError) as error:
+                    raise ResourceLimitExceeded(
+                        "P5 frozen execution directory is missing or untrusted"
+                    ) from error
+                verify_frozen_file_hashes(
+                    work_directory,
+                    input_sha256=binding.input_sha256,
+                    geometry_sha256=binding.xyz_bytes_sha256,
+                )
 
                 def archive_output_artifacts(optimized_xyz: bytes | None = None):
                     stdout_ref = artifact_store.put_owned(

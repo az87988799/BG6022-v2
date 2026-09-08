@@ -16,7 +16,7 @@ from verify_p5_real_orca import cli
 from orca_agent.domain.canonical import canonical_json_bytes
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.execution.orca_config import available_physical_memory_mb, runtime_config
-from orca_agent.planning.p5_protocols import P5_OPT_FREQ_SP_4CORE
+from orca_agent.planning.p5_protocols import P5_DEFAULT_PROTOCOL
 
 
 def _available_memory_mb() -> int | None:
@@ -33,7 +33,9 @@ def _memory_preflight(required_mb: int) -> dict[str, object]:
     }
 
 
-def _parallel_preflight(executable: Path) -> dict[str, object]:
+def _parallel_preflight(executable: Path, *, requested_ranks: int = 4) -> dict[str, object]:
+    if type(requested_ranks) is not int or requested_ranks < 1:
+        raise ValueError("requested MPI ranks must be a positive integer")
     modules = sorted(path.name for path in executable.parent.glob("*_mpi.exe"))
     mpi_path = shutil.which("mpiexec")
     result: dict[str, object] = {
@@ -45,7 +47,7 @@ def _parallel_preflight(executable: Path) -> dict[str, object]:
         "orca_mpi_module_count": len(modules),
         "orca_mpi_modules": modules,
         "rank_smoke": {
-            "requested_ranks": 4,
+            "requested_ranks": requested_ranks,
             "returncode": None,
             "observed_ranks": [],
             "observed_sizes": [],
@@ -81,7 +83,7 @@ def _parallel_preflight(executable: Path) -> dict[str, object]:
                         [
                             mpi_path,
                             "-n",
-                            "4",
+                            str(requested_ranks),
                             sys.executable,
                             "-c",
                             rank_code,
@@ -97,11 +99,15 @@ def _parallel_preflight(executable: Path) -> dict[str, object]:
                     ranks = sorted(int(pair[0]) for pair in observed if len(pair) == 2)
                     sizes = sorted({int(pair[1]) for pair in observed if len(pair) == 2})
                     result["rank_smoke"] = {
-                        "requested_ranks": 4,
+                        "requested_ranks": requested_ranks,
                         "returncode": smoke.returncode,
                         "observed_ranks": ranks,
                         "observed_sizes": sizes,
-                        "ready": (smoke.returncode == 0 and ranks == [0, 1, 2, 3] and sizes == [4]),
+                        "ready": (
+                            smoke.returncode == 0
+                            and ranks == list(range(requested_ranks))
+                            and sizes == [requested_ranks]
+                        ),
                     }
                 except (OSError, ValueError, subprocess.TimeoutExpired):
                     pass
@@ -162,13 +168,14 @@ def main():
         "decision": "accept",
     }
     cli(root, "confirm-identity", *[part for k, v in values.items() for part in ("--" + k, v)])
+    protocol = P5_DEFAULT_PROTOCOL
     created = cli(
         root,
         "prepare-execution",
         "--source-run-id",
         source["run_id"],
         "--protocol",
-        P5_OPT_FREQ_SP_4CORE.protocol_id,
+        protocol.protocol_id,
         "--backend",
         "local_orca",
         "--orca-executable",
@@ -182,9 +189,10 @@ def main():
     expected_kinds = ["opt", "freq", "sp"]
     if [node["kind"] for node in nodes] != expected_kinds:
         raise ValueError("Ethanol four-core preview has an unexpected node sequence")
+    if view["plan"]["protocol_id"] != protocol.protocol_id:
+        raise ValueError("Ethanol preview protocol differs from the current default protocol")
     expected_budgets = [
-        P5_OPT_FREQ_SP_4CORE.budget_for(kind).model_dump(mode="json")
-        for kind in P5_OPT_FREQ_SP_4CORE.nodes
+        protocol.budget_for(kind).model_dump(mode="json") for kind in protocol.nodes
     ]
     actual_budgets = [node["budget"] for node in nodes]
     if actual_budgets != expected_budgets:
@@ -198,12 +206,14 @@ def main():
         profile_hash=view["binding"]["feature_profile_hash"],
         nprocs=nodes[0]["budget"]["nprocs"],
         implicit_threads=1,
-        parallel=P5_OPT_FREQ_SP_4CORE.parallel,
+        parallel=protocol.parallel,
     )
     if runtime["runtime_config_hash"] != view["binding"]["runtime_config_hash"]:
         raise ValueError("four-core preview runtime hash differs from its binding")
     memory = _memory_preflight(nodes[0]["budget"]["total_memory_mb"])
-    parallel = _parallel_preflight(args.orca_executable.resolve())
+    parallel = _parallel_preflight(
+        args.orca_executable.resolve(), requested_ranks=nodes[0]["budget"]["nprocs"]
+    )
     preview = {
         "status": "AWAITING_EXPLICIT_BOUNDED_APPROVAL",
         "state_root": str(root),

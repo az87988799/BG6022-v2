@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,119 @@ def test_default_budget_is_four_core_2048mb_and_registered_protocol_is_v3():
         "run_wall_time_seconds": 3600,
         "wall_time_seconds": {"opt": 900, "freq": 1800, "sp": 300},
     }
+
+
+def test_ethanol_preview_entry_uses_current_default_protocol(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "scripts"))
+    from scripts import prepare_p6_ethanol_preview as preview_script
+
+    protocol = P5_DEFAULT_PROTOCOL
+    root = tmp_path / "preview-root"
+    executable = tmp_path / "orca.exe"
+    executable.write_bytes(b"controlled orca executable")
+    output = tmp_path / "preview.json"
+    nodes = [
+        {
+            "kind": kind.value,
+            "budget": protocol.budget_for(kind).model_dump(mode="json"),
+        }
+        for kind in protocol.nodes
+    ]
+    profile_hash = "a" * 64
+    runtime = runtime_config(
+        state_root=root,
+        executable=executable,
+        orca_version="6.1.1",
+        profile_hash=profile_hash,
+        nprocs=nodes[0]["budget"]["nprocs"],
+        implicit_threads=1,
+        parallel=True,
+    )
+    source = {
+        "run_id": "run_source",
+        "conversation_id": "conversation_source",
+        "revision": 1,
+        "interrupt": {"interrupt_id": "interrupt_source"},
+        "query": {"query_id": "query_source", "query_hash": "q" * 64},
+        "candidate_bundle": {
+            "record_id": "bundle_source",
+            "bundle_hash": "b" * 64,
+            "candidate_set_hash": "s" * 64,
+            "candidates": [{"candidate_id": "candidate_source", "candidate_hash": "c" * 64}],
+        },
+    }
+    p5_view = {
+        "state": {"phase": "awaiting_execution_approval"},
+        "plan": {"protocol_id": protocol.protocol_id, "nodes": nodes},
+        "action": {"action_hash": "h" * 64},
+        "binding": {
+            "budget": nodes[0]["budget"],
+            "feature_profile_hash": profile_hash,
+            "runtime_config_hash": runtime["runtime_config_hash"],
+        },
+    }
+    calls = []
+
+    def fake_cli(_root, *args):
+        calls.append(args)
+        command = args[0]
+        if command == "doctor":
+            return {"orca_version": "6.1.1", "real_execution": True}
+        if command == "prepare":
+            return {"run_id": source["run_id"]}
+        if command == "worker":
+            return {}
+        if command == "inspect":
+            return source if "p4" in args else p5_view
+        if command == "confirm-identity":
+            return {}
+        if command == "prepare-execution":
+            assert args[args.index("--protocol") + 1] == protocol.protocol_id
+            return {"run_id": "run_p5"}
+        raise AssertionError(f"unexpected CLI command: {args}")
+
+    memory_requirements = []
+    parallel_requests = []
+
+    def fake_memory(required_mb):
+        memory_requirements.append(required_mb)
+        return {"required_mb": required_mb, "available_mb": required_mb, "ready": True}
+
+    def fake_parallel(path, *, requested_ranks):
+        parallel_requests.append((path, requested_ranks))
+        return {
+            "ready": True,
+            "rank_smoke": {"requested_ranks": requested_ranks, "ready": True},
+        }
+
+    monkeypatch.setattr(preview_script, "cli", fake_cli)
+    monkeypatch.setattr(preview_script, "_memory_preflight", fake_memory)
+    monkeypatch.setattr(preview_script, "_parallel_preflight", fake_parallel)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_p6_ethanol_preview.py",
+            "--state-root",
+            str(root),
+            "--orca-executable",
+            str(executable),
+            "--output",
+            str(output),
+        ],
+    )
+
+    preview_script.main()
+    result = json.loads(output.read_text(encoding="utf-8"))
+
+    assert result["protocol"] == "p5.opt_freq_sp.r2scan3c.4core.v3"
+    assert (result["cores"], result["memory_mb"], result["maxcore_mb"]) == (4, 2048, 384)
+    assert [node["budget"] for node in result["nodes"]] == [
+        protocol.budget_for(kind).model_dump(mode="json") for kind in protocol.nodes
+    ]
+    assert memory_requirements == [2048]
+    assert parallel_requests == [(executable.resolve(), 4)]
+    assert not any(args[0] == "worker" and "p5" in args for args in calls)
 
 
 class _CapturingFakeBackend(FakeExecutionBackend):

@@ -43,6 +43,29 @@ from .windows_job import host_identity, process_start_marker
 from .work_paths import execution_directory
 
 
+def verify_frozen_file_hashes(
+    directory: Path,
+    *,
+    input_sha256: str,
+    geometry_sha256: str,
+) -> None:
+    """Verify the two immutable input files in a validated execution directory."""
+
+    for name, expected, label in (
+        ("input.inp", input_sha256, "input"),
+        ("geometry.xyz", geometry_sha256, "geometry"),
+    ):
+        path = directory / name
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise FileNotFoundError(path)
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ResourceLimitExceeded(f"frozen {label} file is missing or unreadable") from error
+        if actual != expected:
+            raise ResourceLimitExceeded(f"frozen {label} bytes were changed")
+
+
 class _BackendBase:
     def __init__(self, state_root: str | Path) -> None:
         self.state_root = Path(state_root).resolve()
@@ -89,21 +112,11 @@ class _BackendBase:
 
     @staticmethod
     def _verify_frozen_files(directory: Path, *, input_bytes: bytes, geometry_bytes: bytes) -> None:
-        for name, expected, label in (
-            ("input.inp", input_bytes, "input"),
-            ("geometry.xyz", geometry_bytes, "geometry"),
-        ):
-            path = directory / name
-            try:
-                if path.is_symlink() or not path.is_file():
-                    raise FileNotFoundError(path)
-                actual = path.read_bytes()
-            except OSError as error:
-                raise ResourceLimitExceeded(
-                    f"frozen {label} file is missing or unreadable"
-                ) from error
-            if actual != expected:
-                raise ResourceLimitExceeded(f"frozen {label} bytes were changed")
+        verify_frozen_file_hashes(
+            directory,
+            input_sha256=hashlib.sha256(input_bytes).hexdigest(),
+            geometry_sha256=hashlib.sha256(geometry_bytes).hexdigest(),
+        )
 
     @staticmethod
     def _read_receipt(
@@ -650,7 +663,7 @@ class LocalOrcaBackend(_BackendBase):
         )
 
 
-__all__ = ["FakeExecutionBackend", "LocalOrcaBackend"]
+__all__ = ["FakeExecutionBackend", "LocalOrcaBackend", "verify_frozen_file_hashes"]
 
 
 def _has_launch_evidence(directory: Path) -> bool:
