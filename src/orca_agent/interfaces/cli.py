@@ -13,8 +13,10 @@ from orca_agent.application.errors import StateIntegrityError
 from orca_agent.application.p3_service import P3ApplicationService
 from orca_agent.application.p4_service import P4ApplicationService
 from orca_agent.application.p5_service import P5ApplicationService
+from orca_agent.application.p6_service import P6ApplicationService
 from orca_agent.domain.ids import (
     ActionId,
+    AssessmentId,
     ConversationId,
     InterruptId,
     RunId,
@@ -45,6 +47,9 @@ from orca_agent.orchestration.p5_commands import (
     ReconcileP5Execution,
 )
 from orca_agent.orchestration.p5_versions import P5_ENGINE_VERSION, P5_SCHEMA_VERSION
+from orca_agent.orchestration.p6_commands import AssessP6Run, CancelP6Run
+from orca_agent.orchestration.p6_versions import P6_ENGINE_VERSION, P6_SCHEMA_VERSION
+from orca_agent.reporting.p6_renderer import P6ReportRenderer
 from orca_agent.reporting.renderer import P3ReportRenderer
 
 from ..execution.commands import ApproveAction, CancelWaterRun, StartWaterRun
@@ -85,6 +90,20 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--save-request")
     prepare.add_argument("--json", action="store_true")
 
+    assess = subparsers.add_parser("assess")
+    assess.add_argument("--source-run-id", type=RunId, required=True)
+    assess.add_argument(
+        "--profile",
+        dest="profile_id",
+        default="p6.nonlinear.r2scan3c.v1",
+    )
+    assess.add_argument("--reference-assessment-id", type=AssessmentId)
+    assess.add_argument("--expected-source-revision", type=int)
+    assess.add_argument("--run-id", type=RunId)
+    assess.add_argument("--command-id", type=_command_id)
+    assess.add_argument("--save-request")
+    assess.add_argument("--json", action="store_true")
+
     approve = subparsers.add_parser("approve")
     for name, value_type, required in (
         ("run-id", RunId, True),
@@ -111,14 +130,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--run-id", "--run", dest="run_id", type=RunId, required=True)
-    inspect.add_argument("--workflow", choices=("p3", "p4", "p5"))
+    inspect.add_argument("--workflow", choices=("p3", "p4", "p5", "p6"))
     inspect.add_argument("--json", action="store_true")
 
     worker = subparsers.add_parser("worker")
     worker.add_argument("--limit", "--max-effects", dest="limit", type=int, default=1)
     worker.add_argument("--run-id", type=RunId)
     worker.add_argument("--drain", action="store_true")
-    worker.add_argument("--workflow", choices=("p3", "p4", "p5"), default="p3")
+    worker.add_argument("--workflow", choices=("p3", "p4", "p5", "p6"), default="p3")
     worker.add_argument("--allow-network", action="store_true")
     worker.add_argument("--allow-real-orca", action="store_true")
     worker.add_argument("--backend", choices=("fake", "local_orca"), default="fake")
@@ -131,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--conversation-id", type=ConversationId, required=True)
     cancel.add_argument("--expected-revision", type=int, required=True)
     cancel.add_argument("--reason-code", default="user_cancelled")
-    cancel.add_argument("--workflow", choices=("p3", "p4", "p5"))
+    cancel.add_argument("--workflow", choices=("p3", "p4", "p5", "p6"))
     cancel.add_argument("--command-id", type=_command_id)
     cancel.add_argument("--save-request")
     cancel.add_argument("--json", action="store_true")
@@ -227,6 +246,20 @@ def main(argv: list[str] | None = None) -> int:
                 probe=args.probe,
             )
             return _emit(result, bool(result.get("ready")), args.json)
+        if args.operation == "assess":
+            service = _p6_service(args.state_root)
+            command = AssessP6Run.create(
+                source_p5_run_id=args.source_run_id,
+                profile_id=args.profile_id,
+                expected_source_revision=args.expected_source_revision,
+                reference_assessment_id=args.reference_assessment_id,
+                run_id=args.run_id,
+                command_id=args.command_id,
+                requested_at_utc=service.clock.now_utc(),
+            )
+            _save_request(command, args.save_request)
+            result = service.assess(command)
+            return _emit(result.model_dump(mode="json"), result.accepted, args.json)
         if args.operation == "prepare-execution":
             service = _p5_service(
                 args.state_root,
@@ -307,6 +340,18 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.drain or not batch:
                     break
             return _emit({"workflow": "p5", "reports": reports}, True, args.json)
+        if args.operation == "worker" and args.workflow == "p6":
+            if args.allow_network or args.allow_real_orca:
+                raise ValueError("P6 worker is offline and rejects capability elevation flags")
+            service = _p6_service(args.state_root)
+            worker = service.create_worker()
+            reports = []
+            while True:
+                batch = worker.run_once(run_id=args.run_id, limit=max(args.limit, 1))
+                reports.extend(asdict(item) for item in batch)
+                if not args.drain or not batch:
+                    break
+            return _emit({"workflow": "p6", "reports": reports}, True, args.json)
         if args.operation == "cancel" and args.workflow == "p5":
             service = _p5_service(args.state_root)
             command = CancelP5Execution.create(
@@ -325,6 +370,19 @@ def main(argv: list[str] | None = None) -> int:
                 reason_code=command.reason_code,
                 command_id=command.command_id,
             )
+            return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+        if args.operation == "cancel" and args.workflow == "p6":
+            service = _p6_service(args.state_root)
+            command = CancelP6Run.create(
+                run_id=args.run_id,
+                conversation_id=args.conversation_id,
+                expected_revision=args.expected_revision,
+                reason_code=args.reason_code,
+                command_id=args.command_id,
+                requested_at_utc=service.clock.now_utc(),
+            )
+            _save_request(command, args.save_request)
+            result = service.cancel(command)
             return _emit(result.model_dump(mode="json"), result.accepted, args.json)
         if args.operation == "reconcile":
             service = _p5_service(args.state_root)
@@ -446,6 +504,12 @@ def main(argv: list[str] | None = None) -> int:
                     True,
                     args.json,
                 )
+            if workflow == "p6":
+                return _emit(
+                    _p6_service(args.state_root).inspect(args.run_id).model_dump(mode="json"),
+                    True,
+                    args.json,
+                )
         if args.operation == "cancel":
             workflow = args.workflow or _detect_workflow(args.state_root, args.run_id)
             if workflow == "p4":
@@ -480,8 +544,29 @@ def main(argv: list[str] | None = None) -> int:
                     command_id=command.command_id,
                 )
                 return _emit(result.model_dump(mode="json"), result.accepted, args.json)
+            if workflow == "p6":
+                service = _p6_service(args.state_root)
+                command = CancelP6Run.create(
+                    run_id=args.run_id,
+                    conversation_id=args.conversation_id,
+                    expected_revision=args.expected_revision,
+                    reason_code=args.reason_code,
+                    command_id=args.command_id,
+                    requested_at_utc=service.clock.now_utc(),
+                )
+                _save_request(command, args.save_request)
+                result = service.cancel(command)
+                return _emit(result.model_dump(mode="json"), result.accepted, args.json)
         if args.operation == "replay-request":
             command = _load_request(args.file)
+            if isinstance(command, (AssessP6Run, CancelP6Run)):
+                service = _p6_service(args.state_root)
+                result = (
+                    service.assess(command)
+                    if isinstance(command, AssessP6Run)
+                    else service.cancel(command)
+                )
+                return _emit(result.model_dump(mode="json"), result.accepted, args.json)
             if isinstance(command, (StartPlanningRun, ConfirmMoleculeIdentity, CancelPlanningRun)):
                 service = _p4_service(args.state_root)
                 if isinstance(command, StartPlanningRun):
@@ -593,9 +678,29 @@ def main(argv: list[str] | None = None) -> int:
             result = service.cancel(command)
             return _emit(result.model_dump(mode="json"), result.accepted, args.json)
         if args.operation == "report":
+            workflow = _detect_workflow(args.state_root, args.run_id)
+            if workflow == "p6":
+                output = _export_p6_report(
+                    _p6_service(args.state_root), args.run_id, args.format, args.output
+                )
+                return _emit(output, True, args.json)
             output = _export_report(service, args.run_id, args.format, args.output)
             return _emit(output, True, args.json)
         if args.operation == "verify-report":
+            workflow = _detect_workflow(args.state_root, args.run_id)
+            if workflow == "p6":
+                service = _p6_service(args.state_root)
+                output = P6ReportRenderer(
+                    service.database_path, service.state_root, clock=service.clock
+                ).verify(args.run_id)
+                if args.report is not None:
+                    output["exported_report"] = _verify_p6_report(service, args.run_id, args.report)
+                    output["valid"] = bool(output.get("valid")) and bool(
+                        output["exported_report"]["valid"]
+                    )
+                if not output.get("valid"):
+                    output["code"] = "report_verification_failed"
+                return _emit(output, bool(output.get("valid")), args.json)
             try:
                 output = P3ReportRenderer(
                     service.database_path,
@@ -655,6 +760,10 @@ def _p5_service(
     )
 
 
+def _p6_service(state_root: str | Path) -> P6ApplicationService:
+    return P6ApplicationService(state_root)
+
+
 def _prepare_input(args) -> tuple[MoleculeInputKind, str]:
     values = (
         (MoleculeInputKind.NAME, args.name),
@@ -688,6 +797,8 @@ def _detect_workflow(state_root: str | Path, run_id: RunId) -> str:
         return "p4"
     if schema_version == P5_SCHEMA_VERSION and engine_version == P5_ENGINE_VERSION:
         return "p5"
+    if schema_version == P6_SCHEMA_VERSION and engine_version == P6_ENGINE_VERSION:
+        return "p6"
     if schema_version == P3_SCHEMA_VERSION and engine_version == P3_ENGINE_VERSION:
         return "p3"
     raise ValueError("run workflow version is unsupported")
@@ -725,6 +836,10 @@ def _load_request(path: Path):
         "p5.request_cancel": CancelP5Execution,
         "p5.reconcile_execution": ReconcileP5Execution,
     }
+    p6_command_models = {
+        "p6.assess": AssessP6Run,
+        "p6.cancel": CancelP6Run,
+    }
     if (
         payload.get("schema_version") == P4_SCHEMA_VERSION
         and payload.get("engine_version") == P4_ENGINE_VERSION
@@ -742,6 +857,15 @@ def _load_request(path: Path):
         model_type = p5_command_models.get(command_type)
         if model_type is None:
             raise ValueError("unsupported P5 command type")
+        return model_type.model_validate_json(raw, strict=True)
+    if (
+        payload.get("schema_version") == P6_SCHEMA_VERSION
+        and payload.get("engine_version") == P6_ENGINE_VERSION
+    ):
+        command_type = payload.get("command_type")
+        model_type = p6_command_models.get(command_type)
+        if model_type is None:
+            raise ValueError("unsupported P6 command type")
         return model_type.model_validate_json(raw, strict=True)
     if "fixture_id" in payload:
         return StartWaterRun.model_validate_json(raw, strict=True)
@@ -803,9 +927,61 @@ def _verify_report(service, run_id, path: Path):
     return {"valid": valid, "path": str(path)}
 
 
+def _export_p6_report(service: P6ApplicationService, run_id: RunId, format_name: str, output: Path):
+    view = service.inspect(run_id)
+    if view.state.phase.value != "completed" or view.report_manifest is None:
+        raise ValueError("P6 report is not available until the workflow is completed")
+    verification = P6ReportRenderer(
+        service.database_path, service.state_root, clock=service.clock
+    ).verify(run_id)
+    if not verification.get("valid"):
+        raise ValueError("P6 report verification failed")
+    manifest = view.report_manifest
+    artifact_id = (
+        manifest.markdown_artifact_id if format_name == "md" else manifest.json_artifact_id
+    )
+    with SQLiteUnitOfWork(service.database_path, clock=service.clock) as uow:
+        uow.begin()
+        artifact = ArtifactRecordRepository(uow.connection).get(artifact_id)
+        if artifact is None or artifact.run_id != run_id:
+            raise ValueError("P6 report artifact is missing or has the wrong owner")
+        content = ArtifactStore(service.state_root).read(artifact)
+        uow.commit()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(content)
+    return {"valid": True, "path": str(output), "artifact_id": str(artifact_id)}
+
+
+def _verify_p6_report(service: P6ApplicationService, run_id: RunId, path: Path):
+    if path.suffix.lower() not in (".md", ".json"):
+        return {"valid": False, "path": str(path)}
+    view = service.inspect(run_id)
+    manifest = view.report_manifest
+    if manifest is None:
+        raise ValueError("P6 report manifest is missing")
+    artifact_id = (
+        manifest.markdown_artifact_id if path.suffix.lower() == ".md" else manifest.json_artifact_id
+    )
+    with SQLiteUnitOfWork(service.database_path, clock=service.clock) as uow:
+        uow.begin()
+        artifact = ArtifactRecordRepository(uow.connection).get(artifact_id)
+        if artifact is None or artifact.run_id != run_id:
+            raise ValueError("P6 report artifact owner differs")
+        expected = ArtifactStore(service.state_root).read(artifact)
+        valid = path.read_bytes() == expected
+        uow.commit()
+    return {"valid": valid, "path": str(path)}
+
+
 def _emit(value: object, accepted: bool, json_requested: bool) -> int:
     del json_requested
-    print(json.dumps(value, ensure_ascii=False, default=str))
+    try:
+        print(json.dumps(value, ensure_ascii=False, default=str))
+    except UnicodeEncodeError:
+        # Windows consoles may still expose a legacy code page.  Preserve the
+        # JSON contract by falling back to escaped Unicode rather than failing
+        # an otherwise valid P6 inspection.
+        print(json.dumps(value, ensure_ascii=True, default=str))
     return 0 if accepted else 2
 
 

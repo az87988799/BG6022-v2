@@ -56,6 +56,8 @@ from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VE
 from orca_agent.orchestration.p4_kernel import P4KernelEvent
 from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 from orca_agent.orchestration.p5_versions import P5_ENGINE_VERSION, P5_SCHEMA_VERSION
+from orca_agent.orchestration.p6_kernel import P6KernelEvent
+from orca_agent.orchestration.p6_versions import P6_ENGINE_VERSION, P6_SCHEMA_VERSION
 from orca_agent.orchestration.schema1_read import read_error_text
 from orca_agent.orchestration.versions import ENGINE_VERSION
 
@@ -578,7 +580,7 @@ class OutboxRepository:
     def register_effects(
         self,
         *,
-        event: KernelEvent | P3KernelEvent | P4KernelEvent,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent | P6KernelEvent,
         run_id: RunId,
         effects: tuple[EffectSpec, ...],
         available_at_utc: datetime,
@@ -740,6 +742,7 @@ class OutboxRepository:
         now: datetime,
         lease_duration: timedelta,
         limit: int,
+        run_id: RunId | None = None,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
         readiness_check: Callable[[OutboxRecord, object, datetime], bool] | None = None,
     ) -> tuple[OutboxRecord, ...]:
@@ -758,6 +761,7 @@ class OutboxRepository:
             now=now,
             lease_duration=lease_duration,
             limit=limit,
+            run_id=run_id,
             registry=registry,
             readiness_check=readiness_check,
         )
@@ -772,6 +776,7 @@ class OutboxRepository:
         now: datetime,
         lease_duration: timedelta,
         limit: int = 1,
+        run_id: RunId | None = None,
         registry: EffectRegistry = DEFAULT_EFFECT_REGISTRY,
         readiness_check: Callable[[OutboxRecord, object, datetime], bool] | None = None,
     ) -> tuple[OutboxRecord, ...]:
@@ -801,13 +806,19 @@ class OutboxRepository:
             claimed_ids: list[EffectId] = []
             after = ("", "", "")
             while len(claimed_ids) < limit:
+                where_prefix = ""
+                params: tuple[object, ...] = (now_text, now_text, *after)
+                if run_id is not None:
+                    where_prefix = "run_id = ? AND "
+                    params = (str(run_id), *params)
                 rows = self.connection.execute(
                     f"{self._select_sql()} WHERE "
+                    f"{where_prefix}"
                     "((status = 'pending' AND available_at_utc <= ?) "
                     "OR (status IN ('leased', 'dispatching') AND lease_expires_at_utc <= ?)) "
                     "AND (available_at_utc, created_at_utc, effect_id) > (?, ?, ?) "
                     "ORDER BY available_at_utc, created_at_utc, effect_id LIMIT 64",
-                    (now_text, now_text, *after),
+                    params,
                 ).fetchall()
                 if not rows:
                     break
@@ -1052,6 +1063,23 @@ class OutboxRepository:
             "last_error_code = 'run_cancelled', "
             "last_error_message = 'The run is terminal; the effect was not dispatched.', "
             "updated_at_utc = ? WHERE run_id = ? AND status IN ('pending', 'leased')",
+            (now_text, str(SYSTEM_WORKER_ID), now_text, str(run_id)),
+        )
+        return cursor.rowcount
+
+    def cancel_p6_internal_for_run(self, *, run_id: RunId, now: datetime) -> int:
+        """Invalidate every active internal P6 generation in the caller's transaction."""
+        now_text = format_utc(now)
+        cursor = self.connection.execute(
+            "UPDATE outbox SET status = 'cancelled', lease_owner = NULL, "
+            "lease_expires_at_utc = NULL, dispatch_authorized_at_utc = NULL, "
+            "dispatch_run_revision = NULL, dispatch_policy_version = NULL, "
+            "completed_at_utc = ?, completed_by_worker_id = ?, "
+            "terminal_generation = attempt_count, last_error_code = 'run_cancelled', "
+            "last_error_message = 'The run is terminal; the effect was not dispatched.', "
+            "updated_at_utc = ? WHERE run_id = ? AND schema_version = 5 "
+            "AND effect_type IN ('internal.p6.assess', 'internal.p6.render_report') "
+            "AND status IN ('pending', 'leased', 'dispatching')",
             (now_text, str(SYSTEM_WORKER_ID), now_text, str(run_id)),
         )
         return cursor.rowcount
@@ -1309,7 +1337,7 @@ class OutboxRepository:
         )
 
     def bind_audit_event(
-        self, *, effect_id: EffectId, event: KernelEvent | P3KernelEvent
+        self, *, effect_id: EffectId, event: KernelEvent | P3KernelEvent | P6KernelEvent
     ) -> OutboxRecord:
         """Reject post-hoc binding; protocol-4 binding is one atomic UPDATE."""
 
@@ -1324,7 +1352,7 @@ class OutboxRepository:
         return record
 
     def _verify_audit_candidate(
-        self, record: OutboxRecord, event: KernelEvent | P3KernelEvent
+        self, record: OutboxRecord, event: KernelEvent | P3KernelEvent | P6KernelEvent
     ) -> None:
         payload = event.payload
         if payload.get("effect_id") != str(record.effect_id):
@@ -1394,6 +1422,7 @@ def _supported_version(schema_version: int, engine_version: str) -> bool:
         (P3_SCHEMA_VERSION, P3_ENGINE_VERSION),
         (P4_SCHEMA_VERSION, P4_ENGINE_VERSION),
         (P5_SCHEMA_VERSION, P5_ENGINE_VERSION),
+        (P6_SCHEMA_VERSION, P6_ENGINE_VERSION),
     }
 
 

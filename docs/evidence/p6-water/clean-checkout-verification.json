@@ -1,0 +1,16 @@
+{
+  "checkout_sha": "1b1246d2fd2b378f79c09fe901ff39d13d0a4cde",
+  "working_tree_clean": true,
+  "imported_package": "E:/BG6022-v2/.tmp/p6-clean-review-1b1246d/src/orca_agent/__init__.py",
+  "original_state_root_provided": false,
+  "verification_scope": "archived_packet",
+  "run_id": "run_963622492d6c4e2fa3756367c6fd6a9a",
+  "checks": {
+    "artifact_files_match": true,
+    "local_ledger_valid": true,
+    "manifest_matches": true,
+    "reports_match": true,
+    "typed_records_match": true
+  },
+  "valid": true
+}

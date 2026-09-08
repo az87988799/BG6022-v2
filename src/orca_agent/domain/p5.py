@@ -40,6 +40,10 @@ from .json_types import FrozenJsonObject, freeze_json_object
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 
+P5_DEFAULT_NPROCS = 4
+P5_DEFAULT_TOTAL_MEMORY_MB = 2048
+P5_DEFAULT_MAXCORE_MB = (P5_DEFAULT_TOTAL_MEMORY_MB * 75) // (100 * P5_DEFAULT_NPROCS)
+
 
 class P5Model(BaseModel):
     model_config = ConfigDict(
@@ -131,9 +135,9 @@ def _finite(value: float, field_name: str) -> float:
 class P5Budget(P5Model):
     """Closed resource envelope used by both compiler and runner."""
 
-    nprocs: int = Field(default=1, ge=1, le=64)
-    total_memory_mb: int = Field(default=2048, ge=256, le=1_048_576)
-    maxcore_mb: int = Field(default=1536, ge=1, le=1_048_576)
+    nprocs: int = Field(default=P5_DEFAULT_NPROCS, ge=1, le=64)
+    total_memory_mb: int = Field(default=P5_DEFAULT_TOTAL_MEMORY_MB, ge=256, le=1_048_576)
+    maxcore_mb: int = Field(default=P5_DEFAULT_MAXCORE_MB, ge=1, le=1_048_576)
     wall_time_seconds: int = Field(default=300, ge=1, le=86_400)
     run_wall_time_seconds: int = Field(default=3600, ge=1, le=604_800)
     stdout_stderr_limit_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
@@ -151,7 +155,7 @@ class P5Budget(P5Model):
     @classmethod
     def defaults_for(cls, kind: P5NodeKind) -> P5Budget:
         seconds = {P5NodeKind.SP: 300, P5NodeKind.OPT: 900, P5NodeKind.FREQ: 1800}[kind]
-        return cls(wall_time_seconds=seconds, maxcore_mb=1536)
+        return cls(wall_time_seconds=seconds)
 
     def budget_hash(self) -> str:
         return sha256_hex(self.model_dump(mode="json"))
@@ -615,6 +619,9 @@ __all__ = [
     "P5ActionStatus",
     "P5ApprovalGrant",
     "P5Budget",
+    "P5_DEFAULT_MAXCORE_MB",
+    "P5_DEFAULT_NPROCS",
+    "P5_DEFAULT_TOTAL_MEMORY_MB",
     "P5DataOrigin",
     "P5ExecutionBinding",
     "P5ExecutionContext",

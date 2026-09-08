@@ -153,6 +153,49 @@ def test_all_p5_protocols_are_closed_and_fake_executable(tmp_path, protocol_id, 
         assert connection.execute("SELECT COUNT(*) FROM local_jobs").fetchone()[0] == expected_nodes
 
 
+def test_worker_collection_accepts_intact_frozen_workdir_files(tmp_path):
+    service, _clock, view = _prepare(tmp_path, "p5.sp_initial.r2scan3c.v1")
+    final = _run_all_actions(service, view)
+
+    assert final.state.phase.value == "completed"
+    assert len(final.results) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation", ["input_changed", "geometry_changed", "input_missing", "geometry_missing"]
+)
+def test_worker_collection_rejects_changed_or_missing_frozen_workdir_files(tmp_path, mutation):
+    service, _clock, view = _prepare(tmp_path, "p5.sp_initial.r2scan3c.v1")
+
+    class _MutatingBackend(FakeExecutionBackend):
+        starts = 0
+
+        def start_or_reconcile(self, launch_request):
+            self.starts += 1
+            observation = super().start_or_reconcile(launch_request)
+            target = self._workdir(str(launch_request.job.execution_id)) / (
+                "input.inp" if mutation.startswith("input") else "geometry.xyz"
+            )
+            if mutation.endswith("changed"):
+                target.write_bytes(b"changed frozen workdir file")
+            else:
+                target.unlink()
+            return observation
+
+    backend = _MutatingBackend(service.state_root)
+    service.backend = backend
+    after_first_worker = _approve_and_run(service, view)
+    assert after_first_worker.state.phase.value == "collecting"
+    assert after_first_worker.results == ()
+
+    retry = service.create_worker().run_once(run_id=view.run_id)
+    assert retry and retry[0].outcome == "resource_limit_exceeded"
+    after_retry = service.inspect(view.run_id)
+    assert after_retry.state.phase.value == "collecting"
+    assert after_retry.results == ()
+    assert backend.starts == 1
+
+
 def test_freq_from_opt_requires_and_uses_a_completed_opt_source(tmp_path):
     state_root, clock, source_run_id = _source(tmp_path)
     service = P5ApplicationService(state_root, clock=clock)

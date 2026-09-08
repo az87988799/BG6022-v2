@@ -25,6 +25,17 @@ Every record must contain these fields, without changing their meaning:
 |`auto_dft1.0/dft_core/phase_a_runner.py`|`fac93b52e247041d9d5bd4ebaf9dd6d827653928`|`cf624399e514253c2e0442715b78a17cb36bdb00`|`src/orca_agent/execution/local_runner.py`|`rewritten`|Per-job supervision behavior|Runner cannot plan, approve, mutate business state, or consume outbox|P5 T25-T30|Yes: Windows process-tree tests|implemented; live gate pending|
 |`auto_dft1.0/dft_core/resumable_workflow.py`|`fac93b52e247041d9d5bd4ebaf9dd6d827653928`|`400b7b3f24b2e44e04437d2f651faadc7dc3eb69`|`src/orca_agent/application/p5_service.py`, `src/orca_agent/orchestration/p5_replay.py`|`rewritten`|Durable command replay and existing-job reconciliation|No legacy SQLite, scratch, or in-memory workflow state is imported|P5 T12,T17,T18,T30|Yes: real R02 recovery evidence|implemented; live gate pending|
 
+## P6 migration note
+
+P6 is a new derived workflow, not a legacy-code or legacy-state migration.
+It stores schema-5 typed records and owned artifacts in the existing V2
+versioned tables, while retaining P5 parser-v4 records as the source
+authority. No P5 history is rewritten, and no SQLite migration v8 is added.
+The P6 report manifest records the exact P5 source and derived artifact
+dependencies without creating a manifest self-hash cycle. Any future P6
+adaptation from legacy code must add an explicit record above with the fixed
+legacy commit and blob SHA.
+
 Allowed `migration_mode` values are `copied`, `adapted`, and `rewritten`.
 Each entry must identify the exact legacy commit and blob SHA, list ported
 tests, state semantic differences explicitly, and identify whether a real

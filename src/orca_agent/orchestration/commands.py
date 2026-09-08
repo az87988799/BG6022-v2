@@ -41,6 +41,8 @@ class CommandType(StrEnum):
     CANCEL_RUN = "cancel_run"
     RECORD_EFFECT_SUCCEEDED = "record_effect_succeeded"
     RECORD_EFFECT_FAILED = "record_effect_failed"
+    P6_ASSESS = "p6.assess"
+    P6_CANCEL = "p6.cancel"
 
 
 _UNSAFE_KEY_PARTS = (

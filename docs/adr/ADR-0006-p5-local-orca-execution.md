@@ -32,8 +32,10 @@ P6 responsibilities.
 
 ## Platform boundary
 
-Windows local ORCA 6.1 is the first live target. The default is one core,
-2048 MB per job, and bounded wall-time budgets. The runner uses a controlled
+Windows local ORCA 6.1 is the first live target. The current default is four
+cores, 2048 MB per job, and bounded wall-time budgets. Historical one-core
+protocols remain versioned and immutable; new multi-stage work uses the
+registered four-core default profile. The runner uses a controlled
 process group/Job Object on Windows when real execution is enabled. Linux CI
 covers pure logic and controlled substitute-process contracts only; it is not
 evidence of Linux ORCA support.

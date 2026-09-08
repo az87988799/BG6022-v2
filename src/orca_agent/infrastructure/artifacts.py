@@ -135,6 +135,14 @@ class ArtifactStore:
             "hessian",
             "manifest",
             "execution_evidence",
+            "p6_source_snapshot",
+            "p6_policy",
+            "p6_evidence",
+            "p6_assessment",
+            "p6_claim",
+            "p6_report_md",
+            "p6_report_json",
+            "p6_manifest",
         }:
             raise ValueError("artifact role is not registered")
         self._validate_content(content, media_type)

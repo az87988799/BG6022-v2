@@ -8,7 +8,15 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from orca_agent.application.p5_errors import UnsupportedExecutionProfile
 from orca_agent.domain.hashing import sha256_hex
-from orca_agent.domain.p5 import GeometryRecord, P5Budget, P5ExecutionNode, P5NodeKind, bytes_sha256
+from orca_agent.domain.p5 import (
+    P5_DEFAULT_NPROCS,
+    P5_DEFAULT_TOTAL_MEMORY_MB,
+    GeometryRecord,
+    P5Budget,
+    P5ExecutionNode,
+    P5NodeKind,
+    bytes_sha256,
+)
 from orca_agent.orchestration.p5_versions import P5_COMPILER_VERSION
 from orca_agent.planning.registry import METHOD_R2SCAN3C
 
@@ -148,8 +156,8 @@ def _budget(value: P5Budget | dict[str, object] | None, kind: P5NodeKind) -> P5B
     if not isinstance(value, dict):
         raise TypeError("resource_settings must be a P5Budget or object")
     data = dict(value)
-    total = int(data.get("total_memory_mb", 2048))
-    nprocs = int(data.get("nprocs", 1))
+    total = int(data.get("total_memory_mb", P5_DEFAULT_TOTAL_MEMORY_MB))
+    nprocs = int(data.get("nprocs", P5_DEFAULT_NPROCS))
     data.setdefault("maxcore_mb", (total * 75) // (100 * nprocs))
     data.setdefault("wall_time_seconds", P5Budget.defaults_for(kind).wall_time_seconds)
     data.setdefault("run_wall_time_seconds", 3600)
@@ -157,7 +165,7 @@ def _budget(value: P5Budget | dict[str, object] | None, kind: P5NodeKind) -> P5B
 
 
 def _feature_profile(value: dict[str, object] | None, budget: P5Budget) -> dict[str, object]:
-    profile = {"parallel": False, "nprocs": budget.nprocs, "implicit_threads": 1}
+    profile = {"parallel": budget.nprocs > 1, "nprocs": budget.nprocs, "implicit_threads": 1}
     if value is not None:
         if not isinstance(value, dict) or set(value) - {"parallel", "implicit_threads"}:
             raise UnsupportedExecutionProfile("feature profile contains unsupported fields")

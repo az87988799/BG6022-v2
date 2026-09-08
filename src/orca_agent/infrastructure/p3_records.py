@@ -62,6 +62,16 @@ from orca_agent.domain.p5 import (
     P5ResultRecord,
     P5WorkflowState,
 )
+from orca_agent.domain.p6 import (
+    ComparabilityAssessment,
+    P6ClaimRecord,
+    P6EvidenceRecord,
+    P6ReportManifest,
+    P6SourceSnapshot,
+    P6WorkflowState,
+    ScientificAssessment,
+    ScientificPolicy,
+)
 from orca_agent.domain.registry import RegistrySnapshot
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.p3_versions import P3_ENGINE_VERSION, P3_SCHEMA_VERSION
@@ -100,6 +110,14 @@ _RECORD_CONTRACTS: dict[str, tuple[type[BaseModel], int, str]] = {
     "p5.approval_grant": (P5ApprovalGrant, 4, "p5-local-orca-v1"),
     "p5.result": (P5ResultRecord, 4, "p5-local-orca-v1"),
     "p5.workflow_state": (P5WorkflowState, 4, "p5-local-orca-v1"),
+    "p6.source_snapshot": (P6SourceSnapshot, 5, "p6-science-v1"),
+    "p6.policy": (ScientificPolicy, 5, "p6-science-v1"),
+    "p6.evidence": (P6EvidenceRecord, 5, "p6-science-v1"),
+    "p6.assessment": (ScientificAssessment, 5, "p6-science-v1"),
+    "p6.comparability": (ComparabilityAssessment, 5, "p6-science-v1"),
+    "p6.claim": (P6ClaimRecord, 5, "p6-science-v1"),
+    "p6.report_manifest": (P6ReportManifest, 5, "p6-science-v1"),
+    "p6.workflow_state": (P6WorkflowState, 5, "p6-science-v1"),
 }
 
 
@@ -569,6 +587,126 @@ class P5RecordRepository(P3RecordRepository):
         return self._parse_list_rows(run_id, rows)
 
 
+class P6RecordRepository(P3RecordRepository):
+    """Thin typed helper for schema-5 records in the shared table."""
+
+    def append_p6(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        record: BaseModel,
+        created_at_utc: datetime,
+        source_event_id: object | None = None,
+        record_id: WorkflowRecordId | None = None,
+    ) -> WorkflowRecordId:
+        if not record_type.startswith("p6."):
+            raise StateIntegrityError("P6 record type must use the p6 namespace")
+        return self.append_any(
+            run_id=run_id,
+            record_type=record_type,
+            record=record,
+            schema_version=5,
+            engine_version="p6-science-v1",
+            created_at_utc=created_at_utc,
+            source_event_id=source_event_id,
+            record_id=record_id,
+        )
+
+    def latest_p6(
+        self,
+        *,
+        run_id: RunId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> tuple[WorkflowRecordId, ModelT] | None:
+        return self.latest_any(
+            run_id=run_id,
+            record_type=record_type,
+            model_type=model_type,
+            schema_version=5,
+            engine_version="p6-science-v1",
+        )
+
+    def get_exact_p6(
+        self,
+        *,
+        run_id: RunId,
+        record_id: WorkflowRecordId,
+        record_type: str,
+        model_type: type[ModelT],
+    ) -> ModelT | None:
+        expected_model, expected_schema, expected_engine = _record_contract(record_type)
+        if (
+            expected_model is not model_type
+            or expected_schema != 5
+            or expected_engine != "p6-science-v1"
+        ):
+            raise StateIntegrityError("P6 record lookup does not match its typed contract")
+        row = self.connection.execute(
+            "SELECT record_id, run_id, record_type, schema_version, engine_version, "
+            "record_json, record_hash, source_event_id, created_at_utc "
+            "FROM workflow_records WHERE record_id = ?",
+            (str(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        values = self._parse_list_rows(
+            run_id,
+            [
+                (
+                    row[0],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                    row[7],
+                    row[8],
+                )
+            ],
+        )
+        if len(values) != 1 or values[0][0] != record_id or values[0][1] != record_type:
+            raise StateIntegrityError("P6 record owner or type is invalid")
+        parsed = values[0][2]
+        if not isinstance(parsed, model_type):
+            raise StateIntegrityError("P6 record model type is invalid")
+        return parsed
+
+    def list_p6_for_run(self, run_id: RunId) -> tuple[tuple[WorkflowRecordId, str, object], ...]:
+        rows = self.connection.execute(
+            "SELECT record_id, record_type, schema_version, engine_version, record_json, "
+            "record_hash, source_event_id, created_at_utc FROM workflow_records "
+            "WHERE run_id = ? AND record_type LIKE 'p6.%' ORDER BY created_at_utc, rowid",
+            (str(run_id),),
+        ).fetchall()
+        return self._parse_list_rows(run_id, rows)
+
+    def find_assessment(self, assessment_id: object) -> tuple[RunId, ScientificAssessment] | None:
+        """Find one explicitly named assessment without selecting a latest record."""
+
+        rows = self.connection.execute(
+            "SELECT record_id, run_id, record_type, schema_version, engine_version, "
+            "record_json, record_hash, source_event_id, created_at_utc "
+            "FROM workflow_records WHERE record_type = 'p6.assessment' "
+            "ORDER BY created_at_utc, rowid"
+        ).fetchall()
+        matches: list[tuple[RunId, ScientificAssessment]] = []
+        for row in rows:
+            run_id = RunId(str(row[1]))
+            values = self._parse_list_rows(
+                run_id,
+                [(row[0], row[2], row[3], row[4], row[5], row[6], row[7], row[8])],
+            )
+            if len(values) != 1 or not isinstance(values[0][2], ScientificAssessment):
+                raise StateIntegrityError("P6 assessment lookup returned an invalid record")
+            if values[0][2].assessment_id == assessment_id:
+                matches.append((run_id, values[0][2]))
+        if len(matches) > 1:
+            raise StateIntegrityError("P6 assessment ID is duplicated")
+        return matches[0] if matches else None
+
+
 def _verify_source_event(
     connection: sqlite3.Connection, raw_event_id: object | None, run_id: RunId
 ) -> None:
@@ -940,6 +1078,21 @@ class ArtifactRecordRepository:
         except (DomainError, TypeError, ValueError, ArithmeticError) as error:
             raise StateIntegrityError("stored artifact is invalid") from error
 
+    def list_for_run(self, run_id: RunId) -> tuple[StoredArtifact, ...]:
+        rows = self.connection.execute(
+            "SELECT artifact_id, run_id, action_id, execution_id, content_hash, size_bytes, "
+            "media_type, relative_path, created_at_utc FROM artifacts "
+            "WHERE run_id = ? ORDER BY created_at_utc, rowid",
+            (str(run_id),),
+        ).fetchall()
+        values: list[StoredArtifact] = []
+        for row in rows:
+            artifact = self.get(ArtifactId(str(row[0])))
+            if artifact is None:
+                raise StateIntegrityError("stored artifact disappeared during listing")
+            values.append(artifact)
+        return tuple(values)
+
 
 class EvidenceRepository:
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -1042,6 +1195,7 @@ __all__ = [
     "P3RecordRepository",
     "P4RecordRepository",
     "P5RecordRepository",
+    "P6RecordRepository",
     "StoredAction",
     "StoredArtifact",
     "StoredEvidence",

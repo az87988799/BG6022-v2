@@ -25,6 +25,11 @@ from orca_agent.domain.p5 import (
 
 from .control_evidence import control_gate_status
 from .launch_ticket import consume_ticket, permit_fields
+from .orca_config import (
+    available_physical_memory_mb,
+    runtime_config,
+    validate_runtime_config,
+)
 from .orca_parser import ATOMIC_MASSES
 from .output_contract import BOHR_TO_ANGSTROM, HESSIAN_NAME, OPTIMIZED_XYZ_NAME
 from .ports import (
@@ -38,6 +43,29 @@ from .windows_job import host_identity, process_start_marker
 from .work_paths import execution_directory
 
 
+def verify_frozen_file_hashes(
+    directory: Path,
+    *,
+    input_sha256: str,
+    geometry_sha256: str,
+) -> None:
+    """Verify the two immutable input files in a validated execution directory."""
+
+    for name, expected, label in (
+        ("input.inp", input_sha256, "input"),
+        ("geometry.xyz", geometry_sha256, "geometry"),
+    ):
+        path = directory / name
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise FileNotFoundError(path)
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ResourceLimitExceeded(f"frozen {label} file is missing or unreadable") from error
+        if actual != expected:
+            raise ResourceLimitExceeded(f"frozen {label} bytes were changed")
+
+
 class _BackendBase:
     def __init__(self, state_root: str | Path) -> None:
         self.state_root = Path(state_root).resolve()
@@ -46,6 +74,14 @@ class _BackendBase:
 
     def _workdir(self, execution_id: str) -> Path:
         return execution_directory(self.state_root, str(execution_id), create=True)
+
+    def _existing_workdir(self, execution_id: str) -> Path | None:
+        try:
+            return execution_directory(self.state_root, str(execution_id), create=False)
+        except ValueError as error:
+            if str(error) == "execution directory is missing":
+                return None
+            raise
 
     @staticmethod
     def _write_atomic(path: Path, content: bytes) -> None:
@@ -73,6 +109,14 @@ class _BackendBase:
         if not geometry_path.exists():
             self._write_atomic(geometry_path, request.geometry_bytes)
         return directory
+
+    @staticmethod
+    def _verify_frozen_files(directory: Path, *, input_bytes: bytes, geometry_bytes: bytes) -> None:
+        verify_frozen_file_hashes(
+            directory,
+            input_sha256=hashlib.sha256(input_bytes).hexdigest(),
+            geometry_sha256=hashlib.sha256(geometry_bytes).hexdigest(),
+        )
 
     @staticmethod
     def _read_receipt(
@@ -354,20 +398,103 @@ class LocalOrcaBackend(_BackendBase):
         actual_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
         if launch_request.binding.executable_sha256 != actual_hash:
             raise ExecutableVersionMismatch("ORCA executable hash changed after approval")
-        directory = self._materialize(launch_request)
-        receipt = self._read_receipt(directory, execution_id=str(launch_request.job.execution_id))
-        if receipt is not None:
-            return LaunchObservation(
-                execution_id=str(launch_request.job.execution_id),
-                job_id=str(launch_request.job.job_id),
-                status=self._status(receipt.get("status")),
-                started=False,
-                physical_start_count=1,
-                receipt_path=directory / "exit_receipt.json",
-                data_origin=P5DataOrigin.ORCA_LOCAL,
-                message="replayed local runner receipt",
+        expected_runtime = runtime_config(
+            state_root=self.state_root,
+            executable=executable,
+            orca_version=orca_version,
+            profile_hash=launch_request.binding.feature_profile_hash,
+            probe=False,
+            nprocs=launch_request.node.budget.nprocs,
+            implicit_threads=1,
+            parallel=launch_request.node.budget.nprocs > 1,
+        )
+        supplied_runtime = launch_request.runtime_config or expected_runtime
+        try:
+            supplied_runtime = validate_runtime_config(
+                supplied_runtime,
+                expected_nprocs=launch_request.node.budget.nprocs,
+                expected_parallel=launch_request.node.budget.nprocs > 1,
             )
-        if (directory / "launch.json").exists():
+        except (TypeError, ValueError) as error:
+            raise LaunchStateUnknown("local ORCA runtime configuration is invalid") from error
+        if supplied_runtime != expected_runtime:
+            raise LaunchStateUnknown("local ORCA runtime configuration does not match its binding")
+        if supplied_runtime["runtime_config_hash"] != launch_request.binding.runtime_config_hash:
+            raise LaunchStateUnknown("local ORCA runtime hash does not match its binding")
+        execution_id = str(launch_request.job.execution_id)
+        directory = self._existing_workdir(execution_id)
+        if directory is not None:
+            receipt_path = directory / "exit_receipt.json"
+            if receipt_path.exists():
+                self._verify_frozen_files(
+                    directory,
+                    input_bytes=launch_request.input_bytes,
+                    geometry_bytes=launch_request.geometry_bytes,
+                )
+                receipt = self._read_receipt(directory, execution_id=execution_id)
+                if receipt is None:
+                    raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
+                status = self._status(receipt.get("status"))
+                if status in {
+                    P5JobStatus.SUCCEEDED,
+                    P5JobStatus.FAILED,
+                    P5JobStatus.CANCELLED,
+                    P5JobStatus.TIMED_OUT,
+                    P5JobStatus.INTERRUPTED,
+                }:
+                    return LaunchObservation(
+                        execution_id=execution_id,
+                        job_id=str(launch_request.job.job_id),
+                        status=status,
+                        started=False,
+                        physical_start_count=1,
+                        receipt_path=receipt_path,
+                        data_origin=P5DataOrigin.ORCA_LOCAL,
+                        message="replayed local runner receipt",
+                    )
+                raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+            if _has_launch_evidence(directory):
+                raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+
+        if launch_request.node.budget.nprocs > 1 and os.name == "nt":
+            available_mb = available_physical_memory_mb()
+            required_mb = launch_request.node.budget.total_memory_mb
+            if available_mb is None or available_mb < required_mb:
+                raise ResourceLimitExceeded(
+                    "four-core ORCA launch requires "
+                    f"{required_mb} MB available physical memory; observed {available_mb} MB"
+                )
+        directory = self._materialize(launch_request)
+        receipt_path = directory / "exit_receipt.json"
+        if receipt_path.exists():
+            self._verify_frozen_files(
+                directory,
+                input_bytes=launch_request.input_bytes,
+                geometry_bytes=launch_request.geometry_bytes,
+            )
+            receipt = self._read_receipt(directory, execution_id=execution_id)
+            if receipt is None:
+                raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
+            status = self._status(receipt.get("status"))
+            if status in {
+                P5JobStatus.SUCCEEDED,
+                P5JobStatus.FAILED,
+                P5JobStatus.CANCELLED,
+                P5JobStatus.TIMED_OUT,
+                P5JobStatus.INTERRUPTED,
+            }:
+                return LaunchObservation(
+                    execution_id=execution_id,
+                    job_id=str(launch_request.job.job_id),
+                    status=status,
+                    started=False,
+                    physical_start_count=1,
+                    receipt_path=receipt_path,
+                    data_origin=P5DataOrigin.ORCA_LOCAL,
+                    message="replayed local runner receipt",
+                )
+            raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+        if _has_launch_evidence(directory):
             raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
         launch_spec = {
             "executable": str(executable),
@@ -383,6 +510,7 @@ class LocalOrcaBackend(_BackendBase):
             "xyz_bytes_sha256": launch_request.binding.xyz_bytes_sha256,
             "host_identity": host_identity(),
             "permit": permit_fields(launch_request.permit),
+            "runtime_config": supplied_runtime,
         }
         self._write_atomic(
             directory / "launch.json", json.dumps(launch_spec, sort_keys=True).encode("utf-8")
@@ -395,7 +523,7 @@ class LocalOrcaBackend(_BackendBase):
                 "--state-root",
                 str(self.state_root),
                 "--execution-id",
-                str(launch_request.job.execution_id),
+                execution_id,
             ],
             cwd=str(self.state_root),
             stdin=subprocess.DEVNULL,
@@ -535,7 +663,14 @@ class LocalOrcaBackend(_BackendBase):
         )
 
 
-__all__ = ["FakeExecutionBackend", "LocalOrcaBackend"]
+__all__ = ["FakeExecutionBackend", "LocalOrcaBackend", "verify_frozen_file_hashes"]
+
+
+def _has_launch_evidence(directory: Path) -> bool:
+    return any(
+        (directory / name).exists()
+        for name in ("launch.json", "supervisor.json", "orca.pid", "orca.created")
+    )
 
 
 def _read_pid(path: Path) -> int | None:

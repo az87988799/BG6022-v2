@@ -19,6 +19,7 @@ from orca_agent.domain.json_types import thaw_json
 from orca_agent.domain.p3 import P3WorkflowState
 from orca_agent.domain.p4 import P4WorkflowState
 from orca_agent.domain.p5 import P5WorkflowState
+from orca_agent.domain.p6 import P6WorkflowState
 from orca_agent.domain.versions import CURRENT_SCHEMA_VERSION
 from orca_agent.orchestration.events import KernelEvent
 from orca_agent.orchestration.p3_kernel import P3KernelEvent
@@ -30,6 +31,9 @@ from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VE
 from orca_agent.orchestration.p5_kernel import P5KernelEvent
 from orca_agent.orchestration.p5_replay import verify_p5_snapshot
 from orca_agent.orchestration.p5_versions import P5_ENGINE_VERSION, P5_SCHEMA_VERSION
+from orca_agent.orchestration.p6_kernel import P6KernelEvent
+from orca_agent.orchestration.p6_replay import verify_p6_snapshot
+from orca_agent.orchestration.p6_versions import P6_ENGINE_VERSION, P6_SCHEMA_VERSION
 from orca_agent.orchestration.replay import state_hash, verify_snapshot
 from orca_agent.orchestration.state import KernelState
 from orca_agent.orchestration.versions import ENGINE_VERSION
@@ -68,7 +72,7 @@ class RunSnapshot:
     schema_version: int
     engine_version: str
     revision: int
-    state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState
+    state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState | P6WorkflowState
     state_hash: str
     last_event_id: EventId
     created_at_utc: datetime
@@ -77,7 +81,7 @@ class RunSnapshot:
 
 @dataclass(frozen=True)
 class StoredEvent:
-    event: KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent
+    event: KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent
     command_hash: str
 
 
@@ -109,6 +113,8 @@ class RunRepository:
                 state = P4WorkflowState.model_validate_json(str(row[5]), strict=True)
             elif schema_version == P5_SCHEMA_VERSION and engine_version == P5_ENGINE_VERSION:
                 state = P5WorkflowState.model_validate_json(str(row[5]), strict=True)
+            elif schema_version == P6_SCHEMA_VERSION and engine_version == P6_ENGINE_VERSION:
+                state = P6WorkflowState.model_validate_json(str(row[5]), strict=True)
             else:
                 raise StateIntegrityError("stored run version is unsupported")
             stored_hash = str(row[6])
@@ -122,6 +128,7 @@ class RunRepository:
                     P3_ENGINE_VERSION,
                     P4_ENGINE_VERSION,
                     P5_ENGINE_VERSION,
+                    P6_ENGINE_VERSION,
                 )
             ):
                 raise StateIntegrityError("stored run state does not match run metadata")
@@ -185,7 +192,7 @@ class RunRepository:
         *,
         run_id: RunId,
         expected_revision: int,
-        state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState,
+        state: KernelState | P3WorkflowState | P4WorkflowState | P5WorkflowState | P6WorkflowState,
         event_id: EventId,
         updated_at_utc: datetime,
     ) -> bool:
@@ -247,6 +254,16 @@ class RunRepository:
                 if not all(isinstance(event, P5KernelEvent) for event in event_values):
                     raise StateIntegrityError("P5 run contains a non-P5 event")
                 verify_p5_snapshot(
+                    snapshot=snapshot.state,
+                    stored_state_hash=snapshot.state_hash,
+                    stored_revision=snapshot.revision,
+                    stored_last_event_id=snapshot.last_event_id,
+                    events=event_values,  # type: ignore[arg-type]
+                )
+            elif isinstance(snapshot.state, P6WorkflowState):
+                if not all(isinstance(event, P6KernelEvent) for event in event_values):
+                    raise StateIntegrityError("P6 run contains a non-P6 event")
+                verify_p6_snapshot(
                     snapshot=snapshot.state,
                     stored_state_hash=snapshot.state_hash,
                     stored_revision=snapshot.revision,
@@ -335,6 +352,10 @@ class EventRepository:
                 event = P5KernelEvent.model_validate_json(
                     json.dumps(values, ensure_ascii=False), strict=True
                 )
+            elif schema_version == P6_SCHEMA_VERSION and str(row[10]) == P6_ENGINE_VERSION:
+                event = P6KernelEvent.model_validate_json(
+                    json.dumps(values, ensure_ascii=False), strict=True
+                )
             else:
                 raise StateIntegrityError("stored event version is unsupported")
             result = ApplicationResult.model_validate_json(
@@ -367,7 +388,7 @@ class EventRepository:
 
     def get(
         self, event_id: EventId
-    ) -> KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | None:
+    ) -> KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent | None:
         row = self.connection.execute(
             "SELECT event_id, command_id, command_type, command_hash, run_id, sequence_no, "
             "expected_revision, new_revision, event_type, schema_version, engine_version, "
@@ -379,7 +400,7 @@ class EventRepository:
 
     def append(
         self,
-        event: KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent,
+        event: KernelEvent | P3KernelEvent | P4KernelEvent | P5KernelEvent | P6KernelEvent,
         *,
         command_hash: str,
     ) -> None:

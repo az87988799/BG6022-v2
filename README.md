@@ -2,14 +2,19 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current phase: V2-P5 (PASS; merged to main)
+## Current phase: V2-P6 (review repairs; acceptance gates pending)
 
 P5 local ORCA implementation has been Owner-accepted and merged to `main`;
 the actual post-merge main CI passed. See
 [P5 acceptance](P5_ACCEPTANCE.md) and the [limited closeout repair](docs/P5_CLOSEOUT_REPAIR.md)
 for the complete verification record and release evidence. P5 is marked
-complete; P6 has not started. Real execution requires explicit bounded
-approval; offline fixtures and parser replay do not replace real acceptance.
+complete. P6 provides an offline derived scientific assessment and
+deterministic report over a fixed P5 source snapshot. Review repairs and real
+acceptance gates must close before Owner acceptance; P6 is not complete.
+See [P6 acceptance](docs/P6_ACCEPTANCE.md) and
+[ADR-0007](docs/adr/ADR-0007-p6-offline-science-report.md). Real execution
+requires explicit bounded approval; offline fixtures and parser replay do not
+replace real acceptance.
 
 ## V2-P0–P3 foundation
 
@@ -94,6 +99,23 @@ before returning `interrupt_expired`. A previously accepted submission can
 recover the same execution after approval expires. An unknown execution blocks
 cancellation; `execution_reconciliation_required` identifies retained execution
 facts requiring investigation. Dead-letter work is not automatically resumed.
+
+## P6 offline commands
+
+P6 reads a completed P5 run and never invokes ORCA, the network, or an LLM:
+
+```text
+python -m orca_agent --state-root <root> assess --source-run-id <p5_run_id> --profile p6.nonlinear.r2scan3c.v1 --json
+python -m orca_agent --state-root <root> worker --workflow p6 --drain --max-effects 20 --json
+python -m orca_agent --state-root <root> inspect --workflow p6 --run <p6_run_id> --json
+python -m orca_agent --state-root <root> report --run <p6_run_id> --format md --output report.md --json
+python -m orca_agent --state-root <root> verify-report --run <p6_run_id> --json
+python scripts/export_p6_evidence.py --state-root <root> --run-id <p6_run_id> --output <packet>
+python scripts/verify_p6_evidence.py --state-root <root> --run-id <p6_run_id> --evidence-root <packet>
+```
+
+The final P6 status is not complete until the Owner accepts the implementation
+and its evidence.
 
 ## Acceptance governance
 
