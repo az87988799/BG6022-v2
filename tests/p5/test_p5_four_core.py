@@ -49,14 +49,16 @@ def test_four_core_protocol_preserves_old_hashes_and_registers_fixed_resources()
     assert all(
         "resource_profile" not in P5_PROTOCOLS_BY_ID[item].content for item in OLD_PROTOCOL_HASHES
     )
-    assert P5_OPT_FREQ_SP_4CORE.protocol_id == "p5.opt_freq_sp.r2scan3c.4core.v1"
+    assert "p5.opt_freq_sp.r2scan3c.4core.v1" not in P5_PROTOCOLS_BY_ID
+    assert P5_OPT_FREQ_SP_4CORE.protocol_id == "p5.opt_freq_sp.r2scan3c.4core.v2"
+    assert P5_OPT_FREQ_SP_4CORE.version == "2"
     assert P5_OPT_FREQ_SP_4CORE.protocol_hash == (
-        "74ac7287213b4798ea14e62a0df1e0f943e1e433556c1be39bbaa7f21986cf70"
+        "090eccb882b3c7ba96f1068bce9db622405a0c04b5b760471a1bcef147391245"
     )
     assert P5_OPT_FREQ_SP_4CORE.content["resource_profile"] == {
         "nprocs": 4,
-        "total_memory_mb": 8192,
-        "maxcore_mb": 1536,
+        "total_memory_mb": 4096,
+        "maxcore_mb": 768,
         "parallel": True,
         "implicit_threads": 1,
         "run_wall_time_seconds": 3600,
@@ -78,9 +80,9 @@ def test_four_core_plan_compiler_and_runtime_binding_are_consistent(tmp_path):
         )
         for node in view.plan.nodes
     ] == [
-        (P5NodeKind.OPT, 4, 8192, 1536, 900, 3600),
-        (P5NodeKind.FREQ, 4, 8192, 1536, 1800, 3600),
-        (P5NodeKind.SP, 4, 8192, 1536, 300, 3600),
+        (P5NodeKind.OPT, 4, 4096, 768, 900, 3600),
+        (P5NodeKind.FREQ, 4, 4096, 768, 1800, 3600),
+        (P5NodeKind.SP, 4, 4096, 768, 300, 3600),
     ]
     node = view.plan.nodes[0]
     compiled = compile_orca_input(
@@ -150,7 +152,7 @@ def test_worker_passes_four_core_runtime_to_backend(tmp_path):
     assert len(backend.requests) == 1
     request = backend.requests[0]
     assert request.node.budget.nprocs == 4
-    assert request.node.budget.total_memory_mb == 8192
+    assert request.node.budget.total_memory_mb == 4096
     assert request.runtime_config is not None
     assert request.runtime_config["nprocs"] == 4
     assert request.runtime_config["parallel"] is True
@@ -213,7 +215,7 @@ def test_four_core_controlled_child_gets_fixed_threads_and_memory_limit(tmp_path
     )
     receipt = _receipt(directory)
     assert receipt["status"] == "succeeded"
-    assert receipt["resource_enforcement"]["job_memory_limit_bytes"] == 8192 * 1024 * 1024
+    assert receipt["resource_enforcement"]["job_memory_limit_bytes"] == 4096 * 1024 * 1024
     assert json.loads((directory / "thread-env.json").read_text()) == {
         "OMP_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1",
@@ -236,3 +238,24 @@ def test_four_core_memory_preflight_blocks_launch_without_child_start(tmp_path, 
         protocol_id=P5_OPT_FREQ_SP_4CORE.protocol_id,
     )
     assert not directory.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows physical-memory preflight")
+@pytest.mark.parametrize(
+    ("available_mb", "expected_outcome"), [(4095, "resource_limit_exceeded"), (4096, "starting")]
+)
+def test_four_core_memory_preflight_uses_inclusive_budget_boundary(
+    tmp_path, monkeypatch, available_mb, expected_outcome
+):
+    from orca_agent.execution import local_backend
+    from tests.p5.test_p5_local_runner import _controlled_run
+
+    monkeypatch.setattr(local_backend, "available_physical_memory_mb", lambda: available_mb)
+    _service, _view, directory = _controlled_run(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\nPath('boundary-child').write_text('ok')\n",
+        expected_outcome=expected_outcome,
+        protocol_id=P5_OPT_FREQ_SP_4CORE.protocol_id,
+    )
+    assert directory.exists() is (available_mb == 4096)

@@ -52,6 +52,14 @@ class _BackendBase:
     def _workdir(self, execution_id: str) -> Path:
         return execution_directory(self.state_root, str(execution_id), create=True)
 
+    def _existing_workdir(self, execution_id: str) -> Path | None:
+        try:
+            return execution_directory(self.state_root, str(execution_id), create=False)
+        except ValueError as error:
+            if str(error) == "execution directory is missing":
+                return None
+            raise
+
     @staticmethod
     def _write_atomic(path: Path, content: bytes) -> None:
         temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}")
@@ -382,6 +390,36 @@ class LocalOrcaBackend(_BackendBase):
             raise LaunchStateUnknown("local ORCA runtime configuration does not match its binding")
         if supplied_runtime["runtime_config_hash"] != launch_request.binding.runtime_config_hash:
             raise LaunchStateUnknown("local ORCA runtime hash does not match its binding")
+        execution_id = str(launch_request.job.execution_id)
+        directory = self._existing_workdir(execution_id)
+        if directory is not None:
+            receipt_path = directory / "exit_receipt.json"
+            if receipt_path.exists():
+                receipt = self._read_receipt(directory, execution_id=execution_id)
+                if receipt is None:
+                    raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
+                status = self._status(receipt.get("status"))
+                if status in {
+                    P5JobStatus.SUCCEEDED,
+                    P5JobStatus.FAILED,
+                    P5JobStatus.CANCELLED,
+                    P5JobStatus.TIMED_OUT,
+                    P5JobStatus.INTERRUPTED,
+                }:
+                    return LaunchObservation(
+                        execution_id=execution_id,
+                        job_id=str(launch_request.job.job_id),
+                        status=status,
+                        started=False,
+                        physical_start_count=1,
+                        receipt_path=receipt_path,
+                        data_origin=P5DataOrigin.ORCA_LOCAL,
+                        message="replayed local runner receipt",
+                    )
+                raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+            if _has_launch_evidence(directory):
+                raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+
         if launch_request.node.budget.nprocs > 1 and os.name == "nt":
             available_mb = available_physical_memory_mb()
             required_mb = launch_request.node.budget.total_memory_mb
@@ -391,19 +429,31 @@ class LocalOrcaBackend(_BackendBase):
                     f"{required_mb} MB available physical memory; observed {available_mb} MB"
                 )
         directory = self._materialize(launch_request)
-        receipt = self._read_receipt(directory, execution_id=str(launch_request.job.execution_id))
-        if receipt is not None:
-            return LaunchObservation(
-                execution_id=str(launch_request.job.execution_id),
-                job_id=str(launch_request.job.job_id),
-                status=self._status(receipt.get("status")),
-                started=False,
-                physical_start_count=1,
-                receipt_path=directory / "exit_receipt.json",
-                data_origin=P5DataOrigin.ORCA_LOCAL,
-                message="replayed local runner receipt",
-            )
-        if (directory / "launch.json").exists():
+        receipt_path = directory / "exit_receipt.json"
+        if receipt_path.exists():
+            receipt = self._read_receipt(directory, execution_id=execution_id)
+            if receipt is None:
+                raise LaunchStateUnknown("local ORCA receipt is not trustworthy")
+            status = self._status(receipt.get("status"))
+            if status in {
+                P5JobStatus.SUCCEEDED,
+                P5JobStatus.FAILED,
+                P5JobStatus.CANCELLED,
+                P5JobStatus.TIMED_OUT,
+                P5JobStatus.INTERRUPTED,
+            }:
+                return LaunchObservation(
+                    execution_id=execution_id,
+                    job_id=str(launch_request.job.job_id),
+                    status=status,
+                    started=False,
+                    physical_start_count=1,
+                    receipt_path=receipt_path,
+                    data_origin=P5DataOrigin.ORCA_LOCAL,
+                    message="replayed local runner receipt",
+                )
+            raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
+        if _has_launch_evidence(directory):
             raise LaunchStateUnknown("local ORCA launch has no trustworthy terminal receipt")
         launch_spec = {
             "executable": str(executable),
@@ -432,7 +482,7 @@ class LocalOrcaBackend(_BackendBase):
                 "--state-root",
                 str(self.state_root),
                 "--execution-id",
-                str(launch_request.job.execution_id),
+                execution_id,
             ],
             cwd=str(self.state_root),
             stdin=subprocess.DEVNULL,
@@ -573,6 +623,13 @@ class LocalOrcaBackend(_BackendBase):
 
 
 __all__ = ["FakeExecutionBackend", "LocalOrcaBackend"]
+
+
+def _has_launch_evidence(directory: Path) -> bool:
+    return any(
+        (directory / name).exists()
+        for name in ("launch.json", "supervisor.json", "orca.pid", "orca.created")
+    )
 
 
 def _read_pid(path: Path) -> int | None:

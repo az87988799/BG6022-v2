@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from orca_agent.application.errors import StateIntegrityError
+from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import (
     ArtifactId,
     AssessmentId,
@@ -18,6 +19,7 @@ from orca_agent.domain.ids import (
 from orca_agent.domain.p5 import GeometryRecord
 from orca_agent.domain.p6 import (
     MethodContext,
+    P6ClaimRecord,
     P6ClaimStatus,
     P6ComparabilityStatus,
     P6EvidenceRecord,
@@ -240,6 +242,50 @@ def _assessment(
     )
 
 
+def _difference_fixture(candidate_value=-76.4, reference_value=-76.2):
+    policy = get_policy("p6.nonlinear.r2scan3c.v1")
+    candidate_id = new_id(WorkflowRecordId)
+    reference_id = new_id(WorkflowRecordId)
+    candidate_context = _context()
+    reference_context = _context()
+    candidate_evidence = _evidence(
+        result_id=candidate_id, context=candidate_context, value=candidate_value
+    )
+    reference_evidence = _evidence(
+        result_id=reference_id, context=reference_context, value=reference_value
+    )
+    candidate_assessment = _assessment(
+        result_id=candidate_id, evidence=candidate_evidence, context=candidate_context
+    )
+    reference_assessment = _assessment(
+        result_id=reference_id, evidence=reference_evidence, context=reference_context
+    )
+    comparison = compare_electronic_energy(
+        candidate_assessment=candidate_assessment,
+        candidate_context=candidate_context,
+        candidate_evidence=candidate_evidence,
+        reference_assessment=reference_assessment,
+        reference_context=reference_context,
+        reference_evidence=reference_evidence,
+    )
+    difference = build_difference_claim(
+        assessment=candidate_assessment,
+        policy=policy,
+        comparison=comparison,
+        candidate_evidence=candidate_evidence,
+        reference_evidence=reference_evidence,
+    )
+    return (
+        policy,
+        candidate_assessment,
+        reference_assessment,
+        candidate_evidence,
+        reference_evidence,
+        comparison,
+        difference,
+    )
+
+
 def test_energy_claim_is_bound_and_fixture_claim_is_qualified() -> None:
     policy = get_policy("p6.nonlinear.r2scan3c.v1")
     result_id = new_id(WorkflowRecordId)
@@ -332,6 +378,8 @@ def test_comparison_direction_and_unknown_context_are_explicit() -> None:
         comparison=comparison,
         subject_result_ids=(candidate_id, reference_id),
         evidence_hashes=(candidate_evidence.evidence_hash, reference_evidence.evidence_hash),
+        candidate_evidence=candidate_evidence,
+        reference_evidence=reference_evidence,
     )
     validate_claim(
         difference,
@@ -339,6 +387,9 @@ def test_comparison_direction_and_unknown_context_are_explicit() -> None:
         external_evidence={reference_evidence.evidence_id: reference_evidence},
         assessment=candidate_assessment,
         policy=policy,
+        comparison=comparison,
+        reference_assessment=reference_assessment,
+        reference_assessment_id=reference_assessment.assessment_id,
     )
     unknown = compare_electronic_energy(
         candidate_assessment=candidate_assessment,
@@ -349,6 +400,183 @@ def test_comparison_direction_and_unknown_context_are_explicit() -> None:
         reference_evidence=reference_evidence,
     )
     assert unknown.status is P6ComparabilityStatus.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("candidate_value", "reference_value", "expected"),
+    [(-76.4, -76.2, -0.2), (-76.2, -76.4, 0.2)],
+)
+def test_difference_claim_accepts_both_directions_with_candidate_first_order(
+    candidate_value, reference_value, expected
+):
+    (
+        policy,
+        candidate_assessment,
+        reference_assessment,
+        candidate_evidence,
+        reference_evidence,
+        comparison,
+        difference,
+    ) = _difference_fixture(candidate_value, reference_value)
+    assert comparison.delta_energy == pytest.approx(expected)
+    validate_claim(
+        difference,
+        evidence={candidate_evidence.evidence_id: candidate_evidence},
+        external_evidence={reference_evidence.evidence_id: reference_evidence},
+        assessment=candidate_assessment,
+        policy=policy,
+        comparison=comparison,
+        reference_assessment=reference_assessment,
+        reference_assessment_id=reference_assessment.assessment_id,
+    )
+
+
+def test_difference_claim_rejects_rehashed_swapped_sides():
+    (
+        policy,
+        candidate_assessment,
+        reference_assessment,
+        candidate_evidence,
+        reference_evidence,
+        comparison,
+        difference,
+    ) = _difference_fixture()
+    fields = difference.model_dump(mode="python", exclude={"claim_hash"})
+    fields.update(
+        evidence_ids=(reference_evidence.evidence_id, candidate_evidence.evidence_id),
+        evidence_hashes=(reference_evidence.evidence_hash, candidate_evidence.evidence_hash),
+        subject_result_ids=(
+            reference_evidence.source_result_id,
+            candidate_evidence.source_result_id,
+        ),
+        value=0.2,
+        raw_value_token="0.2",
+    )
+    swapped = P6ClaimRecord.create(**fields)
+    with pytest.raises(StateIntegrityError, match="candidate/reference order"):
+        validate_claim(
+            swapped,
+            evidence={candidate_evidence.evidence_id: candidate_evidence},
+            external_evidence={reference_evidence.evidence_id: reference_evidence},
+            assessment=candidate_assessment,
+            policy=policy,
+            comparison=comparison,
+            reference_assessment=reference_assessment,
+            reference_assessment_id=reference_assessment.assessment_id,
+        )
+
+
+def test_difference_claim_rejects_another_reference_or_incompatible_comparison():
+    (
+        policy,
+        candidate_assessment,
+        reference_assessment,
+        candidate_evidence,
+        reference_evidence,
+        comparison,
+        difference,
+    ) = _difference_fixture()
+    other = _difference_fixture(reference_value=-76.3)
+    with pytest.raises(StateIntegrityError, match="assessment binding"):
+        validate_claim(
+            difference,
+            evidence={candidate_evidence.evidence_id: candidate_evidence},
+            external_evidence={other[4].evidence_id: other[4]},
+            assessment=candidate_assessment,
+            policy=policy,
+            comparison=comparison,
+            reference_assessment=other[2],
+            reference_assessment_id=other[2].assessment_id,
+        )
+    incompatible = compare_electronic_energy(
+        candidate_assessment=candidate_assessment,
+        candidate_context=_context(),
+        candidate_evidence=candidate_evidence,
+        reference_assessment=reference_assessment,
+        reference_context=_context(orca_version=None),
+        reference_evidence=reference_evidence,
+    )
+    with pytest.raises(StateIntegrityError, match="compatible comparison"):
+        validate_claim(
+            difference,
+            evidence={candidate_evidence.evidence_id: candidate_evidence},
+            external_evidence={reference_evidence.evidence_id: reference_evidence},
+            assessment=candidate_assessment,
+            policy=policy,
+            comparison=incompatible,
+            reference_assessment=reference_assessment,
+            reference_assessment_id=reference_assessment.assessment_id,
+        )
+
+
+def test_persisted_rehashed_swapped_difference_fails_report_verification(tmp_path):
+    from orca_agent.application.p6_service import P6ApplicationService
+    from orca_agent.domain.canonical import canonical_json_bytes
+    from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+    from orca_agent.orchestration.p6_commands import AssessP6Run
+    from orca_agent.reporting.p6_renderer import P6ReportRenderer
+    from tests.p6.test_p6_workflow import _fake_sp_source
+
+    service, clock, source = _fake_sp_source(tmp_path)
+    p6 = P6ApplicationService(service.state_root, clock=clock)
+    reference_result = p6.assess(
+        AssessP6Run.create(source_p5_run_id=source.run_id, requested_at_utc=clock.now_utc())
+    )
+    assert reference_result.accepted
+    assert [
+        item.outcome
+        for item in p6.create_worker().run_once(run_id=reference_result.run_id, limit=2)
+    ] == [
+        "succeeded",
+        "succeeded",
+    ]
+    baseline = p6.inspect(reference_result.run_id).assessment
+    derived_result = p6.assess(
+        AssessP6Run.create(
+            source_p5_run_id=source.run_id,
+            requested_at_utc=clock.now_utc(),
+            reference_assessment_id=baseline.assessment_id,
+        )
+    )
+    assert derived_result.accepted
+    assert [
+        item.outcome for item in p6.create_worker().run_once(run_id=derived_result.run_id, limit=2)
+    ] == [
+        "succeeded",
+        "succeeded",
+    ]
+    view = p6.inspect(derived_result.run_id)
+    original = next(
+        item for item in view.claims if item.claim_type.value == "electronic_energy_difference"
+    )
+    fields = original.model_dump(mode="python", exclude={"claim_hash"})
+    energy = [item for item in view.evidence if item.quantity == "electronic_energy"]
+    fields.update(
+        evidence_ids=(energy[0].evidence_id, energy[0].evidence_id),
+        evidence_hashes=(energy[0].evidence_hash, energy[0].evidence_hash),
+        subject_result_ids=(energy[0].source_result_id, energy[0].source_result_id),
+    )
+    tampered = P6ClaimRecord.create(**fields)
+    with SQLiteUnitOfWork(p6.database_path, clock=clock) as uow:
+        uow.begin()
+        trigger_names = uow.connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'trigger' AND tbl_name = 'workflow_records'"
+        ).fetchall()
+        for (name,) in trigger_names:
+            uow.connection.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        uow.connection.execute(
+            "UPDATE workflow_records SET record_json = ?, record_hash = ? WHERE record_id = ?",
+            (
+                canonical_json_bytes(tampered.model_dump(mode="json")).decode("utf-8"),
+                sha256_hex(tampered),
+                str(tampered.record_id),
+            ),
+        )
+        uow.commit()
+    assert not P6ReportRenderer(p6.database_path, p6.state_root, clock=clock).verify(
+        derived_result.run_id
+    )["valid"]
 
 
 def test_strict_policy_contract_rejects_unknown_schema_and_profile() -> None:

@@ -513,13 +513,18 @@ class P6ApplicationService:
             evidence = ingestion.evidence
             evidence_by_id = {item.evidence_id: item for item in evidence}
             claims = _make_claims(assessment, policy, ingestion, evidence, mode_analysis)
-            comparison, external_evidence = self._make_comparison(
+            comparison, external_evidence, reference_assessment = self._make_comparison(
                 uow.connection,
                 state=snapshot.state,
                 assessment=assessment,
                 ingestion=ingestion,
                 evidence=evidence,
             )
+            if snapshot.state.reference_assessment_id is None:
+                if comparison is not None or reference_assessment is not None:
+                    raise StateIntegrityError("comparison exists without a selected reference")
+            elif comparison is None or reference_assessment is None:
+                raise StateIntegrityError("selected reference has no comparison")
             if comparison is not None and comparison.status.value == "compatible":
                 candidate_energy = _selected_energy_evidence(evidence, ingestion.snapshot)
                 reference_energy = external_evidence.get(comparison.reference_energy_evidence_id)
@@ -536,6 +541,8 @@ class P6ApplicationService:
                             candidate_energy.evidence_hash,
                             reference_energy.evidence_hash,
                         ),
+                        candidate_evidence=candidate_energy,
+                        reference_evidence=reference_energy,
                     )
                     validate_claim(
                         difference,
@@ -543,6 +550,9 @@ class P6ApplicationService:
                         external_evidence=external_evidence,
                         assessment=assessment,
                         policy=policy,
+                        comparison=comparison,
+                        reference_assessment=reference_assessment,
+                        reference_assessment_id=snapshot.state.reference_assessment_id,
                     )
                     claims += (difference,)
             for claim in claims:
@@ -552,13 +562,37 @@ class P6ApplicationService:
                     external_evidence=external_evidence,
                     assessment=assessment,
                     policy=policy,
+                    comparison=comparison,
+                    reference_assessment=reference_assessment,
+                    reference_assessment_id=snapshot.state.reference_assessment_id,
                 )
 
-            return ingestion, policy, assessment, evidence, claims, comparison
+            return (
+                ingestion,
+                policy,
+                assessment,
+                evidence,
+                claims,
+                comparison,
+                reference_assessment,
+                external_evidence,
+            )
 
     def _assess_effect(self, permit: DispatchPermit, *, transaction, prepared) -> HandlerResult:
-        ingestion, policy, assessment, evidence, claims, comparison = prepared
+        (
+            ingestion,
+            policy,
+            assessment,
+            evidence,
+            claims,
+            comparison,
+            reference_assessment,
+            external_evidence,
+        ) = prepared
         with nullcontext(transaction) as uow:
+            snapshot = uow.runs.get_verified(permit.effect.run_id, uow.events, outbox=uow.outbox)
+            if not isinstance(snapshot.state, P6WorkflowState):
+                raise StateIntegrityError("P6 assessment publication has a non-P6 state")
             records = P6RecordRepository(uow.connection)
             current_source = load_source_bundle(
                 connection=uow.connection,
@@ -573,6 +607,17 @@ class P6ApplicationService:
                 item.model_dump(mode="json", exclude=excluded) for item in current_source.evidence
             ]:
                 raise StateIntegrityError("prepared evidence differs from original observations")
+            for claim in claims:
+                validate_claim(
+                    claim,
+                    evidence={item.evidence_id: item for item in evidence},
+                    external_evidence=external_evidence,
+                    assessment=assessment,
+                    policy=policy,
+                    comparison=comparison,
+                    reference_assessment=reference_assessment,
+                    reference_assessment_id=snapshot.state.reference_assessment_id,
+                )
             store = ArtifactStore(self.state_root, clock=self.clock)
             evidence_bytes = canonical_json_bytes(
                 [item.model_dump(mode="json") for item in evidence]
@@ -649,9 +694,13 @@ class P6ApplicationService:
         assessment: ScientificAssessment,
         ingestion: P6Ingestion,
         evidence: tuple[P6EvidenceRecord, ...],
-    ) -> tuple[ComparabilityAssessment | None, dict[object, P6EvidenceRecord]]:
+    ) -> tuple[
+        ComparabilityAssessment | None,
+        dict[object, P6EvidenceRecord],
+        ScientificAssessment | None,
+    ]:
         if state.reference_assessment_id is None:
-            return None, {}
+            return None, {}, None
         reference = self._reference_inputs(connection, state.reference_assessment_id)
         if reference is None:
             raise StateIntegrityError("explicit reference assessment was not found")
@@ -669,7 +718,11 @@ class P6ApplicationService:
             reference_context=reference_method,
             reference_evidence=reference_energy,
         )
-        return comparison, {item.evidence_id: item for item in reference_evidence}
+        return (
+            comparison,
+            {item.evidence_id: item for item in reference_evidence},
+            reference_assessment,
+        )
 
     @staticmethod
     def _reference_inputs(connection, assessment_id: AssessmentId):

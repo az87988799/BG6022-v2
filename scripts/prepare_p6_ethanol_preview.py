@@ -16,6 +16,7 @@ from verify_p5_real_orca import cli
 from orca_agent.domain.canonical import canonical_json_bytes
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.execution.orca_config import available_physical_memory_mb, runtime_config
+from orca_agent.planning.p5_protocols import P5_OPT_FREQ_SP_4CORE
 
 
 def _available_memory_mb() -> int | None:
@@ -167,7 +168,7 @@ def main():
         "--source-run-id",
         source["run_id"],
         "--protocol",
-        "p5.opt_freq_sp.r2scan3c.4core.v1",
+        P5_OPT_FREQ_SP_4CORE.protocol_id,
         "--backend",
         "local_orca",
         "--orca-executable",
@@ -181,19 +182,14 @@ def main():
     expected_kinds = ["opt", "freq", "sp"]
     if [node["kind"] for node in nodes] != expected_kinds:
         raise ValueError("Ethanol four-core preview has an unexpected node sequence")
-    expected_resources = [(4, 8192, 1536, 900), (4, 8192, 1536, 1800), (4, 8192, 1536, 300)]
-    actual_resources = [
-        (
-            node["budget"]["nprocs"],
-            node["budget"]["total_memory_mb"],
-            node["budget"]["maxcore_mb"],
-            node["budget"]["wall_time_seconds"],
-        )
-        for node in nodes
+    expected_budgets = [
+        P5_OPT_FREQ_SP_4CORE.budget_for(kind).model_dump(mode="json")
+        for kind in P5_OPT_FREQ_SP_4CORE.nodes
     ]
-    if actual_resources != expected_resources:
-        raise ValueError(f"Ethanol four-core node resources differ: {actual_resources}")
-    if view["binding"]["budget"] != nodes[0]["budget"]:
+    actual_budgets = [node["budget"] for node in nodes]
+    if actual_budgets != expected_budgets:
+        raise ValueError(f"Ethanol four-core node resources differ: {actual_budgets}")
+    if view["binding"]["budget"] != expected_budgets[0]:
         raise ValueError("initial binding budget differs from the four-core Opt node")
     runtime = runtime_config(
         state_root=root,
@@ -202,7 +198,7 @@ def main():
         profile_hash=view["binding"]["feature_profile_hash"],
         nprocs=nodes[0]["budget"]["nprocs"],
         implicit_threads=1,
-        parallel=True,
+        parallel=P5_OPT_FREQ_SP_4CORE.parallel,
     )
     if runtime["runtime_config_hash"] != view["binding"]["runtime_config_hash"]:
         raise ValueError("four-core preview runtime hash differs from its binding")

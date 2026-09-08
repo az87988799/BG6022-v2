@@ -89,6 +89,7 @@ def _protocol(
     sources: tuple[P5GeometrySource, ...],
     dependencies: tuple[tuple[int, ...], ...],
     *,
+    version: str = "1",
     source_from_opt: bool = False,
     nprocs: int = 1,
     total_memory_mb: int = 2048,
@@ -122,7 +123,7 @@ def _protocol(
         }
     hash_values = {
         "protocol_id": protocol_id,
-        "version": "1",
+        "version": version,
         "nodes": list(nodes),
         "geometry_sources": list(sources),
         "dependencies": [list(item) for item in dependencies],
@@ -131,7 +132,7 @@ def _protocol(
     }
     return P5ProtocolSpec(
         protocol_id=protocol_id,
-        version="1",
+        version=version,
         nodes=nodes,
         geometry_sources=sources,
         dependencies=dependencies,
@@ -175,13 +176,14 @@ P5_OPT_FREQ_SP = _protocol(
     ((), (0,), (0, 1)),
 )
 P5_OPT_FREQ_SP_4CORE = _protocol(
-    "p5.opt_freq_sp.r2scan3c.4core.v1",
+    "p5.opt_freq_sp.r2scan3c.4core.v2",
     (P5NodeKind.OPT, P5NodeKind.FREQ, P5NodeKind.SP),
     (P5GeometrySource.INITIAL, P5GeometrySource.OPTIMIZED, P5GeometrySource.OPTIMIZED),
     ((), (0,), (0, 1)),
+    version="2",
     nprocs=4,
-    total_memory_mb=8192,
-    maxcore_mb=1536,
+    total_memory_mb=4096,
+    maxcore_mb=768,
     parallel=True,
     fixed_budget=True,
 )

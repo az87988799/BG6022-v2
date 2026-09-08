@@ -362,7 +362,18 @@ class P6ReportRenderer:
             for _id, kind, item in records.list_p6_for_run(state.run_id)
             if kind == "p6.comparability" and isinstance(item, ComparabilityAssessment)
         )
+        if state.reference_assessment_id is None:
+            if comparisons or state.comparability_id is not None:
+                raise StateIntegrityError("P6 comparison exists without a selected reference")
+        elif (
+            len(comparisons) != 1
+            or state.comparability_id != comparisons[0].record_id
+            or comparisons[0].reference_assessment_id != state.reference_assessment_id
+        ):
+            raise StateIntegrityError("P6 comparison does not match the selected reference")
         external_evidence: dict[object, P6EvidenceRecord] = {}
+        comparison_for_claim = None
+        reference_assessment_for_claim = None
         for comparison in comparisons:
             if comparison.candidate_assessment_id != assessment.assessment_id:
                 raise StateIntegrityError("P6 comparison candidate assessment is not current")
@@ -402,6 +413,8 @@ class P6ReportRenderer:
                 mode="json", exclude=excluded_comparison
             ) != regenerated.model_dump(mode="json", exclude=excluded_comparison):
                 raise StateIntegrityError("P6 comparison does not follow verified evidence")
+            comparison_for_claim = comparison
+            reference_assessment_for_claim = reference_assessment
             for _id, kind, item in records.list_p6_for_run(_reference_run_id):
                 if kind == "p6.evidence" and isinstance(item, P6EvidenceRecord):
                     external_evidence[item.evidence_id] = item
@@ -412,6 +425,9 @@ class P6ReportRenderer:
                 external_evidence=external_evidence,
                 assessment=assessment,
                 policy=policy,
+                comparison=comparison_for_claim,
+                reference_assessment=reference_assessment_for_claim,
+                reference_assessment_id=state.reference_assessment_id,
             )
         ingestion = load_source_bundle(
             connection=connection,

@@ -118,6 +118,42 @@ def test_local_runner_starts_controlled_python_child_and_replays_receipt(tmp_pat
     assert (directory / "exit_receipt.json").read_bytes() == before
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows physical-memory preflight")
+def test_local_backend_replays_terminal_receipt_before_low_memory_preflight(tmp_path, monkeypatch):
+    from orca_agent.execution import local_backend
+    from orca_agent.planning.p5_protocols import P5_OPT_FREQ_SP_4CORE
+
+    def seed_receipt(service, request):
+        directory = service.backend._materialize(request)
+        payload = {
+            "status": "succeeded",
+            "exit_code": 0,
+            "physical_start_count": 1,
+            "data_origin": "orca_local",
+            "execution_id": str(request.job.execution_id),
+            "job_id": str(request.job.job_id),
+            "launch_token": request.job.launch_token,
+            "host_identity": request.job.host_identity,
+        }
+        (directory / "exit_receipt.json").write_text(json.dumps(payload), encoding="utf-8")
+        monkeypatch.setattr(local_backend, "available_physical_memory_mb", lambda: 1024)
+
+    service, view, directory = _controlled_run(
+        tmp_path,
+        monkeypatch,
+        "from pathlib import Path\nPath('unexpected-child').write_text('bad')\n",
+        before_launch=seed_receipt,
+        expected_outcome="succeeded",
+        protocol_id=P5_OPT_FREQ_SP_4CORE.protocol_id,
+    )
+    assert view.state.phase.value == "collecting"
+    assert view.job is not None and view.job.launch_consumed_at_utc is None
+    assert (directory / "exit_receipt.json").exists()
+    assert not (directory / "launch.json").exists()
+    assert not (directory / "supervisor.json").exists()
+    assert not (directory / "unexpected-child").exists()
+
+
 def test_continuous_poll_is_non_destructive_and_pid_reuse_is_rejected(tmp_path, monkeypatch):
     service, view, directory = _controlled_run(
         tmp_path, monkeypatch, "import time\ntime.sleep(8)\n"

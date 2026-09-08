@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from orca_agent.application.errors import StateIntegrityError
 from orca_agent.domain.p6 import (
     ComparabilityAssessment,
+    MethodContext,
     P6ClaimRecord,
     P6ClaimStatus,
     P6ClaimType,
@@ -126,19 +127,57 @@ def build_difference_claim(
     assessment: ScientificAssessment,
     policy: ScientificPolicy,
     comparison: ComparabilityAssessment,
-    subject_result_ids,
-    evidence_hashes,
+    subject_result_ids=None,
+    evidence_hashes=None,
     claim_id=None,
+    candidate_evidence: P6EvidenceRecord | None = None,
+    reference_evidence: P6EvidenceRecord | None = None,
 ) -> P6ClaimRecord:
     if comparison.status.value != "compatible":
         raise StateIntegrityError(
             "cannot build an energy difference claim from an incompatible comparison"
         )
+    if candidate_evidence is not None or reference_evidence is not None:
+        if candidate_evidence is None or reference_evidence is None:
+            raise StateIntegrityError("energy difference claim evidence must be supplied in pairs")
+        _require_evidence(candidate_evidence, quantity="electronic_energy")
+        _require_evidence(reference_evidence, quantity="electronic_energy")
+        if (
+            candidate_evidence.evidence_id != comparison.candidate_energy_evidence_id
+            or reference_evidence.evidence_id != comparison.reference_energy_evidence_id
+        ):
+            raise StateIntegrityError("energy difference claim evidence order is invalid")
+        expected_subjects = (
+            candidate_evidence.source_result_id,
+            reference_evidence.source_result_id,
+        )
+        if any(item is None for item in expected_subjects):
+            raise StateIntegrityError("energy difference claim evidence has no source result")
+        expected_hashes = (
+            candidate_evidence.evidence_hash,
+            reference_evidence.evidence_hash,
+        )
+        if subject_result_ids is None:
+            subject_result_ids = expected_subjects
+        elif tuple(subject_result_ids) != expected_subjects:
+            raise StateIntegrityError("energy difference claim subjects are not candidate-first")
+        if evidence_hashes is None:
+            evidence_hashes = expected_hashes
+        elif tuple(evidence_hashes) != expected_hashes:
+            raise StateIntegrityError("energy difference claim hashes are not candidate-first")
+    if subject_result_ids is None or evidence_hashes is None:
+        raise StateIntegrityError(
+            "energy difference claim requires two subjects and evidence hashes"
+        )
+    subject_result_ids = tuple(subject_result_ids)
+    evidence_hashes = tuple(evidence_hashes)
+    if len(subject_result_ids) != 2 or len(evidence_hashes) != 2:
+        raise StateIntegrityError("energy difference claim requires exactly two ordered sides")
     return P6ClaimRecord.create(
         record_id=_record_id(),
         claim_id=claim_id or _claim_id(),
         claim_type=P6ClaimType.ELECTRONIC_ENERGY_DIFFERENCE,
-        subject_result_ids=tuple(subject_result_ids),
+        subject_result_ids=subject_result_ids,
         quantity="electronic_energy_difference",
         value=comparison.delta_energy,
         raw_value_token=comparison.delta_energy_token,
@@ -167,6 +206,9 @@ def validate_claim(
     assessment: ScientificAssessment,
     policy: ScientificPolicy,
     external_evidence: Mapping[object, P6EvidenceRecord] | None = None,
+    comparison: ComparabilityAssessment | None = None,
+    reference_assessment: ScientificAssessment | None = None,
+    reference_assessment_id: object | None = None,
 ) -> None:
     if (
         claim.assessment_id != assessment.assessment_id
@@ -210,6 +252,16 @@ def validate_claim(
         expected_status = P6ClaimStatus.QUALIFIED
     if claim.status is not expected_status:
         raise StateIntegrityError("claim support status is invalid")
+    if claim.claim_type is P6ClaimType.ELECTRONIC_ENERGY_DIFFERENCE:
+        _validate_difference_claim_context(
+            claim=claim,
+            assessment=assessment,
+            evidence=evidence,
+            external_evidence=external_evidence,
+            comparison=comparison,
+            reference_assessment=reference_assessment,
+            reference_assessment_id=reference_assessment_id,
+        )
     values = []
     external = {} if external_evidence is None else dict(external_evidence)
     for evidence_id, expected_hash in zip(claim.evidence_ids, claim.evidence_hashes, strict=True):
@@ -266,6 +318,143 @@ def validate_claim(
             or claim.raw_value_token != f"{expected:.17g}"
         ):
             raise StateIntegrityError("energy difference value is not derived from evidence")
+
+
+def _validate_difference_claim_context(
+    *,
+    claim: P6ClaimRecord,
+    assessment: ScientificAssessment,
+    evidence: Mapping[object, P6EvidenceRecord],
+    external_evidence: Mapping[object, P6EvidenceRecord] | None,
+    comparison: ComparabilityAssessment | None,
+    reference_assessment: ScientificAssessment | None,
+    reference_assessment_id: object | None,
+) -> None:
+    if comparison is None or reference_assessment is None:
+        raise StateIntegrityError(
+            "energy difference claim requires a verified comparison and reference assessment"
+        )
+    if comparison.status.value != "compatible":
+        raise StateIntegrityError("energy difference claim requires a compatible comparison")
+    if (
+        comparison.candidate_assessment_id != assessment.assessment_id
+        or comparison.candidate_assessment_hash != assessment.assessment_hash
+        or comparison.reference_assessment_id != reference_assessment.assessment_id
+        or comparison.reference_assessment_hash != reference_assessment.assessment_hash
+        or (
+            reference_assessment_id is not None
+            and comparison.reference_assessment_id != reference_assessment_id
+        )
+    ):
+        raise StateIntegrityError("energy difference comparison assessment binding is invalid")
+    if not reference_assessment.integrity_verified:
+        raise StateIntegrityError("energy difference reference assessment is not verified")
+
+    reference = {} if external_evidence is None else dict(external_evidence)
+    candidate_energy = evidence.get(comparison.candidate_energy_evidence_id)
+    reference_energy = reference.get(comparison.reference_energy_evidence_id)
+    if candidate_energy is None or reference_energy is None:
+        raise StateIntegrityError("energy difference comparison evidence is missing")
+    _require_comparison_evidence(
+        candidate_energy,
+        assessment,
+        label="candidate",
+        expected_source_origin=assessment.source_origin,
+    )
+    _require_comparison_evidence(
+        reference_energy,
+        reference_assessment,
+        label="reference",
+        expected_source_origin=reference_assessment.source_origin,
+    )
+    _require_evidence(candidate_energy, quantity="electronic_energy")
+    _require_evidence(reference_energy, quantity="electronic_energy")
+    candidate_context = _method_context_for_evidence(
+        evidence, assessment, candidate_energy.context_hash
+    )
+    reference_context = _method_context_for_evidence(
+        reference, reference_assessment, reference_energy.context_hash
+    )
+    if candidate_context is None or reference_context is None:
+        raise StateIntegrityError("energy difference comparison method context is missing")
+
+    from orca_agent.science.comparability import compare_electronic_energy
+
+    regenerated = compare_electronic_energy(
+        candidate_assessment=assessment,
+        candidate_context=candidate_context,
+        candidate_evidence=candidate_energy,
+        reference_assessment=reference_assessment,
+        reference_context=reference_context,
+        reference_evidence=reference_energy,
+    )
+    excluded_comparison = {"record_id", "comparability_hash"}
+    if comparison.model_dump(mode="json", exclude=excluded_comparison) != regenerated.model_dump(
+        mode="json", exclude=excluded_comparison
+    ):
+        raise StateIntegrityError("energy difference comparison does not follow verified evidence")
+
+    expected_subjects = (candidate_energy.source_result_id, reference_energy.source_result_id)
+    if any(item is None for item in expected_subjects):
+        raise StateIntegrityError("energy difference comparison evidence has no source result")
+    expected_hashes = (candidate_energy.evidence_hash, reference_energy.evidence_hash)
+    expected_delta = float(candidate_energy.value) - float(reference_energy.value)
+    expected_token = f"{expected_delta:.17g}"
+    if (
+        claim.evidence_ids
+        != (
+            comparison.candidate_energy_evidence_id,
+            comparison.reference_energy_evidence_id,
+        )
+        or claim.evidence_hashes != expected_hashes
+        or claim.subject_result_ids != expected_subjects
+        or claim.quantity != "electronic_energy_difference"
+        or claim.unit != "Eh"
+        or claim.formula != "E_candidate - E_reference"
+        or claim.value != expected_delta
+        or claim.raw_value_token != expected_token
+        or comparison.delta_energy != expected_delta
+        or comparison.delta_energy_token != expected_token
+    ):
+        raise StateIntegrityError(
+            "energy difference claim is not bound to candidate/reference order"
+        )
+
+
+def _require_comparison_evidence(
+    item: P6EvidenceRecord,
+    assessment: ScientificAssessment,
+    *,
+    label: str,
+    expected_source_origin: P6SourceOrigin,
+) -> None:
+    if (
+        item.evidence_id not in assessment.evidence_ids
+        or item.source_result_id is None
+        or item.source_result_id not in assessment.result_ids
+        or item.source_p5_run_id != assessment.source_p5_run_id
+        or item.source_origin != expected_source_origin
+    ):
+        raise StateIntegrityError(
+            f"energy difference {label} evidence is outside its source closure"
+        )
+
+
+def _method_context_for_evidence(
+    values: Mapping[object, P6EvidenceRecord],
+    assessment: ScientificAssessment,
+    context_hash: str | None,
+) -> MethodContext | None:
+    if context_hash is None:
+        return None
+    for item in values.values():
+        if (
+            item.evidence_id in assessment.evidence_ids
+            and item.context_hash == context_hash
+            and isinstance(item.context, MethodContext)
+        ):
+            return item.context
+    return None
 
 
 def _require_subject(assessment, evidence, subject_result_id) -> None:
