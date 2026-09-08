@@ -118,7 +118,7 @@ implementation checks are not a claim that every acceptance scenario was run.
 | R6-03 restart | Water fresh-process record; unchanged source fingerprint |
 | R6-04 negative checks | Review tests; final results below |
 | R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol four-core archive absent |
-| Corresponding SHA CI | [PR #7 checks](https://github.com/az87988799/BG6022-v2/pull/7/checks); actual head SHA must pass |
+| Corresponding SHA CI | [Run 34221187405](https://github.com/az87988799/BG6022-v2/actions/runs/34221187405) for `833eb827b6d9a74a8e7edc7334b7ef0aded9b719`; quality, Ubuntu 3.11/3.14 and Windows 3.14 all passed |
 | Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
 The prior four-core previews were inspected and cancelled because they used the
@@ -149,8 +149,9 @@ unchanged and is not reused as four-core authorization.
   low-memory receipt replay and controlled Windows child/Job Object coverage
   are included in that current P5/P6 result.
 - Ruff check, format check (**223 files**), compileall and diff whitespace all
-  passed. Full cross-platform/coverage and package-build gates remain
-  GitHub-CI responsibilities for the submitted SHA.
+  passed. GitHub Actions run [34221187405](https://github.com/az87988799/BG6022-v2/actions/runs/34221187405)
+  passed quality, package build, Ubuntu 3.11/3.14 tests and the Ubuntu 3.14
+  branch-coverage gate, plus Windows 3.14 tests.
 - Clean detached checkout at `1b1246d2fd2b378f79c09fe901ff39d13d0a4cde`:
   the imported package path was explicitly the checkout's `src/orca_agent`,
   the working tree was clean, and archived Water verification returned true
