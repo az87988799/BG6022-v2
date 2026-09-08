@@ -89,7 +89,7 @@ def export_ledger(connection, state_root: Path, run_id: RunId, output: Path) -> 
 def seal_packet(root: Path, manifest: P6ReportManifest) -> None:
     files = {}
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "packet_manifest.json":
+        if path.is_file() and path != root / "packet_manifest.json":
             content = path.read_bytes()
             files[path.relative_to(root).as_posix()] = {
                 "sha256": hashlib.sha256(content).hexdigest(),
@@ -131,7 +131,7 @@ def validate_packet(root: Path, run_id: RunId) -> P6ReportManifest:
     actual_paths = {
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
-        if path.is_file() and path.name != "packet_manifest.json"
+        if path.is_file() and path != root / "packet_manifest.json"
     }
     if actual_paths != set(packet["files"]):
         raise StateIntegrityError("packet file closure is incomplete or contains extra files")

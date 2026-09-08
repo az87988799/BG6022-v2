@@ -643,7 +643,7 @@ def _build_evidence(
         P6EvidenceRecord.create(
             record_id=new_id(WorkflowRecordId),
             evidence_id=new_id(EvidenceId),
-            source_p5_run_id=snapshot.source_p5_run_id,
+            source_p5_run_id=first.result.run_id,
             source_result_id=first.source_ref.result_id,
             source_execution_id=first.source_ref.execution_id,
             quantity="method_context",
@@ -669,7 +669,7 @@ def _build_evidence(
             P6EvidenceRecord.create(
                 record_id=new_id(WorkflowRecordId),
                 evidence_id=new_id(EvidenceId),
-                source_p5_run_id=snapshot.source_p5_run_id,
+                source_p5_run_id=frequency.result.run_id,
                 source_result_id=frequency.source_ref.result_id,
                 source_execution_id=frequency.source_ref.execution_id,
                 quantity="thermochemistry_context",
@@ -718,7 +718,7 @@ def _build_evidence(
             P6EvidenceRecord.create(
                 record_id=new_id(WorkflowRecordId),
                 evidence_id=new_id(EvidenceId),
-                source_p5_run_id=snapshot.source_p5_run_id,
+                source_p5_run_id=bundle.result.run_id,
                 source_result_id=bundle.source_ref.result_id,
                 source_execution_id=bundle.source_ref.execution_id,
                 quantity="electronic_energy",
@@ -752,7 +752,7 @@ def _build_evidence(
                 P6EvidenceRecord.create(
                     record_id=new_id(WorkflowRecordId),
                     evidence_id=new_id(EvidenceId),
-                    source_p5_run_id=snapshot.source_p5_run_id,
+                    source_p5_run_id=bundle.result.run_id,
                     source_result_id=bundle.source_ref.result_id,
                     source_execution_id=bundle.source_ref.execution_id,
                     quantity="vibrational_frequency",

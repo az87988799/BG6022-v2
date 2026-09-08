@@ -380,7 +380,54 @@ def test_external_opt_reference_freezes_original_owner(tmp_path):
         "succeeded",
     ]
     assert opt.run_id in {x.owner_run_id for x in p6.inspect(run).source_snapshot.artifacts}
+    assert all(
+        item.source_p5_run_id == opt.run_id
+        for item in p6.inspect(run).evidence
+        if item.source_result_id == opt.results[0].record_id
+    )
     assert P6ReportRenderer(p6.database_path, p6.state_root).verify(run)["valid"]
+
+
+def test_reference_comparison_revalidates_both_source_closures(tmp_path):
+    service, clock, source = _fake_sp_source(tmp_path)
+    p6, reference = _derive(service, clock, source)
+    p6.create_worker().run_once(run_id=reference, limit=2)
+    baseline = p6.inspect(reference).assessment
+    derived = p6.assess(
+        AssessP6Run.create(
+            source_p5_run_id=source.run_id,
+            requested_at_utc=clock.now_utc(),
+            reference_assessment_id=baseline.assessment_id,
+        )
+    )
+    assert derived.accepted
+    assert [r.outcome for r in p6.create_worker().run_once(run_id=derived.run_id, limit=2)] == [
+        "succeeded",
+        "succeeded",
+    ]
+    assert p6.inspect(derived.run_id).comparisons[0].delta_energy == 0.0
+    assert P6ReportRenderer(p6.database_path, p6.state_root).verify(derived.run_id)["valid"]
+
+
+def test_committed_water_packet_verifies_without_original_database():
+    from pathlib import Path
+
+    from scripts.verify_p6_evidence import main
+
+    packet = Path(__file__).resolve().parents[2] / "docs/evidence/p6-water/packet"
+    assert (
+        main(
+            [
+                "--mode",
+                "archived_packet",
+                "--run-id",
+                "run_963622492d6c4e2fa3756367c6fd6a9a",
+                "--evidence-root",
+                str(packet),
+            ]
+        )
+        == 0
+    )
 
 
 def test_archive_is_portable_and_required_manifests_are_verified(tmp_path, capsys):
