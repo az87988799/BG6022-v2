@@ -1,0 +1,12 @@
+{
+  "command_id": "command_aa6808cacc864396b548681e4223bc4f",
+  "schema_version": 5,
+  "engine_version": "p6-science-v1",
+  "command_type": "p6.assess",
+  "run_id": "run_963622492d6c4e2fa3756367c6fd6a9a",
+  "requested_at_utc": "2026-09-08T01:51:16.692568Z",
+  "source_p5_run_id": "run_3e96adc04ed048f2aefee660908eaab2",
+  "profile_id": "p6.nonlinear.r2scan3c.v1",
+  "expected_source_revision": null,
+  "reference_assessment_id": null
+}

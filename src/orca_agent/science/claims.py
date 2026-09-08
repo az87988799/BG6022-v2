@@ -27,6 +27,7 @@ def build_energy_claim(
     claim_id=None,
 ) -> P6ClaimRecord:
     _require_evidence(evidence, quantity="electronic_energy")
+    _require_subject(assessment, evidence, subject_result_id)
     status, limitations = _origin_claim_status(assessment)
     return P6ClaimRecord.create(
         record_id=_record_id(),
@@ -57,6 +58,7 @@ def build_frequency_claim(
     claim_id=None,
 ) -> P6ClaimRecord:
     _require_evidence(evidence, quantity="vibrational_frequency")
+    _require_subject(assessment, evidence, subject_result_id)
     status, limitations = _origin_claim_status(assessment)
     return P6ClaimRecord.create(
         record_id=_record_id(),
@@ -180,6 +182,34 @@ def validate_claim(
         raise StateIntegrityError("fixture-origin evidence cannot produce a supported claim")
     if len(claim.evidence_ids) != len(claim.evidence_hashes):
         raise StateIntegrityError("claim evidence binding is incomplete")
+    if not assessment.integrity_verified:
+        raise StateIntegrityError("claim assessment integrity is not verified")
+    if claim.quantity != claim.claim_type.value:
+        raise StateIntegrityError("claim quantity is not supported for its type")
+    required_count = {
+        P6ClaimType.ELECTRONIC_ENERGY: 1,
+        P6ClaimType.VIBRATIONAL_FREQUENCY: 1,
+        P6ClaimType.ELECTRONIC_ENERGY_DIFFERENCE: 2,
+        P6ClaimType.LOCAL_MINIMUM_SUPPORT: len(assessment.evidence_ids),
+    }[claim.claim_type]
+    if len(claim.evidence_ids) != required_count or required_count == 0:
+        raise StateIntegrityError("claim evidence cardinality is invalid")
+    expected_status = _origin_claim_status(assessment)[0]
+    if claim.claim_type is P6ClaimType.LOCAL_MINIMUM_SUPPORT:
+        if assessment.minimum_status is not P6MinimumStatus.SUPPORTED_WITHIN_POLICY:
+            expected_status = P6ClaimStatus.QUALIFIED
+        if (
+            claim.evidence_ids != assessment.evidence_ids
+            or len(claim.subject_result_ids) != 1
+            or claim.subject_result_ids[0] not in assessment.result_ids
+            or claim.unit is not None
+            or claim.raw_value_token != assessment.minimum_status.value
+        ):
+            raise StateIntegrityError("minimum claim scope is invalid")
+    elif claim.claim_type is P6ClaimType.ELECTRONIC_ENERGY_DIFFERENCE:
+        expected_status = P6ClaimStatus.QUALIFIED
+    if claim.status is not expected_status:
+        raise StateIntegrityError("claim support status is invalid")
     values = []
     external = {} if external_evidence is None else dict(external_evidence)
     for evidence_id, expected_hash in zip(claim.evidence_ids, claim.evidence_hashes, strict=True):
@@ -192,13 +222,19 @@ def validate_claim(
             raise StateIntegrityError("claim references missing or changed evidence")
         if is_external and claim.claim_type is not P6ClaimType.ELECTRONIC_ENERGY_DIFFERENCE:
             raise StateIntegrityError("only energy difference claims may use external evidence")
-        if (
-            not is_external
-            and item.source_result_id not in assessment.result_ids
-            and item.source_result_id is not None
+        if not is_external and (
+            item.evidence_id not in assessment.evidence_ids
+            or item.source_origin != assessment.source_origin
+            or (
+                item.source_result_id is not None
+                and item.source_result_id not in assessment.result_ids
+            )
         ):
             raise StateIntegrityError("claim evidence is outside the assessment source closure")
         values.append(item)
+    if claim.claim_type is not P6ClaimType.LOCAL_MINIMUM_SUPPORT:
+        if claim.subject_result_ids != tuple(item.source_result_id for item in values):
+            raise StateIntegrityError("claim subjects do not match evidence in order")
     if claim.claim_type is P6ClaimType.ELECTRONIC_ENERGY:
         _require_evidence(values[0], quantity="electronic_energy")
         if (
@@ -224,13 +260,31 @@ def validate_claim(
         if any(item.quantity != "electronic_energy" or item.unit != "Eh" for item in values):
             raise StateIntegrityError("energy difference evidence is not electronic energy")
         expected = float(values[0].value) - float(values[1].value)
-        if claim.value != expected:
+        if (
+            claim.value != expected
+            or claim.unit != "Eh"
+            or claim.raw_value_token != f"{expected:.17g}"
+        ):
             raise StateIntegrityError("energy difference value is not derived from evidence")
+
+
+def _require_subject(assessment, evidence, subject_result_id) -> None:
+    if (
+        not assessment.integrity_verified
+        or subject_result_id != evidence.source_result_id
+        or subject_result_id not in assessment.result_ids
+        or evidence.evidence_id not in assessment.evidence_ids
+        or evidence.source_origin != assessment.source_origin
+    ):
+        raise StateIntegrityError("claim subject or evidence is outside its assessment")
 
 
 def _require_evidence(evidence: P6EvidenceRecord, *, quantity: str) -> None:
     if evidence.quantity != quantity or evidence.value is None or evidence.raw_value_token is None:
         raise StateIntegrityError("required scientific evidence is missing")
+    unit = {"electronic_energy": "Eh", "vibrational_frequency": "cm^-1"}[quantity]
+    if evidence.unit != unit or evidence.evidence_type.value != quantity:
+        raise StateIntegrityError("scientific evidence quantity or unit is invalid")
 
 
 def _origin_claim_status(

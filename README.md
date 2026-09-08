@@ -2,15 +2,16 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current phase: V2-P6 (IMPLEMENTED; Owner acceptance pending)
+## Current phase: V2-P6 (review repairs; acceptance gates pending)
 
 P5 local ORCA implementation has been Owner-accepted and merged to `main`;
 the actual post-merge main CI passed. See
 [P5 acceptance](P5_ACCEPTANCE.md) and the [limited closeout repair](docs/P5_CLOSEOUT_REPAIR.md)
 for the complete verification record and release evidence. P5 is marked
-complete. P6 is implemented as an offline derived scientific assessment and
-deterministic report over a fixed P5 source snapshot; Owner acceptance is still
-pending. See [P6 acceptance](docs/P6_ACCEPTANCE.md) and
+complete. P6 provides an offline derived scientific assessment and
+deterministic report over a fixed P5 source snapshot. Review repairs and real
+acceptance gates must close before Owner acceptance; P6 is not complete.
+See [P6 acceptance](docs/P6_ACCEPTANCE.md) and
 [ADR-0007](docs/adr/ADR-0007-p6-offline-science-report.md). Real execution
 requires explicit bounded approval; offline fixtures and parser replay do not
 replace real acceptance.

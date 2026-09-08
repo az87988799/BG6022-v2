@@ -44,17 +44,19 @@ class ParsedP6Observations:
     thermochemistry: ThermochemistryObservation
 
 
-def parse_hessian_observations(hessian_bytes: bytes) -> ParsedP6Observations:
+def parse_hessian_observations(
+    hessian_bytes: bytes, *, allow_missing_modes: bool = False
+) -> ParsedP6Observations:
     text = _decode(hessian_bytes, "Hessian")
     sections = _sections(text)
     mode_body, mode_start, mode_end = sections.get("normal_modes", (None, None, None))
     freq_body, freq_start, _ = sections.get("vibrational_frequencies", (None, None, None))
-    if mode_body is None or freq_body is None:
+    if (mode_body is None and not allow_missing_modes) or freq_body is None:
         raise ValueError("Hessian is missing normal_modes or vibrational_frequencies")
     dimension, frequencies, tokens, spans = _parse_frequency_section(
         text, freq_body, freq_start or 0
     )
-    normal_modes = _parse_normal_modes(mode_body, dimension)
+    normal_modes = () if mode_body is None else _parse_normal_modes(mode_body, dimension)
     scale_factor, scale_span = _parse_scalar_section(
         text, sections.get("frequency_scale_factor"), "frequency scale factor"
     )

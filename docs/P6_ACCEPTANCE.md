@@ -1,80 +1,136 @@
-# V2-P6 acceptance record
+# V2-P6 review repair and acceptance record
 
-Status: **IMPLEMENTED — OWNER ACCEPTANCE PENDING**
+Status: **REVIEW REPAIRS — REAL ACCEPTANCE GATES PENDING — NOT ACCEPTED**
 
-This record separates technical implementation from the Owner's final
-acceptance. The implementation is on branch `codex/v2-p6-science-report`,
-based on `0484b04fa70502da7a32a7cde0b0b09a8fdd4826`. The implementation commit
-and GitHub push are recorded in the delivery message after they occur. This
-file must not be read as an Owner `PASS` or acceptance decision.
+This supersedes the premature `IMPLEMENTED — OWNER ACCEPTANCE PENDING`
+description at `a2a31a4`. Technical closure is not merely an Owner signature.
+P5 remains accepted; its records, parser v4 and historical fixture hashes are
+not migrated. P6 is on `codex/v2-p6-science-report`. No merge, P6 PASS or P7
+start is authorized by this record.
 
-## Fixed P6 contracts
+## Review repairs
 
-| Contract | Value |
+- F1: preparation is separate from publication. Dispatch lease, source and
+  revision are checked in the transaction publishing scientific records,
+  artifact metadata, event, CAS, receipt and next effect. Expiry rolls back;
+  expected publication failures use a savepoint and retry. Process failure
+  leaves no committed business rows. Cancellation fences P6 internal effects
+  only; completed reports cannot be ordinarily cancelled.
+- F2: every stable Evidence field is compared with fresh parsing, including
+  value/token/unit/locator. Assessment and comparison semantics are rebuilt,
+  including referenced P6 sources. Parser/result/real binding versions agree.
+- F3: claim type/quantity/unit/cardinality/ordered subjects/support status are
+  constrained. Each comparison side must have valid integrity; isotope policy
+  is checked.
+- F4: both mandatory manifests and the exact file closure are verified.
+  `archived_packet` restores a disposable ledger from fixed-table typed rows
+  and artifact bytes, without executing packet SQL or accessing original state.
+  Explicit P5/P4 identity owners and comparison references are included.
+  This verifies supplied archive consistency, not third-party authenticity of
+  the original machine.
+- F5: external Opt IDs/hashes retain original ownership and verify identity,
+  method and XYZ relationships. Archived rejected executions with matching
+  terminal result receipts produce diagnostics and no scientific claims.
+  Missing mode matrices are scientifically unsupported, not fabricated.
+  New complete-mode Water/Ethanol test backends preserve historical fixtures.
+  Cancellation without any archived result/receipt is deliberately rejected as
+  an incomplete source, not presented as verified diagnostics.
+
+## Actual Water material — zero new ORCA calculations
+
+- P5 source: `run_3e96adc04ed048f2aefee660908eaab2`, revision 25.
+- New P6: `run_963622492d6c4e2fa3756367c6fd6a9a`.
+- [Report](evidence/p6-water/packet/report.md),
+  [JSON](evidence/p6-water/packet/report.json),
+  [packet manifest](evidence/p6-water/packet/packet_manifest.json),
+  [fresh-process evidence](evidence/p6-water/restart-evidence.json).
+- Separate Python processes assessed, resumed each effect, verified, retried
+  the idle worker and verified again. Source ledger before/after fingerprints
+  match; new P5 starts: **0**.
+- Independent archived verification succeeded. Exact energy and signed Hessian
+  tokens are in the report, with Claim → Evidence → artifact hash/locator
+  mappings. Final SP energy: `-76.418938721015 Eh`.
+
+Reproduce without the original database:
+
+```powershell
+python scripts/verify_p6_evidence.py --mode archived_packet --run-id run_963622492d6c4e2fa3756367c6fd6a9a --evidence-root docs/evidence/p6-water/packet
+```
+
+## Original P6-plan-v1 test mapping
+
+Names refer to `tests/p6/`: R = review_regressions, S = science,
+O = observations, W = workflow, C = CLI. This preserves the original numbering;
+implementation checks are not a claim that every acceptance scenario was run.
+
+| Plan ID | Original requirement and current evidence |
 |---|---|
-| schema | `5` |
-| engine | `p6-science-v1` |
-| dispatch policy | `6` |
-| scientific policy | `scientific-policy-v1` |
-| observation parser | `p6-observation-v1` |
-| renderer | `p6-report-v1` |
-| phases | `assessment_pending` → `report_pending` → `completed` |
-| effects | `internal.p6.assess`, `internal.p6.render_report` |
-| migration | no migration v8; P5 records remain unchanged |
+| T01 | Strict contracts/hash/version: S strict policy roundtrip; shared contract tests |
+| T02 | P5 unchanged: W immutable source; Water ledger fingerprints |
+| T03 | Per-action result/binding closure: exact ingestion bindings; R full three-node chain |
+| T04 | External Opt: R original owner; ingestion hash/identity/method/XYZ/cycle rejection |
+| T05 | Raw hash/size/path/owner: ArtifactStore; W tamper; packet file closure |
+| T06 | Persisted values vs reparse: R valid-hash -999 producer injection blocks report |
+| T07 | Real/fake origin: S fixture qualification; R qualified complete-mode chain |
+| T08 | SP-only: W derived SP report, no thermodynamic stability inference |
+| T09 | Opt XYZ → Freq → Hessian: real Water reparse and R full chains |
+| T10 | Water 9/3, Ethanol 27/21: R full-mode fixtures; real Water packet |
+| T11 | Six projected/extra zero/malformed columns: S layout and O matrix tests |
+| T12 | Linear/partial/unknown layout: S unsupported; R historical missing modes |
+| T13 | Negative/inconclusive/positive: S minimum policy matrix |
+| T14 | Exact -20/+1/50 boundaries: S boundary matrix; O signed tokens |
+| T15 | Signed frequencies: S fixed projection; O token tests |
+| T16 | Stdout thermo vs Hessian/missing values: O thermo tests; real Water |
+| T17 | Electronic energy is not Gibbs: R Gibbs quantity mutation rejected |
+| T18 | Comparison context/direction/isotope/integrity: S comparison; R invalid/isotope |
+| T19 | Unknown is not compatible: S unknown context; identity comparison dimensions |
+| T20 | Claim subject/unit/quantity/value/formula: S binding; R rehashed mutations |
+| T21 | Claim → Evidence → locator/policy: report mappings; assessment reconstruction |
+| T22 | Deterministic/replay/no duplicates: W/C replay; R two-generation race |
+| T23 | Crash/lease/two workers: R publication rollback, expiry and interleaved workers |
+| T24 | Cancel/late completion/P5 unchanged: R both internal stages; W isolation |
+| T25 | Manifest/raw/report/dependency tamper: W tamper; R missing/forged manifests |
+| T26 | Old routing/version handling: shared schema/kernel/P3 regressions |
+| T27 | Core/no extras/CLI/build/lock: separate quality/build gates; P6 has no runner |
+| T28 | Clean checkout actual bytes: committed Water archive; checkout gate below |
+| T29 | Actual processes/no P5 starts: restart-evidence.json; R subprocess |
+| T30 | Scientific unsupported vs integrity error: R missing modes/failed receipt vs -999 |
 
-## Automated and offline evidence
+## Remaining release gates
 
-The P6 unit, workflow, report-integrity, CLI, export, and replay coverage is
-implemented under `tests/p6/` (38 P6 tests pass). The full local suite passes
-with 565 passed, 1 skipped, and 1 warning; branch coverage is 80.45% against
-the unchanged 80% gate. Ruff check/format, compileall, `uv lock --check
---offline`, and the wheel/sdist build also pass locally. GitHub CI remains a
-separate post-push gate.
-
-The local Water closeout evidence uses:
-
-- P5 source run: `run_3e96adc04ed048f2aefee660908eaab2`;
-- P6 run: `run_ed330a658be14a8e968f28aa0f954809`;
-- verified P5 source revision: `25`;
-- 3 source results (`opt`, `freq`, `sp`), 14 P6 evidence records, and 7 claims;
-- final single-point energy: `-76.418938721015 Eh`;
-- Hessian dimension `3N=9`, six projected rigid modes, and three real modes:
-  `1653.248845317112`, `3813.580815193918`, and `3932.734982130532 cm^-1`;
-- stdout thermochemistry context: `298.15 K`, `1.00 atm`, Quasi-RRHO,
-  cutoff `1.00 cm^-1`, QRRHO reference `100.0 cm^-1`, symmetry number `2`;
-- local report verification and an exported evidence packet re-verification
-  both return `valid: true`.
-
-The Hessian's `actual_temperature=0.000000` field is not used as the report
-thermochemistry temperature; the stdout thermochemistry block is authoritative.
-
-## Plan coverage
-
-| Area | Status and evidence |
+| Gate | Status |
 |---|---|
-| T01–T06 contracts, immutable source snapshot, parser-v4 closure | Implemented; `src/orca_agent/domain/p6.py`, `src/orca_agent/evidence/p6_ingestion.py`, workflow tests |
-| T07 fixture-origin claim boundary | Implemented and tested; fixture data can only produce `qualified` claims |
-| T08 SP-only energy and no free-energy ranking | Implemented and tested; energy is final single-point electronic total in Eh |
-| T09–T13 minimum prerequisites, projection, layout, and exact frequency thresholds | Implemented and tested in `tests/p6/test_p6_science.py` |
-| T14–T16 claim/comparison/thermochemistry semantics | Implemented and tested; stdout thermo context is preserved |
-| T17–T19 deterministic reports, manifest closure, tamper fail-closed | Implemented and tested in workflow/report tests |
-| T20–T24 cancellation, retries, idempotence, outbox/effect binding | Implemented and covered by workflow tests and the existing kernel regressions |
-| T25 malformed/tampered state and replay | Implemented; reducer replay and report verification fail closed |
-| T26 P3/P5 regression | Local full suite verified; GitHub CI remains pending |
-| T27 lock, quality, compile, build, and CI gates | Local lock, Ruff, compileall, coverage, and build gates verified; GitHub CI remains pending |
-| T28 offline evidence export and verification | Implemented; `scripts/export_p6_evidence.py` and `scripts/verify_p6_evidence.py` pass on Water |
-| T29 cross-process CLI/restart behavior | Implemented and tested in `tests/p6/test_p6_cli.py` |
-| T30 Water/Ethanol release evidence | Water offline reparse packet verified; Ethanol real gate not run and remains pending explicit bounded approval |
+| R6-01 Water | New packet independently verified; zero new P5 starts |
+| R6-02 Ethanol real chain | **NOT RUN**; bounded preview prepared; explicit approval required |
+| R6-03 restart | Water fresh-process record; unchanged source fingerprint |
+| R6-04 negative checks | Review tests; final results below |
+| R6-05 clean archives | Water checkout gate pending; Ethanol archive absent |
+| Corresponding SHA CI | Pending repair commit/PR; old main CI does not count |
+| Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
-## Owner acceptance checklist
+Ethanol [preview](evidence/p6-ethanol-preview.json): one deterministic local
+`CCO` neutral singlet, gas-phase r2SCAN-3c, ORCA 6.1.1, 1 core, 2048 MB,
+at most three calculations, Opt/Freq/SP limits 900/1800/300 seconds,
+total 3000 seconds, no automatic retry or method/threshold adjustment.
+The existing protocol records a broader 3600-second run budget; requested
+acceptance authorization is the stricter 3000-second ceiling. No execution
+approval or calculation was submitted during preview preparation.
 
-The following decisions remain open until the Owner reviews the code, test
-results, report, and evidence packet:
+## Final verification log
 
-- [ ] Owner reviewed the P6 implementation and ADR.
-- [ ] Owner reviewed the Water report and exported evidence packet.
-- [ ] Owner reviewed the final full-suite, quality, build, and GitHub CI results.
-- [ ] Owner accepted P6 and authorized marking this phase complete.
-
-Until all applicable boxes are checked by the Owner, P6 remains
-`OWNER ACCEPTANCE PENDING`.
+- P6 suite after the transaction/source/archive repairs: **56 passed**.
+  Two additional semantic/version regressions were then added and tested.
+- Full Windows coverage run: **582 passed, 1 failed, 1 skipped, 31 warnings**;
+  branch coverage **80.98%**, exceeding the unchanged 80% threshold.
+  The failure was P5 `test_deadline_stops_the_controlled_process_tree`:
+  its two-second launch returned `launch_state_unknown` under coverage/load.
+  Its isolated rerun passed. This does not turn the failed full run green;
+  the final GitHub matrix remains a separate required gate.
+- Ruff check/format (222 files), compileall, diff whitespace, offline lock
+  check and wheel/sdist build passed. The wheel imports and P6 CLI help passed
+  in a separate core-only environment without NumPy, RDKit or httpx.
+  Its first offline dependency installation lacked a cached Pydantic wheel;
+  dependency setup was retried online, not hidden as an offline setup pass.
+- Corresponding-SHA GitHub CI and clean-checkout results are recorded after
+  those commands actually finish. Old main CI and the old 565/80.45% figure
+  are not repair evidence.

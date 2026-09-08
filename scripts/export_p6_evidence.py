@@ -1,4 +1,4 @@
-"""Export a small, local-ledger P6 evidence packet without running ORCA."""
+"""Export a portable P6 evidence and ledger closure without running ORCA."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from orca_agent.domain.p6 import P6ReportManifest
 from orca_agent.infrastructure.artifacts import ArtifactStore
 from orca_agent.infrastructure.p3_records import ArtifactRecordRepository
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
+from orca_agent.reporting.p6_packet import export_ledger, seal_packet
 from orca_agent.reporting.p6_renderer import P6ReportRenderer, _find_manifest_artifact
 
 
@@ -37,12 +38,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("P6 report manifest is missing")
 
     output = args.output.resolve()
+    if output.exists() and any(output.iterdir()):
+        raise SystemExit("evidence output must be empty")
     typed = output / "typed"
     raw = output / "raw"
     typed.mkdir(parents=True, exist_ok=True)
     raw.mkdir(parents=True, exist_ok=True)
     store = ArtifactStore(service.state_root)
-    packet_artifacts: list[dict[str, object]] = []
     with SQLiteUnitOfWork(service.database_path, clock=service.clock) as uow:
         uow.begin()
         artifacts = ArtifactRecordRepository(uow.connection)
@@ -53,16 +55,6 @@ def main(argv: list[str] | None = None) -> int:
             content = store.read(record)
             relative = Path("raw") / f"{record.artifact_id}.bin"
             (output / relative).write_bytes(content)
-            packet_artifacts.append(
-                {
-                    "artifact_id": str(record.artifact_id),
-                    "content_hash": record.content_hash,
-                    "size_bytes": record.size_bytes,
-                    "media_type": record.media_type,
-                    "owner_run_id": str(record.run_id),
-                    "packet_path": relative.as_posix(),
-                }
-            )
         manifest_artifact = _find_manifest_artifact(
             connection=uow.connection,
             state_root=service.state_root,
@@ -78,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             if artifact is None:
                 raise SystemExit(f"report artifact is missing: {artifact_id}")
             (output / name).write_bytes(store.read(artifact))
+        export_ledger(uow.connection, service.state_root, view.run_id, output)
         uow.commit()
 
     _write_json(typed / "source_snapshot.json", view.source_snapshot.model_dump(mode="json"))
@@ -92,32 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         typed / "comparisons.json", [item.model_dump(mode="json") for item in view.comparisons]
     )
     _write_json(output / "verification.json", verification)
-    _write_json(
-        output / "packet_manifest.json",
-        {
-            "schema": "p6-local-ledger-export/v1",
-            "verification_scope": manifest.verification_scope,
-            "run_id": str(view.run_id),
-            "source_p5_run_id": str(view.source_snapshot.source_p5_run_id),
-            "source_snapshot_hash": view.source_snapshot.snapshot_hash,
-            "report_manifest_id": str(manifest.report_manifest_id),
-            "report_manifest_hash": manifest.manifest_hash,
-            "artifacts": packet_artifacts,
-            "typed_files": [
-                "typed/source_snapshot.json",
-                "typed/policy.json",
-                "typed/evidence.json",
-                "typed/assessment.json",
-                "typed/claims.json",
-                "typed/comparisons.json",
-            ],
-            "notes": [
-                "This is an export from a verified local ledger, not a replacement "
-                "for its event history.",
-                "The source P5 artifacts retain their original owner IDs and hashes.",
-            ],
-        },
-    )
+    seal_packet(output, manifest)
     return 0
 
 

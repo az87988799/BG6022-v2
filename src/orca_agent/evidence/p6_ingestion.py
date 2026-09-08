@@ -96,17 +96,27 @@ def load_source_bundle(
     source_run_id: RunId,
     expected_snapshot: P6SourceSnapshot | None = None,
     expected_revision: int | None = None,
+    _selected_result_id: WorkflowRecordId | None = None,
+    _visited: tuple[RunId, ...] = (),
 ) -> P6Ingestion:
     """Load and verify a P5 source, optionally against a frozen P6 snapshot."""
 
     from orca_agent.infrastructure.repositories import EventRepository, RunRepository
+
+    if source_run_id in _visited:
+        raise StateIntegrityError("P5 upstream reference cycle")
+    _visited = (*_visited, source_run_id)
 
     runs = RunRepository(connection)
     events = EventRepository(connection)
     source = runs.get_verified(source_run_id, events)
     if not isinstance(source.state, P5WorkflowState):
         raise StateIntegrityError("P6 source must be a schema-4 P5 run")
-    if source.state.phase.value != "completed" or source.state.status.value != "ready":
+    if (source.state.phase.value, source.state.status.value) not in {
+        ("completed", "ready"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    }:
         raise StateIntegrityError("P6 source P5 run is not technically completed")
     if expected_revision is not None and source.revision != expected_revision:
         raise StateIntegrityError("P6 source revision does not match the requested snapshot")
@@ -150,8 +160,8 @@ def load_source_bundle(
     if expected_snapshot is not None:
         selected_ids = {item.result_id for item in expected_snapshot.results}
         results = tuple(item for item in results if item.record_id in selected_ids)
-        if len(results) != len(expected_snapshot.results):
-            raise StateIntegrityError("a frozen P5 result is no longer present")
+    if _selected_result_id is not None:
+        results = tuple(item for item in results if item.record_id == _selected_result_id)
     if not results:
         raise StateIntegrityError("P5 source contains no result records")
 
@@ -175,7 +185,46 @@ def load_source_bundle(
         if node is None or node.kind is not result.primitive:
             raise StateIntegrityError("P5 result primitive is not bound to its plan node")
         geometry = _geometry_for_binding(geometries, binding)
-        _verify_upstream(result, binding, result_by_action, results)
+        if binding.upstream_result_id is not None and not any(
+            item.record_id == binding.upstream_result_id for item in results
+        ):
+            owner = connection.execute(
+                "SELECT run_id FROM workflow_records WHERE record_id = ? "
+                "AND record_type = 'p5.result'",
+                (str(binding.upstream_result_id),),
+            ).fetchone()
+            if owner is None:
+                raise StateIntegrityError("explicit upstream Opt result is missing")
+            upstream_bundle = load_source_bundle(
+                connection=connection,
+                state_root=state_root,
+                source_run_id=RunId(owner[0]),
+                _selected_result_id=binding.upstream_result_id,
+                _visited=_visited,
+            )
+            upstream = upstream_bundle.results[-1]
+            if (
+                upstream.result.primitive is not P5NodeKind.OPT
+                or upstream.result.result_hash != binding.upstream_result_hash
+                or upstream.result.parse_status is not P5ParseStatus.COMPLETE
+                or upstream.geometry.identity_hash != geometry.identity_hash
+                or upstream.binding.method_profile_hash != binding.method_profile_hash
+            ):
+                raise StateIntegrityError("explicit upstream Opt binding is invalid")
+            from orca_agent.identity.geometry import parse_xyz_bytes
+
+            symbols, coordinates = parse_xyz_bytes(
+                upstream.bytes_for(upstream.source_ref.optimized_geometry_artifact_id)
+            )
+            if symbols != geometry.atom_symbols or any(
+                abs(a - b) > 2e-6
+                for left, right in zip(coordinates, geometry.coordinates, strict=True)
+                for a, b in zip(left, right, strict=True)
+            ):
+                raise StateIntegrityError("external Opt XYZ does not match Freq geometry")
+            bundles.extend(upstream_bundle.results)
+        else:
+            _verify_upstream(result, binding, result_by_action, results)
         job = LocalJobRepository(connection).get_by_execution(result.execution_id)
         if job is None:
             raise StateIntegrityError("P5 result execution has no local job")
@@ -194,6 +243,12 @@ def load_source_bundle(
             or job.terminal_receipt_hash != result.result_hash
         ):
             raise StateIntegrityError("complete P5 result has no matching terminal receipt")
+        if result.parse_status is not P5ParseStatus.COMPLETE and (
+            job.status.value not in {"failed", "cancelled", "interrupted", "timed_out"}
+            or job.terminal_receipt_id != result.record_id
+            or job.terminal_receipt_hash != result.result_hash
+        ):
+            raise StateIntegrityError("diagnostic P5 source has no confirmed terminal receipt")
 
         artifact_values: list[StoredArtifact] = []
         artifact_bytes: list[tuple[ArtifactId, bytes]] = []
@@ -260,11 +315,16 @@ def load_source_bundle(
                 artifact_bytes=artifact_bytes,
             )
             _compare_p5_result(result, parsed)
+            if (
+                result.data_origin.value == "orca_local"
+                and parsed.orca_version != binding.orca_version
+            ):
+                raise StateIntegrityError("parsed ORCA version differs from execution binding")
             if result.primitive is P5NodeKind.FREQ:
                 if hessian_artifact is None:
                     raise StateIntegrityError("complete frequency result has no Hessian")
                 observations = parse_hessian_observations(
-                    _bytes(artifact_bytes, hessian_artifact.artifact_id)
+                    _bytes(artifact_bytes, hessian_artifact.artifact_id), allow_missing_modes=True
                 )
                 observations = parse_stdout_observations(
                     _bytes(artifact_bytes, stdout_artifact.artifact_id), observations
@@ -496,6 +556,7 @@ def _reparse_result(
 def _compare_p5_result(stored: P5ResultRecord, parsed: ParsedOrcaResult) -> None:
     pairs = (
         (parsed.parser_version, P5_PARSER_VERSION),
+        (parsed.orca_version, stored.orca_version),
         (parsed.primitive, stored.primitive),
         (parsed.data_origin, stored.data_origin),
         (parsed.input_manifest_hash, stored.input_manifest_hash),
@@ -627,6 +688,27 @@ def _build_evidence(
         )
     for bundle in bundles:
         if bundle.parsed is None:
+            values.append(
+                P6EvidenceRecord.create(
+                    record_id=new_id(WorkflowRecordId),
+                    evidence_id=new_id(EvidenceId),
+                    source_p5_run_id=bundle.result.run_id,
+                    source_result_id=bundle.result.record_id,
+                    source_execution_id=bundle.result.execution_id,
+                    quantity="execution_fact",
+                    evidence_type=P6EvidenceType.EXECUTION_FACT,
+                    value=bundle.job.status.value,
+                    raw_value_token=bundle.job.status.value,
+                    locator=P6Locator(
+                        artifact_id=bundle.source_ref.stdout_artifact_id,
+                        artifact_hash=bundle.source_ref.stdout_hash,
+                        block="archived_terminal_output",
+                    ),
+                    source_artifact_id=bundle.source_ref.stdout_artifact_id,
+                    source_artifact_hash=bundle.source_ref.stdout_hash,
+                    source_origin=snapshot.source_origin,
+                )
+            )
             continue
         energy = bundle.parsed
         stdout_bytes = bundle.bytes_for(bundle.source_ref.stdout_artifact_id)
@@ -725,7 +807,7 @@ def _unique_artifacts(
                     media_type=artifact.media_type,
                     role=role,
                     relative_path=artifact.relative_path,
-                    owner_run_id=source_run_id,
+                    owner_run_id=artifact.run_id,
                     owner_action_id=artifact.action_id,
                     owner_execution_id=artifact.execution_id,
                 ),

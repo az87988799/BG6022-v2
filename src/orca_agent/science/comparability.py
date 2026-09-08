@@ -23,6 +23,9 @@ def compare_electronic_energy(
 ) -> ComparabilityAssessment:
     dimensions = (
         _dimension(
+            "isotope_policy", candidate_context.isotope_policy, reference_context.isotope_policy
+        ),
+        _dimension(
             "confirmed_identity", candidate_context.identity_hash, reference_context.identity_hash
         ),
         _dimension(
@@ -65,7 +68,22 @@ def compare_electronic_energy(
             (reference_evidence.quantity, reference_evidence.unit),
         ),
     )
-    if any(item.status is P6ComparabilityStatus.INCOMPATIBLE for item in dimensions):
+    valid_inputs = all(
+        assessment.integrity_verified
+        and item.evidence_id in assessment.evidence_ids
+        and item.source_result_id in assessment.result_ids
+        and item.source_p5_run_id == assessment.source_p5_run_id
+        and item.source_origin == assessment.source_origin
+        and item.quantity == "electronic_energy"
+        and item.unit == "Eh"
+        for assessment, item in (
+            (candidate_assessment, candidate_evidence),
+            (reference_assessment, reference_evidence),
+        )
+    )
+    if not valid_inputs or any(
+        item.status is P6ComparabilityStatus.INCOMPATIBLE for item in dimensions
+    ):
         status = P6ComparabilityStatus.INCOMPATIBLE
     elif any(item.status is P6ComparabilityStatus.UNKNOWN for item in dimensions):
         status = P6ComparabilityStatus.UNKNOWN

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -304,7 +305,7 @@ class P6ApplicationService:
                     raise InvalidTransitionError(
                         "P6 cancellation conversation does not own the run"
                     )
-                if snapshot.state.status.is_terminal:
+                if snapshot.state.status.is_terminal or snapshot.state.phase is P6Phase.COMPLETED:
                     raise InvalidTransitionError("P6 run is already terminal")
                 next_state = snapshot.state.model_copy(
                     update={
@@ -329,7 +330,7 @@ class P6ApplicationService:
                 if transition.next_state != next_state:
                     raise StateIntegrityError("P6 cancellation reducer changed the requested state")
                 uow.events.append(event, command_hash=command_hash)
-                uow.outbox.cancel_pending_for_run(
+                uow.outbox.cancel_p6_internal_for_run(
                     run_id=command.run_id, now=command.requested_at_utc
                 )
                 if not uow.runs.compare_and_swap(
@@ -436,13 +437,18 @@ class P6ApplicationService:
         worker_id=None,
         lease_duration: timedelta = timedelta(seconds=30),
     ) -> OutboxWorker:
+        prepared = {}
         renderer = P6ReportRenderer(self.database_path, self.state_root, clock=self.clock)
 
         def handler(permit: DispatchPermit) -> HandlerResult:
             if permit.effect.effect_type == "internal.p6.assess":
-                return self._assess_effect(permit)
+                prepared[(permit.effect.effect_id, permit.generation)] = self._prepare_assessment(
+                    permit
+                )
+                return HandlerResult(success=True, result_summary=EffectSuccessReceiptV1())
             if permit.effect.effect_type == "internal.p6.render_report":
-                return renderer.render(permit)
+                prepared[(permit.effect.effect_id, permit.generation)] = renderer.prepare(permit)
+                return HandlerResult(success=True, result_summary=EffectSuccessReceiptV1())
             return HandlerResult(success=False, error_code=HandlerErrorCode.HANDLER_FAILED)
 
         return OutboxWorker(
@@ -454,14 +460,16 @@ class P6ApplicationService:
             max_attempts=self.max_attempts,
             registry=P6_EFFECT_REGISTRY,
             completion_service_factory=lambda: P6EffectCompletion(
-                self, max_attempts=self.max_attempts
+                self, max_attempts=self.max_attempts, prepared=prepared
             ),
         )
 
-    def _assess_effect(self, permit: DispatchPermit) -> HandlerResult:
+    def _prepare_assessment(self, permit: DispatchPermit):
+        """Prepare immutable scientific records without publishing any business rows."""
         with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
+            uow.connection.execute("BEGIN")
+            uow.outbox.validate_handler_permit(permit=permit, now=self.clock.now_utc())
             self._require_kernel(uow)
-            uow.begin()
             snapshot = uow.runs.get_verified(permit.effect.run_id, uow.events, outbox=uow.outbox)
             if not isinstance(snapshot.state, P6WorkflowState):
                 raise StateIntegrityError("P6 assessment effect belongs to a non-P6 run")
@@ -474,8 +482,7 @@ class P6ApplicationService:
                 model_type=ScientificAssessment,
             )
             if existing is not None:
-                uow.commit()
-                return HandlerResult(success=True, result_summary=EffectSuccessReceiptV1())
+                raise StateIntegrityError("unacknowledged P6 assessment already exists")
             source = _source_snapshot_record(
                 records, permit.effect.run_id, snapshot.state.source_snapshot_id
             )
@@ -547,6 +554,25 @@ class P6ApplicationService:
                     policy=policy,
                 )
 
+            return ingestion, policy, assessment, evidence, claims, comparison
+
+    def _assess_effect(self, permit: DispatchPermit, *, transaction, prepared) -> HandlerResult:
+        ingestion, policy, assessment, evidence, claims, comparison = prepared
+        with nullcontext(transaction) as uow:
+            records = P6RecordRepository(uow.connection)
+            current_source = load_source_bundle(
+                connection=uow.connection,
+                state_root=self.state_root,
+                source_run_id=ingestion.snapshot.source_p5_run_id,
+                expected_snapshot=ingestion.snapshot,
+            )
+            if current_source.snapshot != ingestion.snapshot:
+                raise StateIntegrityError("prepared assessment source changed")
+            excluded = {"record_id", "evidence_id", "evidence_hash"}
+            if [item.model_dump(mode="json", exclude=excluded) for item in evidence] != [
+                item.model_dump(mode="json", exclude=excluded) for item in current_source.evidence
+            ]:
+                raise StateIntegrityError("prepared evidence differs from original observations")
             store = ArtifactStore(self.state_root, clock=self.clock)
             evidence_bytes = canonical_json_bytes(
                 [item.model_dump(mode="json") for item in evidence]
@@ -613,7 +639,6 @@ class P6ApplicationService:
                     source_event_id=permit.effect.source_event_id,
                     record_id=item.record_id,
                 )
-            uow.commit()
             return HandlerResult(success=True, result_summary=EffectSuccessReceiptV1())
 
     def _make_comparison(
@@ -747,11 +772,13 @@ class P6ApplicationService:
 class P6EffectCompletion:
     """Complete P6 effects through the shared fenced outbox protocol."""
 
-    def __init__(self, service: P6ApplicationService, *, max_attempts: int) -> None:
+    def __init__(self, service: P6ApplicationService, *, max_attempts: int, prepared=None) -> None:
         self.service = service
         self.max_attempts = max_attempts
+        self.prepared = {} if prepared is None else prepared
 
     def complete(self, permit: DispatchPermit, result: HandlerResult) -> EffectCompletionReport:
+        prepared_value = self.prepared.pop((permit.effect.effect_id, permit.generation), None)
         normalized = _normalize_handler_result(result)
         success, receipt, error_code = normalized
         terminal = success or permit.generation >= self.max_attempts
@@ -767,7 +794,52 @@ class P6EffectCompletion:
             if current is None:
                 raise StateIntegrityError("P6 effect disappeared")
 
+            # The handler never publishes records. Revalidate and publish all derived
+            # data in the same writer transaction as the completion event and CAS.
+            if current.status is OutboxStatus.DISPATCHING and success:
+                uow.outbox.validate_dispatch_permit(permit=permit, now=self.service.clock.now_utc())
+                if snapshot.revision != permit.run_revision:
+                    raise RevisionConflictError("P6 dispatch revision changed")
+                uow.connection.execute("SAVEPOINT p6_publication")
+                try:
+                    if permit.effect.effect_type == "internal.p6.assess":
+                        published = self.service._assess_effect(
+                            permit,
+                            transaction=uow,
+                            prepared=prepared_value,
+                        )
+                    else:
+                        published = P6ReportRenderer(
+                            self.service.database_path,
+                            self.service.state_root,
+                            clock=self.service.clock,
+                        ).render(
+                            permit,
+                            transaction=uow,
+                            prepared=prepared_value,
+                        )
+                    success, receipt, error_code = _normalize_handler_result(published)
+                    if not success:
+                        raise StateIntegrityError("P6 publication failed")
+                    now = self.service.clock.now_utc()
+                    uow.outbox.validate_dispatch_permit(permit=permit, now=now)
+
+                except (StateIntegrityError, OSError):
+                    uow.connection.execute("ROLLBACK TO p6_publication")
+                    success, receipt, error_code = False, None, HandlerErrorCode.HANDLER_FAILED
+                finally:
+                    uow.connection.execute("RELEASE p6_publication")
+
+            terminal = success or permit.generation >= self.max_attempts
+            outcome = "succeeded" if success else ("dead_letter" if terminal else "retry")
             command_id = completion_command_id(permit.effect.effect_id, permit.generation, outcome)
+            if success and current.status is OutboxStatus.SUCCEEDED:
+                previous_receipt = uow.command_receipts.get(command_id)
+                if previous_receipt is not None:
+                    previous_event = uow.events.get(previous_receipt.result_event_id)
+                    receipt = EffectSuccessReceiptV1.model_validate_json(
+                        json.dumps(thaw_json(previous_event.payload["result_summary"]))
+                    )
             command_hash = _completion_command_hash(
                 command_id=command_id,
                 permit=permit,
@@ -1206,6 +1278,7 @@ def _make_assessment(
                         )
                         if freq.source_ref.hessian_artifact_id is not None
                         and freq.source_ref.hessian_hash is not None
+                        and freq.observations.normal_modes
                         else None
                     ),
                 }
@@ -1255,6 +1328,8 @@ def _make_claims(
     mode_analysis: ModeAnalysis | None,
 ) -> tuple[P6ClaimRecord, ...]:
     values: list[P6ClaimRecord] = []
+    if any(bundle.parsed is None for bundle in ingestion.results):
+        return ()
     for bundle in ingestion.results:
         energy = next(
             (

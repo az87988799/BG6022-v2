@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 from orca_agent.application.errors import StateIntegrityError
@@ -33,7 +36,7 @@ from orca_agent.science.claims import validate_claim
 
 
 class P6ReportRenderer:
-    """Render only validated P6 records; no scientific values are recomputed here."""
+    """Revalidate source-derived science before deterministic report publication."""
 
     def __init__(
         self, database_path: str | Path, state_root: str | Path, *, clock: Clock | None = None
@@ -42,14 +45,38 @@ class P6ReportRenderer:
         self.state_root = Path(state_root).resolve()
         self.clock = clock or SystemClock()
 
-    def render(self, permit) -> HandlerResult:
+    def prepare(self, permit):
+        """Parse and render outside the publication transaction."""
+        with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
+            uow.connection.execute("BEGIN")
+            uow.outbox.validate_handler_permit(permit=permit, now=self.clock.now_utc())
+            snapshot = uow.runs.get_verified(permit.effect.run_id, uow.events, outbox=uow.outbox)
+            inputs = self._validated_inputs(uow.connection, snapshot.state)
+            ingestion, policy, assessment, evidence, claims, comparisons = inputs
+            report_value = _report_value(
+                run_id=permit.effect.run_id,
+                source=ingestion.snapshot,
+                policy=policy,
+                ingestion=ingestion,
+                assessment=assessment,
+                evidence=evidence,
+                claims=claims,
+                comparisons=comparisons,
+            )
+            return (
+                inputs,
+                report_value,
+                canonical_json_bytes(report_value),
+                _markdown_bytes(report_value),
+            )
+
+    def render(self, permit, *, transaction, prepared) -> HandlerResult:
         if permit.effect.effect_type != "internal.p6.render_report":
             return HandlerResult(success=False)
         try:
-            with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
+            with nullcontext(transaction) as uow:
                 if uow.runs is None or uow.events is None:
                     raise StateIntegrityError("P6 report repositories are unavailable")
-                uow.begin()
                 snapshot = uow.runs.get_verified(
                     permit.effect.run_id, uow.events, outbox=uow.outbox
                 )
@@ -69,7 +96,6 @@ class P6ReportRenderer:
                         run_id=permit.effect.run_id,
                         manifest=manifest,
                     )
-                    uow.commit()
                     return HandlerResult(
                         success=True,
                         result_summary=EffectSuccessReceiptV1(
@@ -83,21 +109,11 @@ class P6ReportRenderer:
                             )
                         ),
                     )
-                ingestion, policy, assessment, evidence, claims, comparisons = (
-                    self._validated_inputs(uow.connection, snapshot.state)
-                )
-                report_value = _report_value(
-                    run_id=permit.effect.run_id,
-                    source=ingestion.snapshot,
-                    policy=policy,
-                    ingestion=ingestion,
-                    assessment=assessment,
-                    evidence=evidence,
-                    claims=claims,
-                    comparisons=comparisons,
-                )
-                json_bytes = canonical_json_bytes(report_value)
-                markdown_bytes = _markdown_bytes(report_value)
+                inputs, report_value, json_bytes, markdown_bytes = prepared
+                ingestion, policy, assessment, evidence, claims, comparisons = inputs
+                checked = self._validated_inputs(uow.connection, snapshot.state)
+                if checked[0].snapshot != ingestion.snapshot or checked[1:] != inputs[1:]:
+                    raise StateIntegrityError("prepared report inputs changed")
                 store = ArtifactStore(self.state_root, clock=self.clock)
                 markdown = store.put_owned(
                     connection=uow.connection,
@@ -162,7 +178,6 @@ class P6ReportRenderer:
                     source_event_id=permit.effect.source_event_id,
                     record_id=manifest.record_id,
                 )
-                uow.commit()
                 return HandlerResult(
                     success=True,
                     result_summary=EffectSuccessReceiptV1(
@@ -174,7 +189,7 @@ class P6ReportRenderer:
                     ),
                 )
         except Exception:
-            return HandlerResult(success=False)
+            raise
 
     def verify(self, run_id: RunId) -> dict[str, object]:
         """Verify the complete local-ledger report and deterministic bytes."""
@@ -291,7 +306,10 @@ class P6ReportRenderer:
                 "source_reparse_verified": False,
             }
 
-    def _validated_inputs(self, connection, state: P6WorkflowState):
+    def _validated_inputs(self, connection, state: P6WorkflowState, *, visited=()):
+        if state.run_id in visited:
+            raise StateIntegrityError("P6 comparison reference cycle")
+        visited = (*visited, state.run_id)
         records = P6RecordRepository(connection)
         source = next(
             (
@@ -354,6 +372,36 @@ class P6ReportRenderer:
             _reference_run_id, reference_assessment = reference
             if reference_assessment.assessment_hash != comparison.reference_assessment_hash:
                 raise StateIntegrityError("P6 comparison reference assessment hash changed")
+            from orca_agent.infrastructure.repositories import EventRepository, RunRepository
+            from orca_agent.science.comparability import compare_electronic_energy
+
+            reference_state = (
+                RunRepository(connection)
+                .get_verified(_reference_run_id, EventRepository(connection))
+                .state
+            )
+            ref_inputs = self._validated_inputs(connection, reference_state, visited=visited)
+            reference_values = {item.evidence_id: item for item in ref_inputs[3]}
+            candidate_energy = evidence_by_id.get(comparison.candidate_energy_evidence_id)
+            reference_energy = reference_values.get(comparison.reference_energy_evidence_id)
+            if candidate_energy is None or reference_energy is None:
+                raise StateIntegrityError("P6 comparison evidence is missing")
+            candidate_method = next(
+                item.context for item in evidence if isinstance(item.context, MethodContext)
+            )
+            regenerated = compare_electronic_energy(
+                candidate_assessment=assessment,
+                candidate_context=candidate_method,
+                candidate_evidence=candidate_energy,
+                reference_assessment=reference_assessment,
+                reference_context=ref_inputs[0].method_context,
+                reference_evidence=reference_energy,
+            )
+            excluded_comparison = {"record_id", "comparability_hash"}
+            if comparison.model_dump(
+                mode="json", exclude=excluded_comparison
+            ) != regenerated.model_dump(mode="json", exclude=excluded_comparison):
+                raise StateIntegrityError("P6 comparison does not follow verified evidence")
             for _id, kind, item in records.list_p6_for_run(_reference_run_id):
                 if kind == "p6.evidence" and isinstance(item, P6EvidenceRecord):
                     external_evidence[item.evidence_id] = item
@@ -385,6 +433,23 @@ class P6ReportRenderer:
         )
         if method != ingestion.method_context or thermo != ingestion.thermochemistry_context:
             raise StateIntegrityError("P6 context evidence does not match source observations")
+        # IDs are assigned at publication; compare every source-bearing field
+        # independently of those IDs and the derived record hash.
+        excluded = {"record_id", "evidence_id", "evidence_hash"}
+        actual = [item.model_dump(mode="json", exclude=excluded) for item in evidence]
+        expected = [item.model_dump(mode="json", exclude=excluded) for item in ingestion.evidence]
+        if actual != expected:
+            raise StateIntegrityError("P6 evidence does not match reparsed source observations")
+        from orca_agent.application.p6_service import _make_assessment
+
+        recomputed, _modes = _make_assessment(replace(ingestion, evidence=evidence), policy, state)
+        assessment_excluded = {"record_id", "assessment_id", "assessment_hash"}
+        if assessment.model_dump(mode="json", exclude=assessment_excluded) != recomputed.model_dump(
+            mode="json", exclude=assessment_excluded
+        ):
+            raise StateIntegrityError(
+                "P6 assessment does not follow source observations and policy"
+            )
         return ingestion, policy, assessment, evidence, claims, comparisons
 
 
@@ -650,7 +715,18 @@ def _markdown_bytes(report: dict[str, object]) -> bytes:
             )
     lines.extend(["", "## Claims", ""])
     for claim in claims:
-        lines.append(f"- `{claim['claim_type']}` / `{claim['status']}`: `{claim.get('value')}`")
+        lines.append(
+            f"- `{claim['claim_id']}` — `{claim['claim_type']}` / "
+            f"`{claim['status']}`: `{claim.get('value')}`; "
+            f"Evidence: {', '.join('`' + item + '`' for item in claim['evidence_ids'])}"
+        )
+    lines.extend(["", "## Evidence source locations", ""])
+    for item in report["evidence"]:
+        lines.append(
+            f"- `{item['evidence_id']}` → artifact `{item['source_artifact_id']}`; "
+            f"SHA-256 `{item['source_artifact_hash']}`; "
+            f"locator `{json.dumps(item['locator'], sort_keys=True)}`"
+        )
     lines.extend(["", "## Limitations", ""])
     lines.extend(f"- {item}" for item in assessment["limitations"])
     lines.extend(

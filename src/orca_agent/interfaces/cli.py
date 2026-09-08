@@ -16,6 +16,7 @@ from orca_agent.application.p5_service import P5ApplicationService
 from orca_agent.application.p6_service import P6ApplicationService
 from orca_agent.domain.ids import (
     ActionId,
+    AssessmentId,
     ConversationId,
     InterruptId,
     RunId,
@@ -96,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="profile_id",
         default="p6.nonlinear.r2scan3c.v1",
     )
-    assess.add_argument("--reference-assessment-id", type=WorkflowRecordId)
+    assess.add_argument("--reference-assessment-id", type=AssessmentId)
     assess.add_argument("--expected-source-revision", type=int)
     assess.add_argument("--run-id", type=RunId)
     assess.add_argument("--command-id", type=_command_id)

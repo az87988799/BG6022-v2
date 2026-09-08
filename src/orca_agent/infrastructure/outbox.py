@@ -1067,6 +1067,23 @@ class OutboxRepository:
         )
         return cursor.rowcount
 
+    def cancel_p6_internal_for_run(self, *, run_id: RunId, now: datetime) -> int:
+        """Invalidate every active internal P6 generation in the caller's transaction."""
+        now_text = format_utc(now)
+        cursor = self.connection.execute(
+            "UPDATE outbox SET status = 'cancelled', lease_owner = NULL, "
+            "lease_expires_at_utc = NULL, dispatch_authorized_at_utc = NULL, "
+            "dispatch_run_revision = NULL, dispatch_policy_version = NULL, "
+            "completed_at_utc = ?, completed_by_worker_id = ?, "
+            "terminal_generation = attempt_count, last_error_code = 'run_cancelled', "
+            "last_error_message = 'The run is terminal; the effect was not dispatched.', "
+            "updated_at_utc = ? WHERE run_id = ? AND schema_version = 5 "
+            "AND effect_type IN ('internal.p6.assess', 'internal.p6.render_report') "
+            "AND status IN ('pending', 'leased', 'dispatching')",
+            (now_text, str(SYSTEM_WORKER_ID), now_text, str(run_id)),
+        )
+        return cursor.rowcount
+
     def renew(
         self,
         *,
