@@ -104,8 +104,8 @@ implementation checks are not a claim that every acceptance scenario was run.
 | R6-02 Ethanol real chain | **NOT RUN**; bounded preview prepared; explicit approval required |
 | R6-03 restart | Water fresh-process record; unchanged source fingerprint |
 | R6-04 negative checks | Review tests; final results below |
-| R6-05 clean archives | Water checkout gate pending; Ethanol archive absent |
-| Corresponding SHA CI | Pending repair commit/PR; old main CI does not count |
+| R6-05 clean archives | Water clean checkout verified at 1b1246d; Ethanol archive absent |
+| Corresponding SHA CI | [PR #7 checks](https://github.com/az87988799/BG6022-v2/pull/7/checks); actual head SHA must pass |
 | Owner acceptance/merge/main CI | Not performed; Owner controls acceptance |
 
 Ethanol [preview](evidence/p6-ethanol-preview.json): one deterministic local
@@ -131,6 +131,12 @@ approval or calculation was submitted during preview preparation.
   in a separate core-only environment without NumPy, RDKit or httpx.
   Its first offline dependency installation lacked a cached Pydantic wheel;
   dependency setup was retried online, not hidden as an offline setup pass.
-- Corresponding-SHA GitHub CI and clean-checkout results are recorded after
-  those commands actually finish. Old main CI and the old 565/80.45% figure
-  are not repair evidence.
+- Clean detached checkout at `1b1246d2fd2b378f79c09fe901ff39d13d0a4cde`:
+  the imported package path was explicitly the checkout's `src/orca_agent`,
+  the working tree was clean, and archived Water verification returned true
+  for manifests, typed records, raw artifacts, reports and restored ledger.
+  No original `--state-root` was provided.
+- [PR #7](https://github.com/az87988799/BG6022-v2/pull/7) triggers the existing
+  Ubuntu 3.11/3.14, Windows 3.14 and quality jobs. Its actual head-SHA checks
+  are authoritative; a pending or failed check is not a passing gate.
+  Old main CI and the old 565/80.45% figure are not repair evidence.
