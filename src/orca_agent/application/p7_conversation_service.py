@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections import deque
 from datetime import timedelta
 from pathlib import Path
 
@@ -32,6 +33,14 @@ from orca_agent.domain.p7_conversation import (
     TurnRecord,
     TurnStatus,
 )
+from orca_agent.domain.p7_intake import (
+    CalculationIntentV4,
+    ChemistryQAIntentV4,
+    ContextQueryIntentV4,
+    FieldChangeV4,
+    GeneralQAIntentV4,
+    TurnInterpretationV4,
+)
 from orca_agent.domain.p7_planning import PlanProposal
 from orca_agent.domain.p7_task import (
     StopReason,
@@ -53,15 +62,35 @@ from orca_agent.orchestration.p7_versions import (
     PROMPT_VERSION,
     PROMPT_VERSION_V2,
     PROMPT_VERSION_V3,
+    PROMPT_VERSION_V4,
     TURN_SCHEMA,
     TURN_SCHEMA_V2,
     TURN_SCHEMA_V3,
+    TURN_SCHEMA_V4,
 )
 from orca_agent.planning.p7_plan_compiler import operations_from_proposal, proposal_from_operations
 from orca_agent.planning.p7_validator import P7PlanValidator
 
 _MODEL_LEASE_SECONDS = 90
 _MAX_TURN_MODEL_CALLS = 3
+_ACKNOWLEDGEMENT_ACTIONS = {
+    "接受计划": "accept_plan",
+    "接受这个计划": "accept_plan",
+    "确认计划": "accept_plan",
+    "确认草稿并准备": "accept_plan",
+    "approveplan": "accept_plan",
+    "acceptplan": "accept_plan",
+    "确认身份": "confirm_identity",
+    "确认这个分子": "confirm_identity",
+    "confirmidentity": "confirm_identity",
+    "批准执行": "approve_execution",
+    "批准节点": "approve_execution",
+    "继续执行": "approve_execution",
+    "确认并开始本次计算": "approve_execution",
+    "确认并开始本次opt计算": "approve_execution",
+    "goahead": "approve_execution",
+    "approve": "approve_execution",
+}
 
 
 def _json_value(value: object) -> object:
@@ -100,7 +129,7 @@ class P7ConversationService:
         self.query_service = query_service or P7QueryService(
             self.state_root, clock=self.clock, task_service=self.task_service
         )
-        self.planner = planner or BaselinePlanner()
+        self.planner = planner
         self.fallback = fallback
         self.allow_llm = allow_llm
         self.planner_name = planner_name
@@ -116,6 +145,10 @@ class P7ConversationService:
                 allow_real_orca=False,
             )
         )
+        if self.planner is None:
+            self.planner = BaselinePlanner(
+                TURN_SCHEMA_V4 if self.runtime_config.profile != LEGACY_PROFILE else None
+            )
         if self.runtime_config.profile in {"real", "deepseek_fake"} and fallback != "none":
             raise ValueError("real DeepSeek profiles require fallback=none")
         self.allow_llm = self.runtime_config.allow_llm
@@ -124,6 +157,7 @@ class P7ConversationService:
             self.task_service.catalog,
             enable_candidate_planning=self.runtime_config.profile != LEGACY_PROFILE,
         )
+        self._seen_activity: dict[str, deque[str]] = {}
 
     # Conversation lifecycle ----------------------------------------
     def new_conversation(
@@ -225,6 +259,49 @@ class P7ConversationService:
         if not self._set_turn_status(conversation, turn.turn_id, TurnStatus.INTERPRETING):
             return self._turn_cancelled_response(conversation, turn.turn_id)
         try:
+            # Exact acknowledgements are a program-owned authorization path.
+            # Resolve them before calling the planner so a model response can
+            # never approve a token or spend a model-call budget by accident.
+            implicit = self._unique_pending_action(conversation, text)
+            acknowledgement = self._acknowledgement_action(text)
+            if implicit is not None or acknowledgement is not None:
+                if not self._set_turn_status(
+                    conversation, turn.turn_id, TurnStatus.RESPONDING
+                ):
+                    return self._turn_cancelled_response(conversation, turn.turn_id)
+                if self.runtime_config.profile != LEGACY_PROFILE:
+                    interpretation = TurnInterpretationV4(
+                        subrequests=(
+                            CalculationIntentV4(
+                                action="request_execution",
+                                task_alias=None if implicit is None else implicit[1],
+                            ),
+                        ),
+                        source=ResponseSource.PROGRAM,
+                    )
+                else:
+                    interpretation = TurnInterpretation(
+                        subrequests=(
+                            CalculationIntent(
+                                action=CalculationAction.REQUEST_EXECUTION,
+                                task_alias=None if implicit is None else implicit[1],
+                            ),
+                        ),
+                        source=ResponseSource.PROGRAM,
+                    )
+                if implicit is not None:
+                    output = self._accept_pending_action(conversation, implicit[0])
+                else:
+                    output = self._dispatch(
+                        conversation, turn, interpretation, source=ResponseSource.PROGRAM
+                    )
+                return self._finish_completed(
+                    conversation,
+                    turn,
+                    interpretation,
+                    output,
+                    source=ResponseSource.PROGRAM,
+                )
             interpretation, source, model_error = self._interpret(context, turn_id=turn.turn_id)
             if interpretation is None:
                 return self._finish_failed(
@@ -233,27 +310,15 @@ class P7ConversationService:
                     code=model_error or "interpretation_failed",
                     source=source,
                 )
-            if self._is_recommendation_acceptance(text):
+            if self._is_recommendation_acceptance(text) and isinstance(
+                interpretation, TurnInterpretation
+            ):
                 interpretation = self._rewrite_acceptance(
                     conversation, interpretation, turn.turn_id
                 )
             if not self._set_turn_status(conversation, turn.turn_id, TurnStatus.RESPONDING):
                 return self._turn_cancelled_response(conversation, turn.turn_id)
-            implicit = self._unique_pending_action(conversation, text)
-            if implicit is not None:
-                interpretation = TurnInterpretation(
-                    subrequests=(
-                        CalculationIntent(
-                            action=CalculationAction.REQUEST_EXECUTION,
-                            task_alias=implicit[1],
-                        ),
-                    ),
-                    source=ResponseSource.PROGRAM,
-                )
-                output = self._accept_pending_action(conversation, implicit[0])
-                source = ResponseSource.PROGRAM
-            else:
-                output = self._dispatch(conversation, turn, interpretation, source=source)
+            output = self._dispatch(conversation, turn, interpretation, source=source)
             return self._finish_completed(
                 conversation,
                 turn,
@@ -401,6 +466,7 @@ class P7ConversationService:
             if item.status is TurnStatus.COMPLETED
         )
         pending_actions = records.list_pending(str(state.conversation_id))
+        v4_input = self.runtime_config.profile != LEGACY_PROFILE
         deepseek_input = getattr(self.planner, "adapter_id", "") == "deepseek_chat"
         trusted_opt_sources = trusted_opt_sources or {}
         trusted_objects: dict[str, dict[str, object]] = {}
@@ -423,8 +489,20 @@ class P7ConversationService:
         planning_records = records.list_planning_records(conversation_id=str(state.conversation_id))
         facts = {
             "policy_version": P7_POLICY_VERSION,
-            "prompt_version": PROMPT_VERSION_V3 if deepseek_input else PROMPT_VERSION,
-            "model_input_schema_version": TURN_SCHEMA_V3 if deepseek_input else TURN_SCHEMA,
+            "prompt_version": (
+                PROMPT_VERSION_V4
+                if v4_input
+                else PROMPT_VERSION_V3
+                if deepseek_input
+                else PROMPT_VERSION
+            ),
+            "model_input_schema_version": (
+                TURN_SCHEMA_V4
+                if v4_input
+                else TURN_SCHEMA_V3
+                if deepseek_input
+                else TURN_SCHEMA
+            ),
             "candidate_planning_enabled": self.validator.enable_candidate_planning,
             "runtime_profile": self.runtime_config.profile,
             "model": self.runtime_config.model,
@@ -474,6 +552,17 @@ class P7ConversationService:
                     ["opt", "freq", "sp"],
                     ["freq_from_completed_opt"],
                 ],
+            }
+        if v4_input:
+            from orca_agent.planning.p7_parameter_policy import default_parameter_policy
+
+            policy = default_parameter_policy()
+            facts["parameter_policy"] = policy.public_snapshot()
+            facts["intake_contract"] = {
+                "schema_version": TURN_SCHEMA_V4,
+                "prompt_version": PROMPT_VERSION_V4,
+                "sparse_changes_only": True,
+                "default_operations": ["opt"],
             }
         while True:
             plain = {
@@ -529,12 +618,18 @@ class P7ConversationService:
 
     def _interpret(
         self, context: ContextSnapshot, *, turn_id: str
-    ) -> tuple[TurnInterpretation | None, ResponseSource, str | None]:
+    ) -> tuple[TurnInterpretation | TurnInterpretationV4 | None, ResponseSource, str | None]:
         planner = self.planner
         if getattr(planner, "adapter_id", "") == "deepseek_chat" and not self.allow_llm:
             if self.fallback != "baseline":
                 return None, ResponseSource.DEEPSEEK, "llm_disabled"
-            return BaselinePlanner().interpret(context), ResponseSource.BASELINE, None
+            return (
+                BaselinePlanner(
+                    TURN_SCHEMA_V4 if self.runtime_config.profile != LEGACY_PROFILE else None
+                ).interpret(context),
+                ResponseSource.BASELINE,
+                None,
+            )
         if getattr(planner, "adapter_id", "") == "baseline":
             return planner.interpret(context), ResponseSource.BASELINE, None
 
@@ -543,12 +638,16 @@ class P7ConversationService:
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
             "prompt_version": (
-                PROMPT_VERSION_V3
+                PROMPT_VERSION_V4
+                if self.runtime_config.profile != LEGACY_PROFILE
+                else PROMPT_VERSION_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else PROMPT_VERSION
             ),
             "schema_version": (
-                TURN_SCHEMA_V3
+                TURN_SCHEMA_V4
+                if self.runtime_config.profile != LEGACY_PROFILE
+                else TURN_SCHEMA_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else TURN_SCHEMA
             ),
@@ -593,11 +692,13 @@ class P7ConversationService:
         response: ModelCallResponse,
         context: ContextSnapshot,
         turn_id: str,
-    ) -> tuple[TurnInterpretation | None, ResponseSource, str | None]:
+    ) -> tuple[TurnInterpretation | TurnInterpretationV4 | None, ResponseSource, str | None]:
         if response.error_code is not None or not response.content:
             if self.fallback == "baseline":
                 return (
-                    BaselinePlanner().interpret(context),
+                    BaselinePlanner(
+                        TURN_SCHEMA_V4 if self.runtime_config.profile != LEGACY_PROFILE else None
+                    ).interpret(context),
                     ResponseSource.BASELINE,
                     response.error_code,
                 )
@@ -611,7 +712,9 @@ class P7ConversationService:
         except Exception:
             if self.fallback == "baseline":
                 return (
-                    BaselinePlanner().interpret(context),
+                    BaselinePlanner(
+                        TURN_SCHEMA_V4 if self.runtime_config.profile != LEGACY_PROFILE else None
+                    ).interpret(context),
                     ResponseSource.BASELINE,
                     "invalid_model_output",
                 )
@@ -625,11 +728,14 @@ class P7ConversationService:
             not in {
                 (TURN_SCHEMA_V2, PROMPT_VERSION_V2),
                 (TURN_SCHEMA_V3, PROMPT_VERSION_V3),
+                (TURN_SCHEMA_V4, PROMPT_VERSION_V4),
             }
         ):
             if self.fallback == "baseline":
                 return (
-                    BaselinePlanner().interpret(context),
+                    BaselinePlanner(
+                        TURN_SCHEMA_V4 if self.runtime_config.profile != LEGACY_PROFILE else None
+                    ).interpret(context),
                     ResponseSource.BASELINE,
                     "invalid_model_output",
                 )
@@ -643,7 +749,7 @@ class P7ConversationService:
         context: ContextSnapshot,
         turn_id: str,
         invalid_response: ModelCallResponse,
-    ) -> tuple[TurnInterpretation | None, ResponseSource, str | None]:
+    ) -> tuple[TurnInterpretation | TurnInterpretationV4 | None, ResponseSource, str | None]:
         repair = getattr(planner, "format_repair", None)
         source = (
             ResponseSource.DEEPSEEK
@@ -658,12 +764,16 @@ class P7ConversationService:
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
             "prompt_version": (
-                PROMPT_VERSION_V3
+                PROMPT_VERSION_V4
+                if self.runtime_config.profile != LEGACY_PROFILE
+                else PROMPT_VERSION_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else PROMPT_VERSION
             ),
             "schema_version": (
-                TURN_SCHEMA_V3
+                TURN_SCHEMA_V4
+                if self.runtime_config.profile != LEGACY_PROFILE
+                else TURN_SCHEMA_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else TURN_SCHEMA
             ),
@@ -865,7 +975,7 @@ class P7ConversationService:
     def _coerce_model_response(
         response: object, planner: object, *, repair: bool = False
     ) -> ModelCallResponse:
-        if isinstance(response, TurnInterpretation):
+        if isinstance(response, (TurnInterpretation, TurnInterpretationV4)):
             encoded = json.dumps(response.model_dump(mode="json"), ensure_ascii=False)
             return ModelCallResponse(
                 provider=getattr(planner, "adapter_id", "planner"),
@@ -929,7 +1039,7 @@ class P7ConversationService:
         self,
         conversation: str,
         turn: TurnRecord,
-        interpretation: TurnInterpretation,
+        interpretation: TurnInterpretation | TurnInterpretationV4,
         *,
         source: ResponseSource,
     ) -> dict[str, object]:
@@ -938,9 +1048,101 @@ class P7ConversationService:
         pending_tokens: list[dict[str, object]] = []
         last_task_id: str | None = None
         for index, item in enumerate(interpretation.subrequests):
-            if isinstance(item, CalculationIntent):
+            if isinstance(item, CalculationIntentV4):
+                result = self._calculation_v4(conversation, turn, item)
+                result.setdefault("response_source", ResponseSource.PROGRAM.value)
+            elif isinstance(item, CalculationIntent):
                 result = self._calculation(conversation, turn, item)
                 result.setdefault("response_source", ResponseSource.PROGRAM.value)
+            elif isinstance(item, ChemistryQAIntentV4):
+                if item.requires_task_context:
+                    try:
+                        query = self.query_service.query(
+                            conversation,
+                            request={
+                                "kind": "result",
+                                "text": item.question,
+                                "task_alias": item.task_alias,
+                            },
+                        )
+                        view = query.get("view")
+                        answer = (
+                            str(view["rendered_text"])
+                            if isinstance(view, dict) and view.get("rendered_text")
+                            else self._task_fact_unavailable_text(query)
+                        )
+                        result = {
+                            "text": answer,
+                            "payload": {
+                                "kind": "chemistry_qa",
+                                "answer_source": ResponseSource.PROGRAM.value,
+                                "query": query,
+                            },
+                            "task_id": query.get("selected_task_id"),
+                            "response_source": ResponseSource.PROGRAM.value,
+                        }
+                    except ValueError as error:
+                        result = {
+                            "text": f"无法读取已验证任务数据：{error}",
+                            "payload": {
+                                "kind": "chemistry_qa",
+                                "answer_source": ResponseSource.PROGRAM.value,
+                                "code": "verified_task_query_failed",
+                            },
+                            "response_source": ResponseSource.PROGRAM.value,
+                        }
+                else:
+                    answer = item.answer_draft.strip() if item.answer_draft else ""
+                    result = {
+                        "text": answer or "模型未提供可用的化学知识回答正文。",
+                        "payload": {
+                            "kind": "chemistry_qa",
+                            "answer_source": (
+                                source.value if answer else ResponseSource.PROGRAM.value
+                            ),
+                        },
+                        "response_source": source.value if answer else ResponseSource.PROGRAM.value,
+                    }
+            elif isinstance(item, GeneralQAIntentV4):
+                answer = item.answer_draft.strip() if item.answer_draft else ""
+                result = {
+                    "text": answer or "模型未提供可用的一般问题回答正文。",
+                    "payload": {
+                        "kind": "general_qa",
+                        "answer_source": source.value if answer else ResponseSource.PROGRAM.value,
+                    },
+                    "response_source": source.value if answer else ResponseSource.PROGRAM.value,
+                }
+            elif isinstance(item, ContextQueryIntentV4):
+                try:
+                    query = self.query_service.query(
+                        conversation,
+                        task_id=None,
+                        request={
+                            "kind": "result",
+                            "text": item.query,
+                            "task_alias": item.task_alias,
+                            "output_spec": (
+                                None
+                                if item.output_patch is None
+                                else item.output_patch.model_dump(
+                                    mode="json", exclude_none=True
+                                )
+                            ),
+                        },
+                    )
+                    result = {
+                        "text": self._query_text(query),
+                        "payload": query,
+                        "task_id": query.get("selected_task_id"),
+                        "response_source": ResponseSource.PROGRAM.value,
+                    }
+                except ValueError as error:
+                    result = {
+                        "text": f"无法唯一定位查询对象：{error}",
+                        "payload": {"code": "query_ambiguous", "error": str(error)},
+                        "response_source": ResponseSource.PROGRAM.value,
+                    }
             elif isinstance(item, ChemistryQAIntent):
                 if item.requires_task_context:
                     try:
@@ -1076,27 +1278,7 @@ class P7ConversationService:
     ) -> tuple[object, str | None] | None:
         """Conservatively map a short acknowledgement to one current token."""
 
-        collapsed = "".join(
-            character
-            for character in text.strip().casefold()
-            if character not in {" ", "\t", "\r", "\n", ",", "，", "。", ".", "!", "！", "?", "？"}
-        )
-        action_by_token = {
-            "接受计划": "accept_plan",
-            "接受这个计划": "accept_plan",
-            "确认计划": "accept_plan",
-            "approveplan": "accept_plan",
-            "acceptplan": "accept_plan",
-            "确认身份": "confirm_identity",
-            "确认这个分子": "confirm_identity",
-            "confirmidentity": "confirm_identity",
-            "批准执行": "approve_execution",
-            "批准节点": "approve_execution",
-            "继续执行": "approve_execution",
-            "goahead": "approve_execution",
-            "approve": "approve_execution",
-        }
-        expected_action = action_by_token.get(collapsed)
+        expected_action = self._acknowledgement_action(text)
         if expected_action is None:
             return None
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
@@ -1116,6 +1298,16 @@ class P7ConversationService:
             task = self.task_service.get_task(conversation, action.task_id)
             alias = None if task is None else task.alias
         return action, alias
+
+    @staticmethod
+    def _acknowledgement_action(text: str) -> str | None:
+        collapsed = "".join(
+            character
+            for character in text.strip().casefold()
+            if character
+            not in {" ", "\t", "\r", "\n", ",", "，", "。", ".", "!", "！", "?", "？"}
+        )
+        return _ACKNOWLEDGEMENT_ACTIONS.get(collapsed)
 
     def _accept_pending_action(self, conversation: str, action: object) -> dict[str, object]:
         token = getattr(action, "token", None)
@@ -1153,6 +1345,230 @@ class P7ConversationService:
             else [],
             "active_task_id": task_id,
         }
+
+    def _calculation_v4(
+        self, conversation: str, turn: TurnRecord, intent: CalculationIntentV4
+    ) -> dict[str, object]:
+        """Dispatch one sparse v4 calculation intent."""
+
+        if intent.action == "cancel_task":
+            task = self._resolve_task(conversation, intent.task_alias)
+            if task is None:
+                return {"text": "请指定要取消的会话内任务。", "payload": {"code": "task_ambiguous"}}
+            result = self.task_service.cancel_task(
+                conversation, task.task_id, expected_revision=task.revision
+            )
+            return {
+                "text": f"任务 {task.alias} 已请求取消。",
+                "payload": result,
+                "task_id": task.task_id,
+            }
+
+        task = self._resolve_task(conversation, intent.task_alias)
+        if intent.action == "request_execution":
+            if task is None:
+                return {
+                    "text": "当前没有可继续操作的唯一任务；请先明确任务或确认草稿。",
+                    "payload": {"code": "task_ambiguous"},
+                }
+            view = self.task_service.task_view(conversation, task.task_id)
+            pending = view.get("pending_actions", [])
+            if not pending:
+                return {
+                    "text": (
+                        f"任务 {task.alias} 当前没有可操作的待办；"
+                        f"真实状态是 {task.state.value}。"
+                    ),
+                    "payload": view,
+                    "task_id": task.task_id,
+                }
+            return {
+                "text": (
+                    f"任务 {task.alias} 当前有待办操作；"
+                    "请明确接受对应 token，模型不会代替批准。"
+                ),
+                "payload": view,
+                "task_id": task.task_id,
+                "pending_actions": pending,
+            }
+
+        editable_states = {
+            TaskPhase.PLAN_READY,
+            TaskPhase.NEEDS_CLARIFICATION,
+            TaskPhase.DRAFT,
+        }
+        existing = (
+            task.request
+            if task is not None
+            and task.state in editable_states
+            and task.accepted_plan_hash is None
+            and task.p4_run_id is None
+            and task.p5_run_id is None
+            else None
+        )
+        if intent.action == "revise_draft" and existing is None:
+            return {
+                "text": "当前没有可修改的待确认计算草稿。",
+                "payload": {"code": "draft_not_found"},
+            }
+        if task is not None and existing is not None:
+            intent = self._rebase_v4_scope(task, intent, turn.user_text)
+        source_request = None
+        if (
+            task is not None
+            and task.request is not None
+            and task.state is TaskPhase.RESULT_READY
+            and intent.action == "plan_new"
+            and self._v4_operations_from_intent(intent) == ("freq",)
+            and not any(change.field != "operations" for change in intent.changes)
+            and intent.output_patch is None
+        ):
+            # A completed Opt is a trusted source for a new Freq task.  The
+            # new task keeps its own revision/approval boundary while the
+            # compiler binds the exact completed artifact through the
+            # proposal input reference.
+            source_request = task.request
+            intent = intent.model_copy(
+                update={
+                    "task_alias": task.alias,
+                    "plan_proposal": proposal_from_operations(
+                        ("freq",),
+                        goal=turn.user_text,
+                        requested_outputs=(
+                            "vibrational_frequencies",
+                            "local_minimum_support",
+                        ),
+                        action="plan_new",
+                        source_input_ref=f"task:{task.alias}.optimized_geometry",
+                    ).model_dump(mode="json"),
+                }
+            )
+        planning_record = None
+        if task is not None and existing is not None:
+            planning_record = self.task_service.planning_record(task)
+        normalized = self.validator.normalize(
+            intent,
+            turn_id=turn.turn_id,
+            existing_request=existing,
+            source_request=source_request,
+            user_text=turn.user_text,
+            trusted_artifacts=self.task_service.trusted_opt_sources(conversation),
+            current_planning_record=planning_record,
+        )
+        if task is not None and existing is not None:
+            if not normalized.changed:
+                view = self.task_service.task_view(conversation, task.task_id)
+                return {
+                    "text": self._plan_text(view, normalized.validation),
+                    "payload": view,
+                    "task_id": task.task_id,
+                    "pending_actions": view.get("pending_actions", []),
+                }
+            view = self.task_service.revise_draft(
+                conversation,
+                task.task_id,
+                normalized=normalized,
+                turn_id=turn.turn_id,
+                expected_revision=task.revision,
+            )
+        else:
+            view = self.task_service.create_task(
+                conversation,
+                alias=intent.task_alias,
+                normalized=normalized,
+                turn_id=turn.turn_id,
+            )
+        task_payload = view["task"]
+        return {
+            "text": self._plan_text(view, normalized.validation),
+            "payload": view,
+            "task_id": task_payload["task_id"],
+            "pending_actions": view.get("pending_actions", []),
+        }
+
+    @staticmethod
+    def _rebase_v4_scope(
+        task: TaskRecord, intent: CalculationIntentV4, text: str
+    ) -> CalculationIntentV4:
+        """Turn a removal phrase into the final sparse scope for this draft."""
+
+        request = task.request
+        if request is None:
+            return intent
+        lowered = text.casefold()
+        removal = any(
+            item in lowered
+            for item in ("去掉", "删除", "移除", "remove", "drop", "without")
+        )
+        if not removal:
+            return intent
+        target = list(request.operations)
+        if any(item in lowered for item in ("频率", "freq", "frequency")):
+            target = [item for item in target if item != "freq"]
+        if any(item in lowered for item in ("单点", "sp", "single point")):
+            target = [item for item in target if item != "sp"]
+        if any(item in lowered for item in ("优化", "opt", "optimization")):
+            target = [item for item in target if item != "opt"]
+        for change in intent.changes:
+            if change.field == "operations":
+                replacement = change.model_copy(update={"value": target})
+                return intent.model_copy(
+                    update={
+                        "changes": tuple(
+                            replacement if item.field == "operations" else item
+                            for item in intent.changes
+                        ),
+                        "plan_proposal": proposal_from_operations(
+                            tuple(target),
+                            goal=text,
+                            action="revise_draft",
+                        ).model_dump(mode="json"),
+                    }
+                )
+        if target != list(request.operations):
+            # A model can omit the derived operation patch; the program still
+            # records the current-turn removal as evidence.
+            evidence = next(
+                (word for word in ("频率", "freq", "单点", "sp", "优化", "opt") if word in lowered),
+                text[:128],
+            )
+            return intent.model_copy(
+                update={
+                    "changes": tuple(
+                        (*intent.changes,
+                         FieldChangeV4(
+                             field="operations",
+                             value=target,
+                             evidence={"quote": evidence},
+                         ))
+                    ),
+                    "plan_proposal": proposal_from_operations(
+                        tuple(target),
+                        goal=text,
+                        action="revise_draft",
+                    ).model_dump(mode="json"),
+                }
+            )
+        return intent
+
+    def _v4_operations_from_intent(self, intent: CalculationIntentV4) -> tuple[str, ...]:
+        for change in intent.changes:
+            if change.field == "operations" and change.op == "set":
+                value = thaw_json(change.value)
+                if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                    return tuple(item.casefold().strip() for item in value)
+        if intent.plan_proposal is None:
+            return ()
+        try:
+            proposal = PlanProposal.model_validate_json(
+                json.dumps(thaw_json(intent.plan_proposal), ensure_ascii=False), strict=True
+            )
+        except (TypeError, ValueError):
+            return ()
+        try:
+            return operations_from_proposal(proposal, self.task_service.catalog)
+        except (TypeError, ValueError):
+            return ()
 
     def _calculation(
         self, conversation: str, turn: TurnRecord, intent: CalculationIntent
@@ -1510,6 +1926,41 @@ class P7ConversationService:
     @staticmethod
     def _plan_text(view: dict[str, object], validation) -> str:
         task = view["task"]
+        display = view.get("plan_display")
+        if isinstance(display, dict) and display.get("draft_semantics_version") == "p7.draft.v4":
+            rendered = str(display.get("rendered_text", "已保留当前草稿。"))
+            if validation.status is ValidationStatus.VALID:
+                pending = view.get("pending_actions", [])
+                return (
+                    f"已保留任务 {task['alias']} 的可编辑草稿并生成受支持的计划。"
+                    f"{rendered}；计划待确认，不会自动启动执行。"
+                    + (f"待办 token：{pending[0]['token']}" if pending else "")
+                )
+            if validation.status is ValidationStatus.NEEDS_CLARIFICATION:
+                return (
+                    "已保留可编辑草稿。"
+                    + (validation.clarification_question or "请补充计算所需信息。")
+                    + f"（{rendered}）"
+                )
+            if validation.status is ValidationStatus.UNSUPPORTED:
+                request_payload = task.get("request")
+                method = (
+                    request_payload.get("method")
+                    if isinstance(request_payload, dict)
+                    else None
+                )
+                method_value = method.get("value") if isinstance(method, dict) else None
+                if str(method_value).casefold().replace("-", "") == "r2san3c":
+                    return (
+                        "已保留可编辑草稿；方法"
+                        f"“{method_value}”尚未注册。你是否指 r2SCAN-3c？"
+                        "请明确修正后再继续，系统不会自动接受拼写建议。"
+                    )
+                return (
+                    "已保留可编辑草稿；当前请求需要调整后才能继续："
+                    + "；".join(validation.unsupported_requests or validation.issues)
+                )
+            return "已保留可编辑草稿，但当前输入未通过确定性校验：" + "；".join(validation.issues)
         plan = task.get("plan") if isinstance(task, dict) else None
         labels = {"opt": "Opt", "freq": "Freq", "sp": "独立 SP"}
         sequence = (

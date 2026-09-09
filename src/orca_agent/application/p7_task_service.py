@@ -57,6 +57,8 @@ from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VE
 from orca_agent.orchestration.p6_commands import AssessP6Run, CancelP6Run
 from orca_agent.planning.p5_protocols import get_p5_protocol
 from orca_agent.planning.p7_catalog import CapabilityCatalog, build_capability_catalog
+from orca_agent.planning.p7_parameter_policy import MoleculePrecheck, default_parameter_policy
+from orca_agent.presentation.p7_plans import build_execution_display
 from orca_agent.presentation.p7_results import P7ResultPresenter
 
 _P4_PROTOCOL_ID = "ground_state_baseline_r2scan3c_v1"
@@ -248,6 +250,13 @@ class P7TaskService:
             result["p5"] = self._safe_inspect(self.p5.inspect, RunId(task.p5_run_id))
         if task.p6_run_id:
             result["p6"] = self._safe_inspect(self.p6.inspect, RunId(task.p6_run_id))
+        result["plan_display"] = build_execution_display(
+            task,
+            planning_record=planning,
+            p4=result.get("p4") if isinstance(result.get("p4"), dict) else None,
+            p5=result.get("p5") if isinstance(result.get("p5"), dict) else None,
+            p6=result.get("p6") if isinstance(result.get("p6"), dict) else None,
+        )
         return result
 
     @staticmethod
@@ -257,6 +266,19 @@ class P7TaskService:
             return _as_json(value)
         except Exception as error:
             return {"available": False, "error": type(error).__name__}
+
+    @staticmethod
+    def _state_for_normalized(normalized) -> TaskPhase:
+        if normalized.validation.status is ValidationStatus.VALID:
+            return TaskPhase.PLAN_READY
+        if normalized.validation.status is ValidationStatus.NEEDS_CLARIFICATION:
+            return TaskPhase.NEEDS_CLARIFICATION
+        # v4 unsupported/invalid drafts remain editable so a clarification or
+        # replacement parameter can be applied to the same task.  Historical
+        # legacy callers retain their terminal unsupported semantics.
+        if getattr(normalized, "draft_semantics_version", "legacy") == "p7.draft.v4":
+            return TaskPhase.NEEDS_CLARIFICATION
+        return TaskPhase.ENDED_WITHOUT_RESULT
 
     # Task creation and token handling -------------------------------
     def create_task(
@@ -275,13 +297,7 @@ class P7TaskService:
             uow.begin()
             records = P7RecordRepository(uow.connection)
             chosen_alias = self._unique_alias(records, conversation, alias)
-            state = (
-                TaskPhase.PLAN_READY
-                if normalized.validation.status is ValidationStatus.VALID
-                else TaskPhase.NEEDS_CLARIFICATION
-                if normalized.validation.status is ValidationStatus.NEEDS_CLARIFICATION
-                else TaskPhase.ENDED_WITHOUT_RESULT
-            )
+            state = self._state_for_normalized(normalized)
             task = TaskRecord(
                 task_id=str(new_id(TaskId)),
                 conversation_id=conversation,
@@ -291,6 +307,7 @@ class P7TaskService:
                 stop_reason=(
                     StopReason.UNSUPPORTED
                     if normalized.validation.status is ValidationStatus.UNSUPPORTED
+                    and getattr(normalized, "draft_semantics_version", "legacy") == "legacy"
                     else None
                 ),
                 request=normalized.request,
@@ -302,7 +319,7 @@ class P7TaskService:
                 updated_at_utc=now,
             )
             records.insert_task(task)
-            self._insert_planning_record(
+            planning_record = self._insert_planning_record(
                 records,
                 task=task,
                 normalized=normalized,
@@ -324,21 +341,94 @@ class P7TaskService:
                     action_type="accept_plan",
                     target_id=task.task_id,
                     expected_revision=task.revision,
-                    payload={
-                        "task_id": task.task_id,
-                        "task_revision": task.revision,
-                        "plan_hash": normalized.plan.plan_hash,
-                        "validation_hash": normalized.validation.validation_hash,
-                        "output_spec_hash": normalized.request.output_spec.output_spec_hash,
-                        "capability_id": normalized.plan.capability_id,
-                        "capability_version": normalized.plan.capability_version,
-                        "execution_profile": execution_profile,
-                        "execution_profile_hash": sha256_hex(execution_profile),
-                    },
+                    payload=self._plan_acceptance_payload(
+                        task, normalized, execution_profile, planning_record=planning_record
+                    ),
                     now=now,
                 )
             uow.commit()
         return self._view(task)
+
+    def revise_draft(
+        self,
+        conversation_id: ConversationId | str,
+        task_id: str,
+        *,
+        normalized,
+        turn_id: str,
+        expected_revision: int,
+    ) -> dict[str, object]:
+        """Apply one validated sparse draft revision atomically."""
+
+        if normalized.request is None or normalized.validation is None:
+            raise ValueError("normalized P7 plan is incomplete")
+        conversation = str(conversation_id)
+        now = _now(self.clock)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            current = records.get_task(conversation, task_id)
+            if current is None:
+                raise ValueError("draft task disappeared")
+            if current.revision != expected_revision:
+                raise RevisionConflictError("draft revision is stale")
+            if (
+                current.state
+                not in {TaskPhase.NEEDS_CLARIFICATION, TaskPhase.DRAFT, TaskPhase.PLAN_READY}
+                or current.accepted_plan_hash is not None
+                or current.p4_run_id is not None
+                or current.p5_run_id is not None
+            ):
+                raise InvalidTransitionError("task draft is no longer editable")
+            state = self._state_for_normalized(normalized)
+            updated = current.model_copy(
+                update={
+                    "revision": current.revision + 1,
+                    "state": state,
+                    "stop_reason": None
+                    if getattr(normalized, "draft_semantics_version", "legacy") == "p7.draft.v4"
+                    else StopReason.UNSUPPORTED
+                    if normalized.validation.status is ValidationStatus.UNSUPPORTED
+                    else None,
+                    "request": normalized.request,
+                    "plan": normalized.plan,
+                    "validation": normalized.validation,
+                    "accepted_plan_hash": None,
+                    "accepted_output_spec_hash": None,
+                    "delivery_output_spec": normalized.request.output_spec,
+                    "p4_run_id": None,
+                    "p5_run_id": None,
+                    "p6_run_id": None,
+                    "current_delivery_id": None,
+                    "updated_at_utc": now,
+                }
+            )
+            records.stale_task_pending(current.task_id, new_revision=updated.revision)
+            if not records.update_task(updated, expected_revision=current.revision):
+                raise RevisionConflictError("draft revision raced with another update")
+            planning_record = self._insert_planning_record(
+                records,
+                task=updated,
+                normalized=normalized,
+                turn_id=turn_id,
+                now=now,
+            )
+            if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
+                execution_profile = self._plan_execution_profile(normalized.plan.protocol_id)
+                self._insert_pending(
+                    records,
+                    conversation_id=conversation,
+                    task_id=updated.task_id,
+                    action_type="accept_plan",
+                    target_id=updated.task_id,
+                    expected_revision=updated.revision,
+                    payload=self._plan_acceptance_payload(
+                        updated, normalized, execution_profile, planning_record=planning_record
+                    ),
+                    now=now,
+                )
+            uow.commit()
+        return self._view(updated)
 
     @staticmethod
     def _reused_p4_run_id(
@@ -389,6 +479,27 @@ class P7TaskService:
                 "multiplicity": None
                 if request.multiplicity is None
                 else _as_json(request.multiplicity),
+                "draft_semantics_version": getattr(
+                    normalized, "draft_semantics_version", "legacy"
+                ),
+                "draft_changes": list(getattr(normalized, "draft_changes", ())),
+                "identity_notes": list(getattr(normalized, "identity_notes", ())),
+                "raw_molecule_fragment": getattr(normalized, "raw_molecule_fragment", None),
+                "precheck": None
+                if getattr(normalized, "precheck", None) is None
+                else _as_json(normalized.precheck),
+                "policy_snapshot": getattr(normalized, "policy_snapshot", None),
+                "parameter_sources": {
+                    field_name: None
+                    if getattr(request, field_name) is None
+                    else {
+                        "source": getattr(request, field_name).source.value,
+                        "source_reference": getattr(request, field_name).source_reference,
+                        "source_fragment": getattr(request, field_name).source_fragment,
+                        "rule_version": getattr(request, field_name).rule_version,
+                    }
+                    for field_name in ("method", "environment", "charge", "multiplicity")
+                },
             },
             candidate=proposal,
             validation_status=validation.status,
@@ -409,10 +520,53 @@ class P7TaskService:
             compiled_protocol_id=(None if normalized.plan is None else normalized.plan.protocol_id),
             source_task_id=getattr(normalized, "source_task_id", None),
             external_opt_result_id=getattr(normalized, "external_opt_result_id", None),
+            model_attempt_id=records.latest_model_attempt_id(turn_id),
             created_at_utc=now,
         )
         records.insert_planning_record(record)
         return record
+
+    def planning_record(self, task: TaskRecord) -> PlanningRecord | None:
+        """Return the immutable record for the exact current task revision."""
+
+        return self._planning_record(task)
+
+    def _plan_acceptance_payload(
+        self,
+        task: TaskRecord,
+        normalized,
+        execution_profile: dict[str, object],
+        *,
+        planning_record: PlanningRecord | None = None,
+    ) -> dict[str, object]:
+        if normalized.plan is None:
+            raise StateIntegrityError("plan acceptance has no compiled plan")
+        record = planning_record
+        if record is None and getattr(normalized, "draft_semantics_version", "legacy") != "legacy":
+            record = self._planning_record(task)
+        return {
+            "task_id": task.task_id,
+            "task_revision": task.revision,
+            "plan_hash": normalized.plan.plan_hash,
+            "validation_hash": normalized.validation.validation_hash,
+            "output_spec_hash": normalized.request.output_spec.output_spec_hash,
+            "capability_id": normalized.plan.capability_id,
+            "capability_version": normalized.plan.capability_version,
+            "execution_profile": execution_profile,
+            "execution_profile_hash": sha256_hex(execution_profile),
+            "planning_record_id": None if record is None else record.proposal_id,
+            "planning_record_hash": None if record is None else record.record_hash,
+            "policy_snapshot_hash": (
+                None
+                if getattr(normalized, "policy_snapshot", None) is None
+                else normalized.policy_snapshot.get("content_hash")
+            ),
+            "policy_version": (
+                None
+                if getattr(normalized, "policy_snapshot", None) is None
+                else normalized.policy_snapshot.get("policy_version")
+            ),
+        }
 
     @staticmethod
     def _unique_alias(
@@ -556,6 +710,37 @@ class P7TaskService:
                     raise InvalidTransitionError(
                         "plan approval does not match the current output specification"
                     )
+                planning_record_id = pending_payload.get("planning_record_id")
+                planning_record_hash = pending_payload.get("planning_record_hash")
+                if planning_record_id is not None or planning_record_hash is not None:
+                    record = records.get_planning_record_for_task(
+                        task.task_id, task.revision
+                    )
+                    if (
+                        record is None
+                        or record.proposal_id != planning_record_id
+                        or record.record_hash != planning_record_hash
+                        or record.request_hash != task.request.request_hash
+                        or record.compiled_plan_hash != task.plan.plan_hash
+                    ):
+                        raise InvalidTransitionError(
+                            "plan approval does not match the immutable planning record"
+                        )
+                    constraints = thaw_json(record.normalized_constraints)
+                    if not isinstance(constraints, dict):
+                        raise StateIntegrityError("planning record constraints are invalid")
+                    policy_snapshot = constraints.get("policy_snapshot")
+                    expected_policy_hash = pending_payload.get("policy_snapshot_hash")
+                    expected_policy_version = pending_payload.get("policy_version")
+                    if isinstance(policy_snapshot, dict):
+                        if policy_snapshot.get("content_hash") != expected_policy_hash:
+                            raise InvalidTransitionError(
+                                "plan approval policy snapshot is stale"
+                            )
+                        if policy_snapshot.get("policy_version") != expected_policy_version:
+                            raise InvalidTransitionError(
+                                "plan approval policy version is stale"
+                            )
                 registered_protocol = get_p5_protocol(task.plan.protocol_id)
                 if task.plan.protocol_hash != registered_protocol.protocol_hash:
                     raise StateIntegrityError("task plan protocol hash is not registered")
@@ -935,6 +1120,15 @@ class P7TaskService:
             TaskPhase.RECONCILIATION_REQUIRED,
         }:
             return 0, None
+        if task.p4_run_id is None and task.state in {
+            TaskPhase.NEEDS_CLARIFICATION,
+            TaskPhase.DRAFT,
+        }:
+            return 0, {
+                "task_id": task.task_id,
+                "step": "waiting_for_clarification",
+                "state": task.state.value,
+            }
         p4_handoff = self._handoff(task, "p4")
         if p4_handoff is not None and p4_handoff.status in {"prepared", "submitted"}:
             result = self._submit_p4_handoff(task, p4_handoff)
@@ -944,7 +1138,11 @@ class P7TaskService:
                 "accepted": result.accepted,
             }
         if task.p4_run_id is None:
-            return 0, {"task_id": task.task_id, "step": "waiting_for_plan_acceptance"}
+            return 0, {
+                "task_id": task.task_id,
+                "step": "waiting_for_plan_acceptance",
+                "state": task.state.value,
+            }
 
         p4_view = self.p4.inspect(RunId(task.p4_run_id))
         if p4_view.state.phase is P4Phase.RESOLVING_IDENTITY:
@@ -1190,18 +1388,17 @@ class P7TaskService:
     def _recommended_canonical_smiles(request: CalculationRequest | None) -> str | None:
         if request is None or request.molecule_kind is None or request.molecule_value is None:
             return None
-        key = request.molecule_value.casefold().strip()
-        known = {
-            (MoleculeInputType.NAME, "water"): "O",
-            (MoleculeInputType.NAME, "ethanol"): "CCO",
-            (MoleculeInputType.CAS, "7732-18-5"): "O",
-            (MoleculeInputType.CAS, "64-17-5"): "CCO",
-            (MoleculeInputType.CID, "962"): "O",
-            (MoleculeInputType.CID, "702"): "CCO",
-        }
-        if request.molecule_kind is MoleculeInputType.NAME and key == "酒精":
-            key = "ethanol"
-        return known.get((request.molecule_kind, key))
+        if request.molecule_kind is MoleculeInputType.SMILES:
+            precheck = MoleculePrecheck(policy=default_parameter_policy()).check(
+                input_kind=request.molecule_kind,
+                raw_input=request.molecule_value,
+                charge=None if request.charge is None else int(request.charge.value),
+            )
+            return precheck.canonical_isomeric_smiles or request.molecule_value
+        molecule = default_parameter_policy().molecule_for(
+            request.molecule_kind, request.molecule_value
+        )
+        return None if molecule is None else molecule.canonical_smiles
 
     def _ensure_p5(self, task: TaskRecord, p4_view) -> tuple[int, dict[str, object]]:
         now = _now(self.clock)
@@ -1339,6 +1536,12 @@ class P7TaskService:
             raise StateIntegrityError("P5 approval phase has no action/binding")
         now = _now(self.clock)
         execution_profile = self._execution_profile(view)
+        confirmation = self._confirmation_card(task, view)
+        if confirmation.get("preparation_errors"):
+            raise StateIntegrityError(
+                "execution confirmation is incomplete: "
+                + "; ".join(str(item) for item in confirmation["preparation_errors"])
+            )
         payload = {
             "run_id": str(view.run_id),
             "conversation_id": str(view.conversation_id),
@@ -1354,7 +1557,12 @@ class P7TaskService:
             "budget": view.binding.budget.model_dump(mode="json"),
             "execution_profile": execution_profile,
             "execution_profile_hash": sha256_hex(execution_profile),
-            "confirmation": self._confirmation_card(task, view),
+            "confirmation": confirmation,
+            "plan_display": build_execution_display(
+                task,
+                planning_record=self._planning_record(task),
+                p5=_as_json(view),
+            ),
         }
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
@@ -1412,6 +1620,7 @@ class P7TaskService:
             "multiplicity": None,
             "source": None,
             "unique_candidate": False,
+            "preparation_errors": [],
         }
         request = task.request
         if request is not None:
@@ -1429,9 +1638,14 @@ class P7TaskService:
                 "cid",
             }:
                 molecule["name_cas_cid"] = request.molecule_value
-        try:
-            if task.p4_run_id:
+        if task.p4_run_id:
+            try:
                 p4_view = self.p4.inspect(RunId(task.p4_run_id))
+            except Exception as error:
+                molecule["preparation_errors"] = [
+                    f"P4 identity state unavailable: {type(error).__name__}"
+                ]
+            else:
                 confirmed = p4_view.confirmed_molecule
                 if confirmed is not None:
                     molecule.update(
@@ -1442,10 +1656,12 @@ class P7TaskService:
                             "unique_candidate": True,
                         }
                     )
-        except Exception:
-            # Confirmation is a display aid; the typed P5 hashes remain the
-            # authoritative approval boundary.
-            pass
+                elif getattr(task.request, "molecule_kind", None) is not MoleculeInputType.SMILES:
+                    molecule["preparation_errors"] = [
+                        "P4 has not produced a confirmed unique molecule identity"
+                    ]
+        else:
+            molecule["preparation_errors"] = ["P4 identity run is missing"]
         return molecule
 
     def _ensure_p6(self, task: TaskRecord, p5_view) -> tuple[int, dict[str, object]]:

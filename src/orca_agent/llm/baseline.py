@@ -15,12 +15,32 @@ from orca_agent.domain.p7_conversation import (
     ResponseSource,
     TurnInterpretation,
 )
-from orca_agent.orchestration.p7_versions import PROMPT_VERSION_V3, TURN_SCHEMA_V3
+from orca_agent.domain.p7_intake import (
+    CalculationIntentV4,
+    ChemistryQAIntentV4,
+    ContextQueryIntentV4,
+    FieldChangeV4,
+    GeneralQAIntentV4,
+    OutputPatchV4,
+    OutputQuantityPatchV4,
+    ParameterEvidenceV4,
+    TurnInterpretationV4,
+)
+from orca_agent.orchestration.p7_versions import (
+    PROMPT_VERSION_V3,
+    TURN_SCHEMA_V3,
+    TURN_SCHEMA_V4,
+)
+from orca_agent.planning.p7_parameter_policy import default_parameter_policy
 from orca_agent.planning.p7_plan_compiler import proposal_from_operations
 
 _CAS = re.compile(r"\b\d{2,7}-\d{2}-\d\b")
 _CID = re.compile(r"(?:pubchem\s*)?cid\s*[:：]?\s*(\d+)", re.I)
 _SMILES = re.compile(r"(?:smiles?|结构)\s*[:：=]?\s*([^\s,，。；;]+)", re.I)
+_V4_SMILES = re.compile(
+    r"smiles?\s*[:：=]?\s*([^\s,，。；;]+)|结构\s*[:：=]\s*([^\s,，。；;]+)",
+    re.I,
+)
 _TASK_ALIAS = re.compile(r"(?:任务|task)\s*([A-Za-z0-9一二三四五六七八九十]+)", re.I)
 _CHARGE = re.compile(r"(?:电荷|charge)\s*[:：=]?\s*([+-]?\d+)", re.I)
 _MULTIPLICITY = re.compile(r"(?:多重度|multiplicity|spin)\s*[:：=]?\s*(\d+)", re.I)
@@ -87,6 +107,45 @@ def _extract_task_alias(text: str) -> str | None:
 
 
 def _context_query_like(text: str) -> bool:
+    if (
+        _has_any(text, ("当前任务", "this task", "that task"))
+        and _has_any(
+            text,
+            (
+                "方法",
+                "method",
+                "环境",
+                "气相",
+                "溶液",
+                "solvent",
+                "charge",
+                "电荷",
+                "多重度",
+                "multiplicity",
+            ),
+        )
+        and not _question_like(text)
+    ):
+        return False
+    if _has_any(
+        text,
+        ("改成", "改为", "调整", "修改", "设置", "恢复默认", "重置默认", "set ", "change "),
+    ) and _has_any(
+        text,
+        (
+            "方法",
+            "method",
+            "环境",
+            "气相",
+            "溶液",
+            "solvent",
+            "charge",
+            "电荷",
+            "多重度",
+            "multiplicity",
+        ),
+    ):
+        return False
     if _extract_molecule(text)[0] is not None and _has_any(
         text, ("计算", "calculate", "compute", "算一下", "run")
     ):
@@ -224,11 +283,48 @@ def _output_spec(text: str) -> dict[str, object]:
     if _has_any(text, ("证据", "evidence", "来源")):
         output["include_evidence"] = True
     precision = re.search(
-        r"(?:小数|decimal|precision)\s*(?:位|places)?\s*[:：=]?\s*(\d+)", text, re.I
+        r"(?:小数|decimal|precision)\s*(?:位|places)?\s*[:：=]?\s*"
+        r"(?P<after>\d+|[零一二三四五六七八九十两]+)"
+        r"|(?P<before>\d+|[零一二三四五六七八九十两]+)\s*"
+        r"(?:位|places)?\s*(?:小数|decimal|precision)",
+        text,
+        re.I,
     )
     if precision:
-        output["precision"] = int(precision.group(1))
+        token = precision.group("after") or precision.group("before")
+        parsed_precision = _small_integer(token)
+        if parsed_precision is not None:
+            output["precision"] = parsed_precision
     return output
+
+
+def _small_integer(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    digits = {
+        "零": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if value == "十":
+        return 10
+    if value.startswith("十") and len(value) == 2 and value[1] in digits:
+        return 10 + digits[value[1]]
+    if value.endswith("十") and len(value) == 2 and value[0] in digits:
+        return digits[value[0]] * 10
+    if len(value) == 1:
+        return digits.get(value)
+    if len(value) == 3 and value[1] == "十" and value[0] in digits and value[2] in digits:
+        return digits[value[0]] * 10 + digits[value[2]]
+    return None
 
 
 def _query_output_spec(text: str) -> dict[str, object]:
@@ -433,13 +529,371 @@ def _calculation(
     )
 
 
+def _v4_quote(text: str, pattern: re.Pattern[str]) -> str | None:
+    match = pattern.search(text)
+    return None if match is None else match.group(0)
+
+
+def _v4_change(
+    field: str,
+    value: object,
+    text: str,
+    quote: str | None,
+    *,
+    op: str = "set",
+) -> FieldChangeV4:
+    return FieldChangeV4(
+        field=field,
+        op=op,
+        value=None if op == "reset_default" else value,
+        evidence=ParameterEvidenceV4(quote=quote or text[:128]),
+    )
+
+
+def _v4_extract_molecule(text: str) -> tuple[dict[str, str] | None, str | None]:
+    """Extract only exact registered aliases; never use a generic ``水`` match."""
+
+    match = _V4_SMILES.search(text)
+    if match:
+        value = next(item for item in match.groups() if item is not None).rstrip("，,。；;:：")
+        return {"kind": "smiles", "value": value, "raw": match.group(0)}, match.group(0)
+    match = _CAS.search(text)
+    if match:
+        return {"kind": "cas", "value": match.group(0)}, match.group(0)
+    match = _CID.search(text)
+    if match:
+        return {"kind": "cid", "value": match.group(1)}, match.group(0)
+    if _has_any(text, ("水溶液", "水溶剂", "aqueous", "solvent", "solution")):
+        # A separate exact target such as “乙醇水溶液” is intentionally not
+        # inferred from the solvent word.  The user can still provide a CAS,
+        # CID, SMILES, or an unambiguous molecule name explicitly.
+        target_text = re.sub(r"水溶液|水溶剂|aqueous|solvent|solution", " ", text, flags=re.I)
+    else:
+        target_text = text
+    policy = default_parameter_policy()
+    aliases = {
+        alias: item
+        for item in policy.molecules
+        for alias in (item.canonical_name, *item.aliases)
+    }
+    for alias, item in sorted(aliases.items(), key=lambda pair: len(pair[0]), reverse=True):
+        if re.search(rf"(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])", target_text, re.I):
+            return {
+                "kind": "name",
+                "value": item.canonical_name,
+            }, alias
+    # Keep a small explicit-name fallback for the offline router.  It is not
+    # a default electronic-state rule; the normalizer still asks for those
+    # fields.  Most importantly, a solvent mention cannot become the target
+    # molecule merely because it contains the character “水”.
+    for alias, value in (("苯", "benzene"), ("benzene", "benzene")):
+        if re.search(rf"(?<![A-Za-z]){re.escape(alias)}(?![A-Za-z])", target_text, re.I):
+            return {"kind": "name", "value": value}, alias
+    return None, None
+
+
+def _v4_method_match(text: str) -> re.Match[str] | None:
+    explicit = re.search(
+        r"(?:方法|method)\s*(?:是|为|用|使用|改成|改为|设置|设置为|[:：=])?\s*"
+        r"([\w²ωΩ@+\-]+)",
+        text,
+        re.I,
+    )
+    if explicit is not None:
+        return explicit
+    return re.search(
+        r"(?<![A-Za-z0-9])(?:r2scan(?:-?3c)?|r2san3c|r²scan-?3c|"
+        r"b3lyp|m06|pbe0|gfn2-?xtb|ωb97x-?3c)(?![A-Za-z0-9])",
+        text,
+        re.I,
+    )
+
+
+def _v4_scope(text: str) -> tuple[str, ...] | None:
+    if _has_any(text, ("补做", "追加", "add", "follow-up")) and _has_any(
+        text, ("频率", "freq", "frequency")
+    ):
+        return ("freq",)
+    if _has_any(text, ("只做单点", "仅单点", "single point only", "only sp")):
+        return ("sp",)
+    if _has_any(text, ("只做优化", "仅优化", "optimization only", "only opt")):
+        return ("opt",)
+    if _has_any(text, ("只做频率", "仅频率", "frequency only", "only freq")):
+        return ("freq",)
+    if _has_any(text, ("完整", "全流程", "all steps", "complete workflow")):
+        return ("opt", "freq", "sp")
+    if _has_any(text, ("最低能量", "最低", "local minimum", "局部极小")) and not _has_any(
+        text, ("全局最低", "global minimum", "构象搜索", "所有构象")
+    ):
+        return ("opt", "freq")
+    has_opt = _has_any(text, ("优化", "optimize", "optimization", "opt"))
+    has_freq = _has_any(text, ("频率", "振动", "frequency", "vibrational", "freq"))
+    has_sp = _has_any(text, ("独立单点", "独立 sp", "single point", "single-point", " sp"))
+    if has_opt and has_freq:
+        return ("opt", "freq")
+    if has_opt and has_sp:
+        return ("opt", "sp")
+    if has_opt:
+        return ("opt",)
+    if has_freq:
+        return ("freq",)
+    if has_sp:
+        return ("sp",)
+    return None
+
+
+def _v4_output_patch(text: str) -> OutputPatchV4 | None:
+    display_only = _has_any(
+        text,
+        ("只显示", "仅显示", "展示", "show", "display", "局部极小", "local minimum"),
+    )
+    if not display_only:
+        return None
+    raw = _output_spec(text)
+    quantities = raw.get("quantities")
+    parsed = None
+    if isinstance(quantities, list) and quantities:
+        parsed = tuple(
+            OutputQuantityPatchV4(
+                kind=str(item["kind"]),
+                required=bool(item.get("required", True)),
+                source_selector=item.get("source_selector"),
+                unit=item.get("unit"),
+                label=item.get("label"),
+            )
+            for item in quantities
+            if isinstance(item, dict) and isinstance(item.get("kind"), str)
+        )
+    precision = raw.get("precision")
+    values: dict[str, object] = {
+        "language": raw.get("language"),
+        "style": raw.get("style"),
+        "layout": raw.get("layout"),
+        "precision": precision if isinstance(precision, int) else None,
+        "include_evidence": raw.get("include_evidence"),
+    }
+    if parsed:
+        values["quantities"] = parsed
+    return OutputPatchV4(**values)
+
+
+def _calculation_v4(text: str, *, action: str = "plan_new") -> CalculationIntentV4:
+    changes: list[FieldChangeV4] = []
+    molecule, molecule_quote = _v4_extract_molecule(text)
+    if molecule is not None:
+        changes.append(_v4_change("molecule", molecule, text, molecule_quote))
+    charge_match = _CHARGE.search(text)
+    if charge_match:
+        changes.append(
+            _v4_change("charge", int(charge_match.group(1)), text, charge_match.group(0))
+        )
+    multiplicity_match = _MULTIPLICITY.search(text)
+    if multiplicity_match:
+        changes.append(
+            _v4_change(
+                "multiplicity",
+                int(multiplicity_match.group(1)),
+                text,
+                multiplicity_match.group(0),
+            )
+        )
+    method_match = _v4_method_match(text)
+    if method_match:
+        method_value = (
+            method_match.group(1)
+            if method_match.lastindex and method_match.group(1)
+            else method_match.group(0)
+        )
+        changes.append(_v4_change("method", method_value, text, method_match.group(0)))
+    environment_match = re.search(
+        r"(水溶液|溶液|solvent|aqueous|solution|气相|气体|gas[- ]?phase|gas)", text, re.I
+    )
+    if environment_match:
+        environment_value = (
+            "gas"
+            if environment_match.group(1).casefold() in {"气相", "气体", "gas", "gas-phase"}
+            else "solvent"
+        )
+        changes.append(
+            _v4_change("environment", environment_value, text, environment_match.group(0))
+        )
+    scope = _v4_scope(text)
+    if scope is not None:
+        local_minimum_frequency_conflict = _has_any(
+            text,
+            ("局部极小", "local minimum", "证明局部极小", "prove local minimum"),
+        ) and _has_any(
+            text,
+            (
+                "不要频率",
+                "不做频率",
+                "不需要频率",
+                "去掉频率",
+                "删除频率",
+                "移除频率",
+                "without freq",
+                "without frequency",
+                "remove freq",
+                "remove frequency",
+                "drop freq",
+                "drop frequency",
+            ),
+        )
+        if (
+            any(marker in text.casefold() for marker in ("去掉", "删除", "移除", "remove", "drop"))
+            and not local_minimum_frequency_conflict
+        ):
+            # The deterministic application merges this sparse scope into the
+            # current draft; the parser supplies the requested final scope.
+            if _has_any(text, ("频率", "freq")) and "freq" in scope:
+                scope = tuple(item for item in scope if item != "freq") or ("opt",)
+            if _has_any(text, ("单点", "sp")) and "sp" in scope:
+                scope = tuple(item for item in scope if item != "sp") or ("opt",)
+            if _has_any(text, ("优化", "opt")) and "opt" in scope:
+                scope = tuple(item for item in scope if item != "opt") or ("sp",)
+        changes.append(_v4_change("operations", list(scope), text, text[: min(len(text), 128)]))
+    reset_match = re.search(r"(?:恢复|重置|还原|reset)\s*(?:为|成|到)?\s*默认", text, re.I)
+    if reset_match:
+        if _has_any(text, ("方法", "method")):
+            reset_fields = ("method",)
+        elif _has_any(text, ("环境", "气相", "溶液", "environment", "solvent")):
+            reset_fields = ("environment",)
+        elif _has_any(text, ("电荷", "charge")):
+            reset_fields = ("charge",)
+        elif _has_any(text, ("多重度", "multiplicity", "spin")):
+            reset_fields = ("multiplicity",)
+        else:
+            reset_fields = ("method", "environment")
+        for field in reset_fields:
+            changes.append(_v4_change(field, None, text, reset_match.group(0), op="reset_default"))
+    prohibited_changes: list[tuple[str, str]] = []
+    frequency_prohibited_match = re.search(
+        r"(?:不要频率|不做频率|不需要频率|去掉频率|删除频率|移除频率|"
+        r"without\s+(?:the\s+)?frequency|without\s+freq|no\s+frequency|"
+        r"remove\s+(?:the\s+)?(?:frequency|freq)|"
+        r"drop\s+(?:the\s+)?(?:frequency|freq))",
+        text,
+        re.I,
+    )
+    if frequency_prohibited_match and _has_any(
+        text, ("局部极小", "local minimum", "证明局部极小", "prove local minimum")
+    ):
+        prohibited_changes.append(
+            (
+                "frequency is prohibited while local-minimum support is requested",
+                frequency_prohibited_match.group(0),
+            )
+        )
+    for pattern, message in (
+        (r"(?:gibbs|自由能|吉布斯|zpe|零点能)", "Gibbs/free-energy output is not available"),
+            (
+                r"(?:全局最低|global minimum|构象搜索|所有构象)",
+                "global conformer minimum is not available",
+            ),
+            (
+                r"(?:ts|过渡态|irc|反应路径)",
+                "TS/IRC reaction-path workflows are not available",
+            ),
+            (
+                r"(?:附件|图片|文件|路径|input\.xyz|\.inp|\.out)",
+                "file/image molecular intake is not connected",
+            ),
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            prohibited_changes.append((message, match.group(0)))
+    if prohibited_changes:
+        message, quote = prohibited_changes[0]
+        changes.append(
+            _v4_change(
+                "prohibited_request",
+                "; ".join(item[0] for item in prohibited_changes),
+                text,
+                quote,
+            )
+        )
+    output_patch = _v4_output_patch(text)
+    proposal = None
+    if scope is not None:
+        proposal = proposal_from_operations(
+            scope,
+            goal=text,
+            requested_outputs=tuple(
+                item["kind"]
+                for item in (_output_spec(text).get("quantities") or [])
+                if isinstance(item, dict) and isinstance(item.get("kind"), str)
+            ),
+            action=action,
+        ).model_dump(mode="json")
+        if (
+            _has_any(text, ("最低能量", "最低", "local minimum", "局部极小"))
+            and not _has_any(text, ("全局最低", "global minimum", "构象搜索"))
+            and not _has_any(
+                text,
+                (
+                    "去掉",
+                    "删除",
+                    "移除",
+                    "remove",
+                    "drop",
+                    "without",
+                    "不要频率",
+                    "不做频率",
+                    "不需要频率",
+                ),
+            )
+        ):
+            proposal["clarification_fields"] = ["local_minimum_scope_acceptance"]
+    elif output_patch is not None and action == "plan_new":
+        proposal = proposal_from_operations(
+            (), goal=text, requested_outputs=(), action=action
+        ).model_dump(mode="json")
+    return CalculationIntentV4(
+        action=action,
+        task_alias=_extract_task_alias(text),
+        changes=tuple(changes),
+        plan_proposal=proposal,
+        output_patch=output_patch,
+        requested_execution=_has_any(text, ("开始", "执行", "run it", "start it")),
+    )
+
+
+def _v4_revision_like(text: str) -> bool:
+    return _has_any(
+        text,
+        (
+            "去掉",
+            "删除",
+            "移除",
+            "改成",
+            "改为",
+            "调整",
+            "修改",
+            "设置",
+            "恢复默认",
+            "重置默认",
+            "当前任务",
+            "this task",
+            "remove",
+            "without",
+            "drop",
+            "reset default",
+        ),
+    )
+
+
 class BaselinePlanner:
     """A deterministic planner that never performs a scientific side effect."""
 
     adapter_id = "baseline"
     model = "deterministic-baseline-v1"
 
-    def interpret_text(self, text: str) -> TurnInterpretation:
+    def __init__(self, schema_version: str | None = None) -> None:
+        self.schema_version = schema_version
+
+    def interpret_text(self, text: str) -> TurnInterpretation | TurnInterpretationV4:
+        if self.schema_version == TURN_SCHEMA_V4:
+            return self._interpret_text_v4(text)
         stripped = text.strip()
         subrequests: list[object] = []
 
@@ -550,7 +1004,125 @@ class BaselinePlanner:
             source=ResponseSource.BASELINE,
         )
 
-    def interpret(self, context: ContextSnapshot) -> TurnInterpretation:
+    def _interpret_text_v4(self, text: str) -> TurnInterpretationV4:
+        stripped = text.strip()
+        subrequests: list[object] = []
+        if (
+            re.search(r"(?:再|然后|之后|and then|then)", stripped, re.I)
+            and _has_any(stripped, ("区别", "什么是", "解释", "difference", "what is"))
+            and _has_any(stripped, ("优化", "optimize", "算", "calculate"))
+        ):
+            separator = re.search(r"(?:再|然后|之后|and then|then)", stripped, re.I)
+            first = stripped[: separator.start()] if separator else stripped
+            second = stripped[separator.end() :] if separator else stripped
+            subrequests.append(
+                ChemistryQAIntentV4(
+                    question=first.strip(" ，,；;"),
+                    answer_draft=self._chemistry_answer(first),
+                )
+            )
+            subrequests.append(
+                _calculation_v4(
+                    second,
+                    action="revise_draft" if _v4_revision_like(second) else "plan_new",
+                )
+            )
+        elif _has_any(stripped, ("取消", "cancel", "停止任务", "终止任务")):
+            subrequests.append(_calculation_v4(stripped, action="cancel_task"))
+        elif _context_query_like(stripped):
+            subrequests.append(
+                ContextQueryIntentV4(
+                    query=stripped,
+                    task_alias=_extract_task_alias(stripped),
+                    output_patch=_v4_output_patch(stripped),
+                    requested_display_change=_has_any(
+                        stripped, ("只显示", "仅显示", "改成", "显示", "单位", "小数")
+                    ),
+                )
+            )
+        elif _question_like(stripped) and _has_any(
+            stripped,
+            ("优化", "单点", "频率", "振动", "电荷", "多重度", "r2scan", "orca", "method"),
+        ):
+            subrequests.append(
+                ChemistryQAIntentV4(
+                    question=stripped,
+                    task_alias=_extract_task_alias(stripped),
+                    answer_draft=self._chemistry_answer(stripped),
+                    requires_task_context=_has_any(stripped, ("本次", "这次", "刚才", "结果")),
+                )
+            )
+        elif _has_any(
+            stripped,
+            (
+                "优化",
+                "optimize",
+                "计算",
+                "calculate",
+                "算一下",
+                "频率",
+                "单点",
+                "run",
+                "开始",
+                "执行",
+                "改成",
+                "改为",
+                "调整",
+                "修改",
+                "设置",
+                "恢复默认",
+                "方法",
+                "环境",
+                "电荷",
+                "多重度",
+                "method",
+                "environment",
+                "charge",
+                "multiplicity",
+                "去掉",
+                "删除",
+                "移除",
+                "追加",
+                "remove",
+                "drop",
+                "only show",
+                "只显示",
+                "仅显示",
+            ),
+        ):
+            subrequests.append(
+                _calculation_v4(
+                    stripped,
+                    action="revise_draft" if _v4_revision_like(stripped) else "plan_new",
+                )
+            )
+        elif _has_any(stripped, ("你好", "您好", "欢迎", "hello", "hi", "thanks", "谢谢")):
+            subrequests.append(
+                GeneralQAIntentV4(
+                    question=stripped,
+                    answer_draft="你好！我可以帮助你规划受支持的化学计算，也可以查询已有任务或解释计算概念。",
+                )
+            )
+        elif _has_any(stripped, ("区别", "什么是", "解释", "difference", "what is")):
+            subrequests.append(
+                ChemistryQAIntentV4(
+                    question=stripped,
+                    answer_draft=self._chemistry_answer(stripped),
+                )
+            )
+        else:
+            subrequests.append(
+                GeneralQAIntentV4(
+                    question=stripped,
+                    answer_draft="我已收到这条消息，但需要更具体的任务或问题。",
+                )
+            )
+        return TurnInterpretationV4(
+            subrequests=tuple(subrequests),
+            source=ResponseSource.BASELINE,
+        )
+
+    def interpret(self, context: ContextSnapshot) -> TurnInterpretation | TurnInterpretationV4:
         return self.interpret_text(context.current_message)
 
     @staticmethod

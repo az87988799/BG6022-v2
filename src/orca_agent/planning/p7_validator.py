@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import WorkflowRecordId, new_id
@@ -17,6 +17,7 @@ from orca_agent.domain.p7_conversation import (
     ParameterSource,
     ParameterValue,
 )
+from orca_agent.domain.p7_intake import CalculationIntentV4
 from orca_agent.domain.p7_planning import PlanProposal
 from orca_agent.domain.p7_task import (
     CalculationPlan,
@@ -33,6 +34,7 @@ from orca_agent.planning.p7_catalog import (
     P7_BASELINE_CAPABILITY_ID,
     CapabilityCatalog,
 )
+from orca_agent.planning.p7_draft import resolve_draft
 from orca_agent.planning.p7_parameter_policy import (
     OXYGEN_CANONICAL_SMILES,
     MoleculePrecheck,
@@ -61,6 +63,12 @@ class NormalizedPlan:
     compilation: PlanCompilation | None = None
     source_task_id: str | None = None
     external_opt_result_id: str | None = None
+    draft_semantics_version: str = "legacy"
+    draft_changes: tuple[dict[str, object], ...] = ()
+    policy_snapshot: dict[str, object] | None = None
+    identity_notes: tuple[str, ...] = ()
+    raw_molecule_fragment: str | None = None
+    changed: bool = True
 
 
 def _parameter(
@@ -222,7 +230,7 @@ class P7PlanValidator:
 
     def normalize(
         self,
-        intent: CalculationIntent,
+        intent: CalculationIntent | CalculationIntentV4,
         *,
         turn_id: str,
         existing_request: CalculationRequest | None = None,
@@ -230,7 +238,18 @@ class P7PlanValidator:
         accept_recommendations: bool = False,
         user_text: str | None = None,
         trusted_artifacts: Mapping[str, Mapping[str, object]] | None = None,
+        current_planning_record: object | None = None,
     ) -> NormalizedPlan:
+        if isinstance(intent, CalculationIntentV4):
+            return self._normalize_v4(
+                intent,
+                turn_id=turn_id,
+                existing_request=existing_request,
+                source_request=source_request,
+                user_text=user_text or "",
+                trusted_artifacts=trusted_artifacts,
+                current_planning_record=current_planning_record,
+            )
         proposal, proposal_error = self._proposal_from_intent(intent)
         if existing_request is not None and intent.action is CalculationAction.REVISE_DRAFT:
             values = existing_request.model_dump(mode="python")
@@ -361,6 +380,48 @@ class P7PlanValidator:
             trusted_artifacts=trusted_artifacts,
         )
         return normalized
+
+    def _normalize_v4(
+        self,
+        intent: CalculationIntentV4,
+        *,
+        turn_id: str,
+        existing_request: CalculationRequest | None,
+        source_request: CalculationRequest | None,
+        user_text: str,
+        trusted_artifacts: Mapping[str, Mapping[str, object]] | None,
+        current_planning_record: object | None,
+    ) -> NormalizedPlan:
+        resolution = resolve_draft(
+            current_request=existing_request or source_request,
+            current_planning_record=current_planning_record,
+            user_patch=intent,
+            current_message=user_text,
+            turn_reference=turn_id,
+            capability_catalog=self.catalog,
+        )
+        proposal_error = next(
+            (item for item in resolution.issues if item.startswith("invalid candidate plan:")),
+            None,
+        )
+        normalized = self.validate(
+            resolution.request,
+            intent=intent,
+            proposal=resolution.proposal,
+            proposal_error=proposal_error,
+            trusted_artifacts=trusted_artifacts,
+            allow_policy_recommendations=True,
+            resolution_issues=resolution.issues,
+        )
+        return replace(
+            normalized,
+            draft_semantics_version="p7.draft.v4",
+            draft_changes=tuple(change.as_dict() for change in resolution.changes),
+            policy_snapshot=resolution.policy_snapshot,
+            identity_notes=resolution.identity_notes,
+            raw_molecule_fragment=resolution.raw_molecule_fragment,
+            changed=resolution.changed,
+        )
 
     @staticmethod
     def _proposal_from_intent(
@@ -680,12 +741,14 @@ class P7PlanValidator:
         self,
         request: CalculationRequest,
         *,
-        intent: CalculationIntent | None = None,
+        intent: CalculationIntent | CalculationIntentV4 | None = None,
         proposal: PlanProposal | None = None,
         proposal_error: str | None = None,
         trusted_artifacts: Mapping[str, Mapping[str, object]] | None = None,
+        allow_policy_recommendations: bool = False,
+        resolution_issues: Iterable[str] = (),
     ) -> NormalizedPlan:
-        issues: list[str] = []
+        issues: list[str] = list(resolution_issues)
         missing: list[str] = []
         unsupported: list[str] = list(request.prohibited_requests)
         precheck = None
@@ -744,6 +807,7 @@ class P7PlanValidator:
         if (
             request.multiplicity is not None
             and request.multiplicity.source is ParameterSource.POLICY_RECOMMENDED
+            and not allow_policy_recommendations
         ):
             missing.append("accept_electronic_state_recommendation")
         if request.charge is not None and int(request.charge.value) != 0:
@@ -760,6 +824,27 @@ class P7PlanValidator:
 
         if self.enable_candidate_planning and proposal_error is not None:
             issues.append(f"invalid candidate plan: {proposal_error}")
+
+        # A v4 request may intentionally contain a contradictory pair of
+        # requirements: frequency is prohibited while local-minimum support
+        # is still requested.  Keep this as an editable clarification so the
+        # compiler can surface the choice; do not classify the conflict as a
+        # generic unsupported workflow before it reaches that boundary.
+        local_minimum_conflict = (
+            isinstance(intent, CalculationIntentV4)
+            and "frequency is prohibited while local-minimum support is requested"
+            in unsupported
+            and any(
+                quantity.kind is OutputKind.LOCAL_MINIMUM_SUPPORT
+                for quantity in request.output_spec.quantities
+            )
+        )
+        if local_minimum_conflict:
+            unsupported = [
+                item
+                for item in unsupported
+                if item != "frequency is prohibited while local-minimum support is requested"
+            ]
 
         if unsupported:
             validation = PlanValidation.create(
@@ -799,7 +884,13 @@ class P7PlanValidator:
                     or "完成受支持的化学计算"
                 ),
                 requested_outputs=tuple(item.kind.value for item in request.output_spec.quantities),
-                action=(intent.action.value if intent is not None else "plan_new"),
+                action=(
+                    intent.action.value
+                    if intent is not None and hasattr(intent.action, "value")
+                    else str(intent.action)
+                    if intent is not None
+                    else "plan_new"
+                ),
             )
             if proposal is None and not operations:
                 candidate = candidate.model_copy(

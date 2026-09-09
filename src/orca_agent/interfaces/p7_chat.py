@@ -6,10 +6,13 @@ import json
 import queue
 import sys
 import threading
+from collections import deque
 from collections.abc import Callable
 from typing import TextIO
 
 from orca_agent.domain.ids import ConversationId
+
+_STATUS_CACHE_SIZE = 256
 
 
 class P7ChatDriver:
@@ -45,9 +48,9 @@ class P7ChatDriver:
         self.input_stream = input_stream or sys.stdin
         self.output_stream = output_stream or sys.stdout
         self.on_conversation_changed = on_conversation_changed
-        self._seen_pending: set[str] = set()
-        self._seen_terminal: set[str] = set()
-        self._seen_activity: set[str] = set()
+        self._seen_pending: deque[str] = deque(maxlen=_STATUS_CACHE_SIZE)
+        self._seen_terminal: deque[str] = deque(maxlen=_STATUS_CACHE_SIZE)
+        self._seen_activity: dict[str, deque[str]] = {}
 
     def run(self) -> int:
         """Serve stdin until EOF or an explicit exit command."""
@@ -116,7 +119,10 @@ class P7ChatDriver:
                 "accepted": False,
                 "conversation_id": self.conversation_id,
                 "code": "explicit_token_required",
-                "text": "请使用 /accept <token> 或明确输入“接受计划/确认身份/批准执行”。",
+                "text": (
+                    "请使用 /accept <token>，或明确输入"
+                    "“确认草稿并准备/确认身份/确认并开始本次 Opt 计算”。"
+                ),
             }
         try:
             return self.runtime.conversation.message(self.conversation_id, text)
@@ -323,16 +329,69 @@ class P7ChatDriver:
         except Exception as error:
             result = self._error("progress_error", error)
         activity = result.get("activity", [])
+        task_context: dict[str, dict[str, object]] = {}
+        raw_tasks = result.get("tasks", [])
+        if isinstance(raw_tasks, list):
+            for item in raw_tasks:
+                if not isinstance(item, dict):
+                    continue
+                task = item.get("task")
+                if not isinstance(task, dict):
+                    continue
+                task_id = str(task.get("task_id", ""))
+                pending = item.get("pending_actions", [])
+                pending_types = tuple(
+                    sorted(
+                        str(action.get("action_type"))
+                        for action in pending
+                        if isinstance(action, dict) and action.get("action_type")
+                    )
+                )
+                task_context[task_id] = {
+                    "revision": task.get("revision"),
+                    "state": task.get("state"),
+                    "pending_types": pending_types,
+                }
         visible_activity: list[object] = []
         if isinstance(activity, list):
             for item in activity:
-                key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
-                if key in self._seen_activity:
+                if not isinstance(item, dict):
                     continue
-                self._seen_activity.add(key)
+                task_key = str(item.get("task_id", "unknown"))
+                context = task_context.get(task_key, {})
+                signature = json.dumps(
+                    {
+                        "conversation_id": self.conversation_id,
+                        "revision": item.get("revision", context.get("revision")),
+                        "state": item.get("state", context.get("state")),
+                        "current_node": item.get("node_id")
+                        or item.get("primitive_id")
+                        or item.get("step")
+                        or item.get("phase"),
+                        "pending_types": context.get("pending_types", ()),
+                        "step": item.get("step"),
+                        "phase": item.get("phase"),
+                        "reason": item.get("reason"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                bucket = self._seen_activity.setdefault(
+                    f"{self.conversation_id}:{task_key}", deque(maxlen=64)
+                )
+                if signature in bucket:
+                    continue
+                bucket.append(signature)
                 visible_activity.append(item)
-        if result.get("effects") or visible_activity:
+        if (
+            result.get("effects")
+            or visible_activity
+            or result.get("code") not in {None, "progress"}
+        ):
             progress = {"accepted": True, "code": "progress", **result}
+            if result.get("code") not in {None, "progress"}:
+                progress["accepted"] = bool(result.get("accepted", False))
             progress["activity"] = visible_activity
             self._emit(progress)
         self._emit_pending_and_terminal(result)
@@ -363,7 +422,7 @@ class P7ChatDriver:
                         continue
                     token = str(action.get("token", ""))
                     if token and token not in self._seen_pending:
-                        self._seen_pending.add(token)
+                        self._seen_pending.append(token)
                         self._emit(
                             {
                                 "accepted": True,
@@ -374,13 +433,22 @@ class P7ChatDriver:
                                 "text": self._action_text(action),
                             }
                         )
-            if task.get("state") == "result_ready" and task_id not in self._seen_terminal:
-                self._seen_terminal.add(task_id)
+            state = str(task.get("state", ""))
+            terminal_or_attention = {
+                "result_ready",
+                "ended_without_result",
+                "reconciliation_required",
+                "needs_clarification",
+            }
+            terminal_key = f"{self.conversation_id}:{task_id}:{task.get('revision')}:{state}"
+            if state in terminal_or_attention and terminal_key not in self._seen_terminal:
+                self._seen_terminal.append(terminal_key)
                 try:
                     query = self.runtime.query.query(self.conversation_id, task_id=task_id)
                 except Exception as error:
                     query = self._error("result_query_error", error)
-                self._emit({"accepted": True, "code": "result", **query})
+                code = "result" if state == "result_ready" else "task_state"
+                self._emit({"accepted": True, "code": code, **query})
 
     def _has_pending_actions(self) -> bool:
         try:
@@ -512,9 +580,9 @@ class P7ChatDriver:
     @staticmethod
     def _action_text(action: dict[str, object]) -> str:
         labels = {
-            "accept_plan": "请明确接受计算计划",
+            "accept_plan": "请明确确认草稿并准备",
             "confirm_identity": "请确认唯一分子身份候选",
-            "approve_execution": "请逐项批准这个 P5 执行节点",
+            "approve_execution": "请明确确认并开始本次计算（当前 P5 节点）",
         }
         return labels.get(str(action.get("action_type")), "请明确处理这个待办")
 

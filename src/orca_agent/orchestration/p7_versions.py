@@ -9,11 +9,13 @@ P7_POLICY_VERSION = 7
 TURN_SCHEMA = "p7.turn.v1"
 TURN_SCHEMA_V2 = "p7.turn.v2"
 TURN_SCHEMA_V3 = "p7.turn.v3"
+TURN_SCHEMA_V4 = "p7.turn.v4"
 OUTPUT_SCHEMA = "p7.output.v1"
 CAPABILITY_VIEW_SCHEMA = "p7.capability-view.v1"
 PROMPT_VERSION = "p7.intake-plan.v1"
 PROMPT_VERSION_V2 = "p7.intake-plan.v2"
 PROMPT_VERSION_V3 = "p7.intake-plan.v3"
+PROMPT_VERSION_V4 = "p7.intake-plan.v4"
 P7_RECORD_ENGINE = "p7-records-v1"
 
 __all__ = [
@@ -27,7 +29,9 @@ __all__ = [
     "PROMPT_VERSION",
     "PROMPT_VERSION_V2",
     "PROMPT_VERSION_V3",
+    "PROMPT_VERSION_V4",
     "TURN_SCHEMA",
     "TURN_SCHEMA_V2",
     "TURN_SCHEMA_V3",
+    "TURN_SCHEMA_V4",
 ]

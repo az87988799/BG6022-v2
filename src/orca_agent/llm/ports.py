@@ -11,6 +11,8 @@ from pydantic import Field, field_validator
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.json_types import FrozenJsonObject, freeze_json_object
 from orca_agent.domain.p7_conversation import ContextSnapshot, P7Model, TurnInterpretation
+from orca_agent.domain.p7_intake import TurnInterpretationV4
+from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4
 
 
 class ModelMessage(P7Model):
@@ -120,7 +122,9 @@ class ModelCallResponse(P7Model):
 class PlannerPort(Protocol):
     adapter_id: str
 
-    def interpret(self, context: ContextSnapshot) -> ModelCallResponse | TurnInterpretation:
+    def interpret(
+        self, context: ContextSnapshot
+    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4:
         """Return a raw model response or an already validated interpretation."""
 
 
@@ -130,11 +134,16 @@ class CallablePlanner:
     adapter_id = "callable"
 
     def __init__(
-        self, callback: Callable[[ContextSnapshot], ModelCallResponse | TurnInterpretation]
+        self,
+        callback: Callable[
+            [ContextSnapshot], ModelCallResponse | TurnInterpretation | TurnInterpretationV4
+        ],
     ) -> None:
         self._callback = callback
 
-    def interpret(self, context: ContextSnapshot) -> ModelCallResponse | TurnInterpretation:
+    def interpret(
+        self, context: ContextSnapshot
+    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4:
         return self._callback(context)
 
 
@@ -158,14 +167,32 @@ def strict_json_loads(value: str | bytes) -> object:
     )
 
 
-def validate_interpretation(value: object) -> TurnInterpretation:
+def validate_interpretation(value: object) -> TurnInterpretation | TurnInterpretationV4:
     if isinstance(value, TurnInterpretation):
         return value
+    if isinstance(value, TurnInterpretationV4):
+        return value
     if isinstance(value, bytes):
-        strict_json_loads(value)
+        raw = strict_json_loads(value)
+    elif isinstance(value, str):
+        raw = strict_json_loads(value)
+    elif isinstance(value, Mapping):
+        raw = dict(value)
+    else:
+        raw = value
+    if isinstance(raw, Mapping) and raw.get("schema_version") == TURN_SCHEMA_V4:
+        # JSON arrays are intentionally represented as tuples by the domain
+        # models.  Parse the original JSON again so strict validation accepts
+        # the wire-format arrays while still retaining duplicate-key checks.
+        encoded = (
+            value
+            if isinstance(value, (str, bytes))
+            else json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        )
+        return TurnInterpretationV4.model_validate_json(encoded, strict=True)
+    if isinstance(value, bytes):
         return TurnInterpretation.model_validate_json(value, strict=True)
     if isinstance(value, str):
-        strict_json_loads(value)
         return TurnInterpretation.model_validate_json(value, strict=True)
     if isinstance(value, Mapping):
         return TurnInterpretation.model_validate_json(

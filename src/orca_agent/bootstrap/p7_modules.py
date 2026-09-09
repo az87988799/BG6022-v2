@@ -12,6 +12,7 @@ from orca_agent.application.p7_task_service import P7TaskService
 from orca_agent.llm.baseline import BaselinePlanner
 from orca_agent.llm.fake import FakePlanner
 from orca_agent.llm.ports import PlannerPort
+from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V3, TURN_SCHEMA_V4
 
 
 @dataclass(frozen=True)
@@ -60,13 +61,20 @@ def build_p7_runtime(
     allow_real_orca = config.allow_real_orca
     if planner is None:
         if planner_name == "baseline":
-            planner = BaselinePlanner()
+            planner = BaselinePlanner(
+                TURN_SCHEMA_V4 if config.profile != "legacy" else None
+            )
         elif planner_name == "fake":
             planner = FakePlanner()
         elif planner_name == "deepseek_chat":
             from orca_agent.llm.deepseek_chat import DeepSeekChatAdapter
 
-            planner = DeepSeekChatAdapter(model=config.model)
+            planner = DeepSeekChatAdapter(
+                model=config.model,
+                intake_schema_version=(
+                    TURN_SCHEMA_V4 if config.profile != "legacy" else TURN_SCHEMA_V3
+                ),
+            )
         else:
             raise ValueError("planner must be baseline, fake, or deepseek_chat")
 

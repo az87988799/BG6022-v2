@@ -499,7 +499,11 @@ class TurnRecord(P7Model):
     status: TurnStatus
     user_text: str
     context_snapshot: ContextSnapshot
-    interpretation: TurnInterpretation | None = None
+    # The repository dispatches this field by its serialized schema version.
+    # Keeping the storage envelope open here avoids importing the independent
+    # v4 intake module back into this historical model and preserves v1-v3
+    # model hashes exactly.
+    interpretation: object | None = None
     response_text: str | None = None
     response_payload: FrozenJsonObject = {}
     response_source: ResponseSource = ResponseSource.PROGRAM

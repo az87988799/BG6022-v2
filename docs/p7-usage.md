@@ -16,9 +16,9 @@ Copy-Item .env.example .env
 
 The default profile is `real`: DeepSeek interprets the request, PubChem
 resolves names/CAS/CID, RDKit handles local SMILES, and the existing local P5
-ORCA backend executes the fixed Opt → Freq → independent SP chain after each
-explicit approval. Startup does not run a paid model probe or an ORCA smoke
-job. Run the explicit readiness check before a real calculation:
+ORCA backend executes only the operations present in the confirmed draft.
+Startup does not run a paid model probe or an ORCA smoke job. Run the explicit
+readiness check before a real calculation:
 
 ```powershell
 .venv\Scripts\python.exe scripts\start_chat.py --doctor
@@ -30,12 +30,43 @@ packages, pull code, or silently approve a plan, identity, or P5 node. If the
 real ORCA profile is not ready, planning may still be inspected but no
 executable approval token is issued.
 
+## Default draft and confirmations
+
+For example, `优化水分子` creates a complete editable draft with:
+
+- method `r2SCAN-3c`;
+- gas phase;
+- charge `0`, multiplicity `1` (the versioned water/ethanol policy
+  recommendation);
+- the `Opt` operation only, with optimized geometry and final Opt energy;
+- the registered P5 resources: 4 cores, 2048 MB total memory, and 384 MB
+  MaxCore.
+
+`Freq` and independent `SP` are not silently added. Request them explicitly;
+they become separate operations in the draft. Omitted method/environment
+values are completed by the program policy, while values repeated by a model
+without a current-message evidence quote do not overwrite the existing draft.
+The molecule policy uses exact registered aliases and structures: the generic
+word `酒精` is not automatically treated as ethanol, and `苯在水溶液中` keeps
+benzene as the target and treats water as the solvent environment.
+
+Use these explicit confirmation phrases in the terminal:
+
+- `确认草稿并准备` — accept the scientific draft and prepare P4 identity;
+- `确认这个分子` — confirm the unique identity candidate;
+- `确认并开始本次 Opt 计算` (or `确认并开始本次计算`) — approve the current
+  P5 node only.
+
+Each phrase is matched to one current pending action. If there is no matching
+token, the program does not create a blank task or start a calculation.
+
 For local testing, profiles are explicit:
 
 - `--profile offline` uses the deterministic baseline planner and fake P4/P5/P6
   chain; it makes no network or model calls.
 - `--profile deepseek_fake` uses the real DeepSeek adapter with fake identity
-  and execution, so it still requires a real DeepSeek key and network access.
+  transport plus fake identity and execution. It still requires a real
+  DeepSeek key and network access; use it only when that is intentional.
 
 Inside the window, ordinary Chinese or English text is sent to the shared
 `P7ChatDriver`. Use `/help`, `/status`, `/tasks`, `/use <任务>`, `/new`,
@@ -81,8 +112,9 @@ python -m orca_agent --state-root $P7Root agent-work `
 
 The work response exposes the P4 identity token. Accept it with
 `agent-action`, run `agent-work` again, and accept each displayed
-`approve_execution` token in turn. The fixed P5 protocol has three nodes; a
-plan/identity acceptance never substitutes for those three execution grants.
+`approve_execution` token in turn. The number and type of P5 nodes comes from
+the confirmed draft; a plan/identity acceptance never substitutes for an
+execution grant.
 
 The P7 adapter reads `.env` from the current project directory. Process
 environment variables with the same names take precedence. The `.env` file is

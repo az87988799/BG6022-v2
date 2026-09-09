@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "p7.intake-plan.v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "prompt_version", "subrequests"],
+  "properties": {
+    "schema_version": {"const": "p7.turn.v4"},
+    "prompt_version": {"const": "p7.intake-plan.v4"},
+    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "source": {"enum": ["program", "baseline", "fake", "deepseek_chat", "user"]},
+    "subrequests": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/subrequest"}
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["quote"],
+      "properties": {"quote": {"type": "string", "minLength": 1, "maxLength": 4096}}
+    },
+    "moleculeValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "value"],
+      "properties": {
+        "kind": {"enum": ["name", "cas", "cid", "smiles"]},
+        "value": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "raw": {"type": ["string", "null"], "maxLength": 4096}
+      }
+    },
+    "change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "op", "evidence"],
+      "properties": {
+        "field": {"enum": ["molecule", "molecule_kind", "molecule_value", "method", "environment", "charge", "multiplicity", "operations", "hard_constraint", "prohibited_request"]},
+        "op": {"enum": ["set", "reset_default"]},
+        "value": {},
+        "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    },
+    "outputQuantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 256},
+        "required": {"type": "boolean"},
+        "source_selector": {"type": ["string", "null"], "maxLength": 256},
+        "unit": {"type": ["string", "null"], "maxLength": 256},
+        "label": {"type": ["string", "null"], "maxLength": 256}
+      }
+    },
+    "outputPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quantities": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/outputQuantity"}},
+        "language": {"enum": ["zh", "en"]},
+        "style": {"enum": ["concise", "detailed"]},
+        "layout": {"enum": ["prose", "table", "json"]},
+        "units": {"type": "object"},
+        "precision": {"type": "integer", "minimum": 0, "maximum": 12},
+        "artifacts": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "include_evidence": {"type": "boolean"}
+      }
+    },
+    "planStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "capability_id", "input_ref", "depends_on", "purpose", "why"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 128},
+        "capability_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "input_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+        "depends_on": {"type": "array", "maxItems": 3, "items": {"type": "string"}},
+        "purpose": {"type": "string", "minLength": 1, "maxLength": 512},
+        "why": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "planProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "action", "goal", "strategy_summary", "steps", "requested_outputs", "optional_suggestions", "clarification_fields"],
+      "properties": {
+        "schema_version": {"const": "p7.plan-proposal.v1"},
+        "action": {"enum": ["plan_new", "revise_draft"]},
+        "goal": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "strategy_summary": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "steps": {"type": "array", "maxItems": 3, "items": {"$ref": "#/$defs/planStep"}},
+        "requested_outputs": {"type": "array", "items": {"type": "string"}},
+        "optional_suggestions": {"type": "array", "items": {"type": "string"}},
+        "clarification_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "calculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "action", "changes", "plan_proposal", "output_patch", "requested_execution"],
+      "properties": {
+        "intent": {"const": "chemical_calculation"},
+        "action": {"enum": ["plan_new", "revise_draft", "request_execution", "cancel_task"]},
+        "task_alias": {"type": ["string", "null"], "maxLength": 256},
+        "changes": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/change"}},
+        "plan_proposal": {"anyOf": [{"$ref": "#/$defs/planProposal"}, {"type": "null"}]},
+        "output_patch": {"anyOf": [{"$ref": "#/$defs/outputPatch"}, {"type": "null"}]},
+        "requested_execution": {"type": "boolean"}
+      }
+    },
+    "chemistryQA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "question", "answer_draft"],
+      "properties": {
+        "intent": {"const": "chemistry_qa"},
+        "question": {"type": "string", "minLength": 1},
+        "task_alias": {"type": ["string", "null"]},
+        "answer_draft": {"type": "string", "minLength": 1},
+        "requires_task_context": {"type": "boolean"},
+        "cited_fact_aliases": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "generalQA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "question", "answer_draft"],
+      "properties": {
+        "intent": {"const": "general_qa"},
+        "question": {"type": "string", "minLength": 1},
+        "answer_draft": {"type": "string", "minLength": 1}
+      }
+    },
+    "contextQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "query"],
+      "properties": {
+        "intent": {"const": "context_query"},
+        "query": {"type": "string", "minLength": 1},
+        "task_alias": {"type": ["string", "null"]},
+        "output_patch": {"anyOf": [{"$ref": "#/$defs/outputPatch"}, {"type": "null"}]},
+        "requested_display_change": {"type": "boolean"}
+      }
+    },
+    "subrequest": {
+      "oneOf": [
+        {"$ref": "#/$defs/calculation"},
+        {"$ref": "#/$defs/chemistryQA"},
+        {"$ref": "#/$defs/generalQA"},
+        {"$ref": "#/$defs/contextQuery"}
+      ]
+    }
+  }
+}

@@ -10,6 +10,10 @@ from pathlib import Path
 from orca_agent.application.p7_runtime_config import load_project_environment
 from orca_agent.domain.p7_conversation import ContextSnapshot
 from orca_agent.llm.ports import ModelCallRequest, ModelCallResponse, ModelMessage
+from orca_agent.orchestration.p7_versions import (
+    TURN_SCHEMA_V3,
+    TURN_SCHEMA_V4,
+)
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -31,6 +35,7 @@ class DeepSeekChatAdapter:
         transport: Callable[[ModelCallRequest, Mapping[str, object]], ModelCallResponse]
         | None = None,
         environ: Mapping[str, str] | None = None,
+        intake_schema_version: str = TURN_SCHEMA_V3,
     ) -> None:
         env = _runtime_environment(environ)
         self.api_key = api_key if api_key is not None else env.get("DEEPSEEK_API_KEY")
@@ -38,6 +43,9 @@ class DeepSeekChatAdapter:
         self.endpoint = endpoint
         self.timeout_seconds = timeout_seconds
         self.transport = transport
+        if intake_schema_version not in {TURN_SCHEMA_V3, TURN_SCHEMA_V4}:
+            raise ValueError("intake_schema_version must be p7.turn.v3 or p7.turn.v4")
+        self.intake_schema_version = intake_schema_version
         self.last_request: ModelCallRequest | None = None
         self.last_request_body: dict[str, object] | None = None
 
@@ -59,7 +67,7 @@ class DeepSeekChatAdapter:
             adapter_id=self.adapter_id,
             model=self.model,
             messages=(
-                ModelMessage(role="system", content=_system_prompt()),
+                ModelMessage(role="system", content=_system_prompt(self.intake_schema_version)),
                 ModelMessage(role="user", content=_context_prompt(context)),
             ),
             response_format={"type": "json_object"},
@@ -92,7 +100,7 @@ class DeepSeekChatAdapter:
             adapter_id=self.adapter_id,
             model=self.model,
             messages=(
-                ModelMessage(role="system", content=_system_prompt()),
+                ModelMessage(role="system", content=_system_prompt(self.intake_schema_version)),
                 ModelMessage(
                     role="user",
                     content=(
@@ -262,9 +270,13 @@ class DeepSeekChatAdapter:
             )
 
 
-def _system_prompt() -> str:
-    prompt = _read_p7_resource("intake.v3.prompt.txt")
-    schema = _read_p7_resource("intake.v3.schema.json")
+def _system_prompt(schema_version: str = TURN_SCHEMA_V3) -> str:
+    if schema_version == TURN_SCHEMA_V4:
+        prompt_name, schema_name = "intake.v4.prompt.txt", "intake.v4.schema.json"
+    else:
+        prompt_name, schema_name = "intake.v3.prompt.txt", "intake.v3.schema.json"
+    prompt = _read_p7_resource(prompt_name)
+    schema = _read_p7_resource(schema_name)
     return f"{prompt}\n\nPublished JSON Schema:\n{schema}"
 
 

@@ -21,6 +21,7 @@ from orca_agent.domain.p7_conversation import (
     TurnRecord,
     TurnStatus,
 )
+from orca_agent.domain.p7_intake import TurnInterpretationV4
 from orca_agent.domain.p7_planning import PlanningRecord
 from orca_agent.domain.p7_task import (
     CalculationPlan,
@@ -35,6 +36,7 @@ from orca_agent.domain.p7_task import (
     TaskRecord,
 )
 from orca_agent.infrastructure.clock import format_utc, parse_utc
+from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4
 
 
 def _json(value: object) -> str:
@@ -233,11 +235,16 @@ class P7RecordRepository:
 
     def _turn_from_row(self, row: sqlite3.Row) -> TurnRecord:
         context = ContextSnapshot.model_validate_json(str(row[5]), strict=True)
-        interpretation = (
-            None
-            if row[7] is None
-            else TurnInterpretation.model_validate_json(str(row[7]), strict=True)
-        )
+        interpretation = None
+        if row[7] is not None:
+            raw_interpretation = _load_json(row[7], what="turn interpretation")
+            if not isinstance(raw_interpretation, dict):
+                raise StateIntegrityError("stored turn interpretation is not an object")
+            interpretation = (
+                TurnInterpretationV4.model_validate_json(str(row[7]), strict=True)
+                if raw_interpretation.get("schema_version") == TURN_SCHEMA_V4
+                else TurnInterpretation.model_validate_json(str(row[7]), strict=True)
+            )
         response = _load_json(row[8], what="turn response")
         if not isinstance(response, dict):
             raise StateIntegrityError("turn response is not an object")
@@ -263,6 +270,14 @@ class P7RecordRepository:
             "updated_at_utc": updated,
         }
         return TurnRecord.create(**values)
+
+    def latest_model_attempt_id(self, turn_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT attempt_id FROM p7_model_attempts WHERE turn_id=? "
+            "ORDER BY created_at_utc DESC, attempt_id DESC LIMIT 1",
+            (turn_id,),
+        ).fetchone()
+        return None if row is None else str(row[0])
 
     # Tasks ------------------------------------------------------------
     def insert_task(self, task: TaskRecord) -> None:

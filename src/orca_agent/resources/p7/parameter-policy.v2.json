@@ -1,0 +1,48 @@
+{
+  "policy_version": "p7-parameter-policy-v2",
+  "policy_id": "p7.default-parameters.v2",
+  "content_hash": "e49b041c862dd364307bad80036c16f4f8d98e208835540dde18b1f58bcc6089",
+  "scope": "registered gas-phase r2SCAN-3c drafts for exact ordinary water and ethanol structures",
+  "recommendations": {
+    "method": {
+      "value": "r2SCAN-3c",
+      "rule_id": "registered_method_r2scan3c",
+      "applies_to": ["gas", "ordinary_registered_molecule"]
+    },
+    "environment": {
+      "value": "gas",
+      "rule_id": "registered_gas_phase_default",
+      "applies_to": ["registered_orca_capability"]
+    }
+  },
+  "molecules": [
+    {
+      "canonical_name": "water",
+      "aliases": ["water", "水", "水分子"],
+      "cas": "7732-18-5",
+      "cid": "962",
+      "canonical_smiles": "O",
+      "molecular_formula": "H2O",
+      "charge": 0,
+      "multiplicity": 1,
+      "rule_id": "ordinary_neutral_closed_shell_water_v1"
+    },
+    {
+      "canonical_name": "ethanol",
+      "aliases": ["ethanol", "乙醇"],
+      "cas": "64-17-5",
+      "cid": "702",
+      "canonical_smiles": "CCO",
+      "molecular_formula": "C2H6O",
+      "charge": 0,
+      "multiplicity": 1,
+      "rule_id": "ordinary_neutral_closed_shell_ethanol_v1"
+    }
+  ],
+  "special_rules": {
+    "generic_default": "Do not infer charge or multiplicity outside an exact registered structure rule.",
+    "oxygen": "O=O requires a separate electronic-state policy and is not a default singlet.",
+    "alcohol": "酒精 is not an unconditional identity alias for pure ethanol.",
+    "solvent": "A solvent mention is not the target molecule unless the molecule field names water explicitly."
+  }
+}
