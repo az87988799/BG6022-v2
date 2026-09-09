@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -56,6 +57,7 @@ def _parameter(
     value: object,
     source: ParameterSource,
     source_reference: str,
+    source_fragment: str | None = None,
     hard_constraint: bool = False,
     structure_hash: str | None = None,
     rule_version: str | None = None,
@@ -70,6 +72,7 @@ def _parameter(
         hard_constraint=hard_constraint,
         source=source,
         source_reference=source_reference,
+        source_fragment=source_fragment,
         structure_hash=structure_hash,
         rule_version=rule_version,
         recommendation_accepted=recommendation_accepted,
@@ -138,6 +141,7 @@ class P7PlanValidator:
         turn_id: str,
         existing_request: CalculationRequest | None = None,
         accept_recommendations: bool = False,
+        user_text: str | None = None,
     ) -> NormalizedPlan:
         if existing_request is not None and intent.action is CalculationAction.REVISE_DRAFT:
             values = existing_request.model_dump(mode="python")
@@ -150,39 +154,63 @@ class P7PlanValidator:
                 values["molecule_kind"] = intent.molecule_kind
                 values["molecule_value"] = intent.molecule_value
             if intent.charge is not None:
+                charge_quote = _explicit_evidence(intent, "charge", user_text)
                 values["charge"] = _parameter(
                     name="charge",
                     value=intent.charge,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if charge_quote is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=turn_id,
+                    source_fragment=charge_quote,
                     hard_constraint=True,
                     structure_hash=getattr(existing_request.charge, "structure_hash", None),
                 )
             if intent.multiplicity is not None:
+                multiplicity_quote = _explicit_evidence(intent, "multiplicity", user_text)
                 values["multiplicity"] = _parameter(
                     name="multiplicity",
                     value=intent.multiplicity,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if multiplicity_quote is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=turn_id,
+                    source_fragment=multiplicity_quote,
                     hard_constraint=True,
                     structure_hash=getattr(existing_request.multiplicity, "structure_hash", None),
                 )
             if intent.operations:
                 values["operations"] = intent.operations
             if intent.method is not None:
+                method_quote = _explicit_evidence(intent, "method", user_text)
                 values["method"] = _parameter(
                     name="method",
                     value=intent.method,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if method_quote is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=turn_id,
+                    source_fragment=method_quote,
                     hard_constraint=True,
                 )
             if intent.environment is not None:
+                environment_quote = _explicit_evidence(intent, "environment", user_text)
                 values["environment"] = _parameter(
                     name="environment",
                     value=intent.environment,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if environment_quote is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=turn_id,
+                    source_fragment=environment_quote,
                     hard_constraint=True,
                 )
             if accept_recommendations:
@@ -209,7 +237,10 @@ class P7PlanValidator:
             request = CalculationRequest.create(**values)
         else:
             request = self._new_request(
-                intent, turn_id=turn_id, accept_recommendations=accept_recommendations
+                intent,
+                turn_id=turn_id,
+                accept_recommendations=accept_recommendations,
+                user_text=user_text,
             )
 
         return self.validate(request, intent=intent)
@@ -220,6 +251,7 @@ class P7PlanValidator:
         *,
         turn_id: str,
         accept_recommendations: bool,
+        user_text: str | None,
     ) -> CalculationRequest:
         source_reference = turn_id
         precheck: MoleculePrecheckResult | None = None
@@ -232,14 +264,42 @@ class P7PlanValidator:
         charge: ParameterValue | None = None
         multiplicity: ParameterValue | None = None
         if precheck is not None and precheck.status == "valid":
+            charge_quote = _explicit_evidence(intent, "charge", user_text)
+            multiplicity_quote = _explicit_evidence(intent, "multiplicity", user_text)
+            if intent.charge is not None and charge_quote is None:
+                charge = _parameter(
+                    name="charge",
+                    value=intent.charge,
+                    source=ParameterSource.UNRESOLVED,
+                    source_reference=source_reference,
+                    source_fragment=None,
+                    hard_constraint=True,
+                    structure_hash=precheck.structure_hash,
+                )
+            if intent.multiplicity is not None and multiplicity_quote is None:
+                multiplicity = _parameter(
+                    name="multiplicity",
+                    value=intent.multiplicity,
+                    source=ParameterSource.UNRESOLVED,
+                    source_reference=source_reference,
+                    source_fragment=None,
+                    hard_constraint=True,
+                    structure_hash=precheck.structure_hash,
+                )
             charge_resolution = self.precheck.resolve_electronic_state(
                 precheck=precheck,
-                requested_charge=intent.charge,
-                requested_multiplicity=intent.multiplicity,
+                requested_charge=intent.charge if charge_quote is not None else None,
+                requested_multiplicity=(
+                    intent.multiplicity if multiplicity_quote is not None else None
+                ),
                 source_reference=source_reference,
+                charge_source_fragment=charge_quote,
+                multiplicity_source_fragment=multiplicity_quote,
             )
-            charge = charge_resolution.charge
-            multiplicity = charge_resolution.multiplicity
+            if charge is None:
+                charge = charge_resolution.charge
+            if multiplicity is None:
+                multiplicity = charge_resolution.multiplicity
             if precheck.canonical_isomeric_smiles == OXYGEN_CANONICAL_SMILES:
                 intent = intent.model_copy(
                     update={
@@ -276,8 +336,13 @@ class P7PlanValidator:
                 charge = _parameter(
                     name="charge",
                     value=intent.charge,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if _explicit_evidence(intent, "charge", user_text) is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=source_reference,
+                    source_fragment=_explicit_evidence(intent, "charge", user_text),
                     hard_constraint=True,
                 )
             elif known:
@@ -292,8 +357,13 @@ class P7PlanValidator:
                 multiplicity = _parameter(
                     name="multiplicity",
                     value=intent.multiplicity,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if _explicit_evidence(intent, "multiplicity", user_text) is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=source_reference,
+                    source_fragment=_explicit_evidence(intent, "multiplicity", user_text),
                     hard_constraint=True,
                 )
             elif known:
@@ -309,16 +379,26 @@ class P7PlanValidator:
                 charge = _parameter(
                     name="charge",
                     value=intent.charge,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if _explicit_evidence(intent, "charge", user_text) is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=source_reference,
+                    source_fragment=_explicit_evidence(intent, "charge", user_text),
                     hard_constraint=True,
                 )
             if intent.multiplicity is not None:
                 multiplicity = _parameter(
                     name="multiplicity",
                     value=intent.multiplicity,
-                    source=ParameterSource.USER_EXPLICIT,
+                    source=(
+                        ParameterSource.USER_EXPLICIT
+                        if _explicit_evidence(intent, "multiplicity", user_text) is not None
+                        else ParameterSource.UNRESOLVED
+                    ),
                     source_reference=source_reference,
+                    source_fragment=_explicit_evidence(intent, "multiplicity", user_text),
                     hard_constraint=True,
                 )
 
@@ -331,25 +411,37 @@ class P7PlanValidator:
             ):
                 multiplicity = accepted_recommendation(multiplicity)
 
+        method_quote = _explicit_evidence(intent, "method", user_text)
+        environment_quote = _explicit_evidence(intent, "environment", user_text)
         method_value = intent.method or "r2SCAN-3c"
         environment_value = intent.environment or "gas"
         method = _parameter(
             name="method",
             value=method_value,
-            source=ParameterSource.USER_EXPLICIT
-            if intent.method
-            else ParameterSource.POLICY_RECOMMENDED,
+            source=(
+                ParameterSource.USER_EXPLICIT
+                if intent.method and method_quote is not None
+                else ParameterSource.UNRESOLVED
+                if intent.method
+                else ParameterSource.POLICY_RECOMMENDED
+            ),
             source_reference=source_reference,
+            source_fragment=method_quote,
             hard_constraint=intent.method is not None,
             rule_version=None if intent.method else "p7-parameter-policy-v1",
         )
         environment = _parameter(
             name="environment",
             value=environment_value,
-            source=ParameterSource.USER_EXPLICIT
-            if intent.environment
-            else ParameterSource.POLICY_RECOMMENDED,
+            source=(
+                ParameterSource.USER_EXPLICIT
+                if intent.environment and environment_quote is not None
+                else ParameterSource.UNRESOLVED
+                if intent.environment
+                else ParameterSource.POLICY_RECOMMENDED
+            ),
             source_reference=source_reference,
+            source_fragment=environment_quote,
             hard_constraint=intent.environment is not None,
             rule_version=None if intent.environment else "p7-parameter-policy-v1",
         )
@@ -404,6 +496,8 @@ class P7PlanValidator:
         if request.method is None:
             missing.append("method")
         else:
+            if request.method.source is ParameterSource.UNRESOLVED:
+                missing.append("method_evidence")
             method = str(request.method.value).casefold()
             if method not in SUPPORTED_METHOD_NAMES:
                 unsupported.append(f"method:{request.method.value}")
@@ -411,6 +505,8 @@ class P7PlanValidator:
             missing.append("environment")
         elif str(request.environment.value).casefold() not in {"gas", "gas-phase", "气相"}:
             unsupported.append(f"environment:{request.environment.value}")
+        elif request.environment.source is ParameterSource.UNRESOLVED:
+            missing.append("environment_evidence")
 
         operations = tuple(request.operations)
         if operations != DEFAULT_OPERATIONS:
@@ -433,8 +529,12 @@ class P7PlanValidator:
 
         if request.charge is None:
             missing.append("charge")
+        elif request.charge.source is ParameterSource.UNRESOLVED:
+            missing.append("charge_evidence")
         if request.multiplicity is None:
             missing.append("multiplicity")
+        elif request.multiplicity.source is ParameterSource.UNRESOLVED:
+            missing.append("multiplicity_evidence")
         if (
             request.multiplicity is not None
             and request.multiplicity.source is ParameterSource.POLICY_RECOMMENDED
@@ -563,8 +663,87 @@ class P7PlanValidator:
             "multiplicity": "多重度",
             "method": "方法",
             "environment": "环境",
+            "method_evidence": "方法的原文依据",
+            "environment_evidence": "环境的原文依据",
+            "charge_evidence": "电荷的原文依据",
+            "multiplicity_evidence": "多重度的原文依据",
         }
         return "请补充：" + "、".join(labels.get(item, item) for item in fields[:3]) + "。"
+
+
+def _explicit_evidence(
+    intent: CalculationIntent, field_name: str, user_text: str | None
+) -> str | None:
+    """Return evidence only when it quotes the value positively in this turn.
+
+    Presence of a quote is not enough: a model can quote a prohibition or put a
+    different value next to a field.  This small semantic gate keeps those
+    proposals unresolved so the deterministic validator can ask the user.
+    """
+
+    if not user_text:
+        return None
+    evidence = thaw_json(intent.parameter_evidence)
+    if not isinstance(evidence, dict):
+        return None
+    raw = evidence.get(field_name)
+    if not isinstance(raw, dict):
+        return None
+    origin = raw.get("origin", raw.get("source"))
+    quote = raw.get("quote", raw.get("source_fragment"))
+    if origin not in {"user", "user_explicit", "current_message"}:
+        return None
+    if not isinstance(quote, str) or not quote.strip():
+        return None
+    quote = quote.strip()
+    text_folded = user_text.casefold()
+    quote_start = text_folded.find(quote.casefold())
+    if quote_start < 0:
+        return None
+    value = getattr(intent, field_name, None)
+    pattern = _evidence_value_pattern(field_name, value)
+    if pattern is None:
+        return None
+    match = pattern.search(quote)
+    if match is None:
+        return None
+    absolute_end = quote_start + match.end()
+    semantic_window = user_text[max(0, absolute_end - 48) : absolute_end]
+    if _NEGATIVE_EVIDENCE.search(semantic_window):
+        return None
+    return quote
+
+
+_NEGATIVE_EVIDENCE = re.compile(
+    r"(?:不要|不使用|不采用|禁止|排除|不必|无需|不需要|不是|不选|不要求|"
+    r"without|do\s+not|don't|not|no)\s*(?:使用|采用|指定|选择|要求|use|using)?"
+    r"[\s\S]{0,24}$",
+    re.IGNORECASE,
+)
+
+
+def _evidence_value_pattern(field_name: str, value: object) -> re.Pattern[str] | None:
+    if value is None:
+        return None
+    if field_name in {"charge", "multiplicity"} and isinstance(value, int):
+        return re.compile(rf"(?<!\d)[+-]?{abs(value)}(?!\d)")
+    if field_name == "method":
+        normalized = _method_evidence_key(str(value))
+        if normalized == "r2scan3c":
+            return re.compile(r"r\s*[²2]?\s*scan\s*[- ]?\s*3c|baseline\.r2scan3c\.v1", re.I)
+        return re.compile(re.escape(str(value)), re.I)
+    if field_name == "environment":
+        normalized = str(value).casefold().strip()
+        if normalized in {"gas", "gas-phase", "gas phase", "气相"}:
+            return re.compile(r"gas\s*[- ]?phase|gas\b|气相", re.I)
+        return re.compile(re.escape(str(value)), re.I)
+    return None
+
+
+def _method_evidence_key(value: str) -> str:
+    folded = value.casefold().replace("²", "2")
+    compact = re.sub(r"[^a-z0-9]+", "", folded)
+    return "r2scan3c" if "r2scan3c" in compact else compact
 
 
 __all__ = [

@@ -27,6 +27,7 @@ from orca_agent.application.p5_errors import (
     Interrupted,
     LaunchStateUnknown,
     ResourceLimitExceeded,
+    ResourceUnavailable,
     SourceIntegrityError,
     TimedOut,
 )
@@ -96,12 +97,17 @@ from orca_agent.identity.geometry import (
 )
 from orca_agent.infrastructure.artifacts import ArtifactStore
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc
+from orca_agent.infrastructure.execution_resources import (
+    RESOURCE_LOCAL_ORCA,
+    ExecutionResourceRepository,
+)
 from orca_agent.infrastructure.p3_records import ArtifactRecordRepository
 from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRepository
 from orca_agent.infrastructure.repositories import RunSnapshot
 from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.infrastructure.worker import HandlerResult, OutboxWorker
+from orca_agent.orchestration.codes import HandlerErrorCode
 from orca_agent.orchestration.dispatch_policy import P5_EFFECT_REGISTRY
 from orca_agent.orchestration.effects import EffectClass, EffectSpec
 from orca_agent.orchestration.p5_commands import P5CommandType, P5EventType
@@ -139,6 +145,14 @@ class P5DeliveryReport:
     physical_start_count: int = 0
 
 
+@dataclass(frozen=True)
+class _ExecutionRuntimeSelection:
+    backend_kind: str
+    executable: Path | None
+    orca_version: str | None
+    backend: object
+
+
 class P5ApplicationService:
     """P5 orchestration without a second business queue or scientific claim layer."""
 
@@ -152,6 +166,7 @@ class P5ApplicationService:
         orca_executable: str | Path | None = None,
         orca_version: str | None = None,
         allow_real_orca: bool = False,
+        required_orca_version: str | None = None,
     ) -> None:
         if backend_kind not in {"fake", "local_orca"}:
             raise ValueError("P5 backend_kind must be fake or local_orca")
@@ -164,6 +179,7 @@ class P5ApplicationService:
         self.orca_executable = None if orca_executable is None else Path(orca_executable).resolve()
         self.orca_version = orca_version
         self.allow_real_orca = allow_real_orca
+        self.required_orca_version = required_orca_version
         self.backend = backend or (
             LocalOrcaBackend(self.state_root)
             if backend_kind == "local_orca"
@@ -504,7 +520,6 @@ class P5ApplicationService:
             }
         )
         try:
-            self._restore_execution_runtime(run_id)
             with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
                 uow.begin()
                 replayed = self._replayed_command(uow, actual_command_id, command_hash)
@@ -591,7 +606,7 @@ class P5ApplicationService:
             }
         )
         try:
-            self._restore_execution_runtime(run_id)
+            runtime = self._restore_execution_runtime(run_id)
             if command_id is not None:
                 with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
                     self._require_p5_kernel(uow)
@@ -622,7 +637,7 @@ class P5ApplicationService:
                     outcome_code="nothing_to_reconcile",
                     details={"phase": view.state.phase.value},
                 )
-            observation = self.backend.poll(str(view.state.current_execution_id))
+            observation = runtime.backend.poll(str(view.state.current_execution_id))
             if observation.status is P5JobStatus.NEEDS_RECONCILIATION:
                 return self._mark_needs_reconciliation(
                     run_id=run_id,
@@ -823,8 +838,8 @@ class P5ApplicationService:
 
         return P4ApplicationService(self.state_root).inspect(source_run_id)
 
-    def _restore_execution_runtime(self, run_id: RunId) -> None:
-        """Recover local routing from the verified event, never CLI defaults or output data."""
+    def _restore_execution_runtime(self, run_id: RunId) -> _ExecutionRuntimeSelection:
+        """Return trusted per-run routing without mutating shared service defaults."""
         with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
             snapshot = self._verified_snapshot(uow, run_id)
             events = uow.events.list_for_run(snapshot.run_id)
@@ -832,7 +847,9 @@ class P5ApplicationService:
         if runtime is None:
             view = self.inspect(run_id)
             if view.job is None or view.binding.backend_kind != "local_orca":
-                return
+                return _ExecutionRuntimeSelection(
+                    self.backend_kind, self.orca_executable, self.orca_version, self.backend
+                )
             spec = json.loads(
                 (self.state_root / "work" / str(view.job.execution_id) / "launch.json").read_text()
             )
@@ -851,16 +868,22 @@ class P5ApplicationService:
             }
         kind = runtime["backend_kind"]
         if kind == "local_orca":
-            self.backend_kind = kind
-            self.orca_executable = Path(runtime["executable"])
-            self.orca_version = runtime["orca_version"]
-            if not isinstance(self.backend, LocalOrcaBackend):
-                self.backend = LocalOrcaBackend(self.state_root)
-        elif self.backend_kind != "fake":
-            self.backend_kind = "fake"
-            self.orca_executable = None
-            self.orca_version = None
-            self.backend = FakeExecutionBackend(self.state_root)
+            executable = Path(str(runtime["executable"])).resolve()
+            backend = (
+                self.backend
+                if self.backend_kind == "local_orca"
+                and getattr(self.backend, "backend_kind", None) == "local_orca"
+                else LocalOrcaBackend(self.state_root)
+            )
+            return _ExecutionRuntimeSelection(
+                kind,
+                executable,
+                str(runtime["orca_version"]),
+                backend,
+            )
+        if self.backend_kind == "fake":
+            return _ExecutionRuntimeSelection("fake", None, None, self.backend)
+        return _ExecutionRuntimeSelection("fake", None, None, FakeExecutionBackend(self.state_root))
 
     def _load_external_opt_source(
         self,
@@ -1086,9 +1109,12 @@ class P5ApplicationService:
                 raise ExecutableVersionMismatch(
                     "local ORCA preparation requires a regular executable .exe"
                 )
-            if self.orca_version is None or not self.orca_version.startswith("6.1"):
+            if (
+                self.required_orca_version is not None
+                and self.orca_version != self.required_orca_version
+            ):
                 raise ExecutableVersionMismatch(
-                    "local ORCA preparation requires an explicit ORCA 6.1 version"
+                    "local ORCA preparation requires the exact configured ORCA version"
                 )
         artifact_store = ArtifactStore(self.state_root, clock=self.clock)
         action_geometry_bytes = geometry.xyz_bytes() if geometry_bytes is None else geometry_bytes
@@ -1127,7 +1153,7 @@ class P5ApplicationService:
             executable=self.orca_executable,
             orca_version=self.orca_version,
             profile_hash=compiled.feature_profile_hash,
-            probe=self.backend_kind == "local_orca",
+            probe=False,
             nprocs=node.budget.nprocs,
             implicit_threads=protocol.implicit_threads,
             parallel=protocol.parallel,
@@ -1467,6 +1493,7 @@ class P5ApplicationService:
         command_hash: str | None = None,
     ) -> ApplicationResult:
         try:
+            runtime = self._restore_execution_runtime(run_id)
             source_view = self._read_p4_source(self.inspect(run_id).state.source_run_id)
             with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
                 uow.begin()
@@ -1520,7 +1547,7 @@ class P5ApplicationService:
                 )
                 if geometry is None:
                     raise GeometryBindingMismatch("P5 input geometry record is missing")
-                output = self.backend.collect(observation.execution_id)
+                output = runtime.backend.collect(observation.execution_id)
                 output_bytes = output.stdout_path.read_bytes()
                 stderr_bytes = output.stderr_path.read_bytes()
                 hessian_bytes = (
@@ -1809,6 +1836,13 @@ class P5ApplicationService:
                         terminal_receipt_hash=failure_record.result_hash,
                         terminal_at_utc=now,
                     )
+                    if binding.backend_kind == "local_orca":
+                        ExecutionResourceRepository(uow.connection).release(
+                            execution_id=observation.execution_id,
+                            generation=job.launch_generation,
+                            now_utc=format_utc(now),
+                            evidence_ref=f"p5:{run_id}:collect_failed",
+                        )
                     uow.connection.execute(
                         "UPDATE actions SET ledger_state = ?, execution_id = ?, "
                         "updated_at_utc = ? WHERE action_id = ?",
@@ -1972,6 +2006,13 @@ class P5ApplicationService:
                     terminal_receipt_hash=result_record.result_hash,
                     terminal_at_utc=now,
                 )
+                if binding.backend_kind == "local_orca":
+                    ExecutionResourceRepository(uow.connection).release(
+                        execution_id=observation.execution_id,
+                        generation=job.launch_generation,
+                        now_utc=format_utc(now),
+                        evidence_ref=f"p5:{run_id}:collect_terminal",
+                    )
                 uow.connection.execute(
                     "UPDATE actions SET ledger_state = ?, execution_id = ?, "
                     "updated_at_utc = ? WHERE action_id = ?",
@@ -2088,6 +2129,14 @@ class P5ApplicationService:
                 terminal_receipt_hash=None,
                 terminal_at_utc=now,
             )
+            job = LocalJobRepository(uow.connection).get_by_execution(execution_id)
+            if job is not None and job.backend_kind == "local_orca":
+                ExecutionResourceRepository(uow.connection).release(
+                    execution_id=str(execution_id),
+                    generation=job.launch_generation,
+                    now_utc=format_utc(now),
+                    evidence_ref=f"p5:{run_id}:cancelled",
+                )
             if state.current_action_id is not None:
                 uow.connection.execute(
                     "UPDATE actions SET ledger_state = 'cancelled', execution_id = ?, "
@@ -2102,6 +2151,8 @@ class P5Worker:
     def __init__(self, service: P5ApplicationService, allow_real_orca: bool) -> None:
         self.service = service
         self.allow_real_orca = allow_real_orca
+        self._resource_connection = None
+        self._resource_readiness = _LaunchResourceReadiness(self)
 
     def run_once(
         self, *, run_id: RunId | None = None, limit: int = 1
@@ -2112,7 +2163,7 @@ class P5Worker:
         candidates = [run_id] if run_id is not None else self._pending_runs()
         for candidate in candidates[:limit]:
             try:
-                self.service._restore_execution_runtime(candidate)
+                runtime = self.service._restore_execution_runtime(candidate)
                 view = self.service.inspect(candidate)
                 state = view.state
                 if state.phase is P5Phase.AWAITING_EXECUTION_APPROVAL:
@@ -2133,8 +2184,10 @@ class P5Worker:
                         )
                         continue
 
-                    def handle(permit, candidate=candidate):
-                        report = self._dispatch(candidate, self.service.inspect(candidate), permit)
+                    def handle(permit, candidate=candidate, runtime=runtime):
+                        report = self._dispatch(
+                            candidate, self.service.inspect(candidate), permit, runtime=runtime
+                        )
                         reports.append(report)
                         return HandlerResult(
                             success=report.outcome
@@ -2145,7 +2198,12 @@ class P5Worker:
                                 "needs_reconciliation",
                                 "launch_state_unknown",
                                 "launch_acknowledged",
-                            }
+                            },
+                            error_code=(
+                                HandlerErrorCode.RESOURCE_BUSY
+                                if report.outcome == "resource_busy"
+                                else None
+                            ),
                         )
 
                     OutboxWorker(
@@ -2154,15 +2212,14 @@ class P5Worker:
                         clock=self.service.clock,
                         registry=P5_EFFECT_REGISTRY,
                         completion_service_factory=lambda: P5EffectCompletion(self.service),
-                        readiness_check=lambda effect, _snapshot, _now, candidate=candidate: (
-                            effect.run_id == candidate
-                        ),
+                        readiness_check=self._resource_readiness,
                     ).run_once(limit=1)
                     collected = self.service.inspect(candidate)
                     if collected.state.phase is P5Phase.COLLECTING:
                         from .p5_control import deliver_control
 
                         deliver_control(self.service, candidate)
+                    self._release_resource_if_terminal(candidate)
                     continue
                 if (
                     state.phase
@@ -2180,6 +2237,7 @@ class P5Worker:
                     if result is None:
                         continue
                     refreshed = self.service.inspect(candidate)
+                    self._release_resource_if_terminal(candidate)
                     reports.append(
                         P5DeliveryReport(
                             refreshed.state.current_execution_id,
@@ -2194,7 +2252,73 @@ class P5Worker:
                 )
         return tuple(reports)
 
-    def _dispatch(self, run_id: RunId, view: P5RunView, permit) -> P5DeliveryReport:
+    def _resource_ready(self, effect, snapshot, _now) -> bool:
+        if effect.effect_type != "external.p5.launch_orca":
+            return True
+        if self._resource_connection is None:
+            return True
+        state = snapshot.state
+        records = P5RecordRepository(self._resource_connection)
+        binding = None
+        for _record_id, record_type, record in records.list_p5_for_run(snapshot.run_id):
+            if (
+                record_type == "p5.execution_binding"
+                and getattr(record, "backend_kind", None) == "local_orca"
+            ):
+                binding = record
+        if binding is None:
+            return True
+        slot = ExecutionResourceRepository(self._resource_connection).get(RESOURCE_LOCAL_ORCA)
+        if slot is None or slot.status == "free":
+            return True
+        return slot.status == "held" and slot.owner_execution_id == getattr(
+            state, "current_execution_id", None
+        )
+
+    def _release_resource_if_terminal(self, run_id: RunId) -> None:
+        try:
+            view = self.service.inspect(run_id)
+        except Exception:
+            return
+        if view.state.phase not in {P5Phase.COMPLETED, P5Phase.FAILED, P5Phase.CANCELLED}:
+            return
+        if view.binding is None or view.binding.backend_kind != "local_orca" or view.job is None:
+            return
+        with SQLiteUnitOfWork(self.service.database_path, clock=self.service.clock) as uow:
+            uow.begin()
+            ExecutionResourceRepository(uow.connection).release(
+                execution_id=str(view.job.execution_id),
+                generation=view.job.launch_generation,
+                now_utc=format_utc(self.service.clock.now_utc()),
+                evidence_ref=f"p5:{run_id}:{view.state.phase.value}",
+            )
+            uow.commit()
+
+    def _mark_resource_unknown(self, run_id: RunId, reason: str) -> None:
+        try:
+            view = self.service.inspect(run_id)
+        except Exception:
+            return
+        if view.binding is None or view.binding.backend_kind != "local_orca" or view.job is None:
+            return
+        with SQLiteUnitOfWork(self.service.database_path, clock=self.service.clock) as uow:
+            uow.begin()
+            ExecutionResourceRepository(uow.connection).mark_unknown(
+                execution_id=str(view.job.execution_id),
+                generation=view.job.launch_generation,
+                evidence_ref=f"p5:{run_id}:{reason[:120]}",
+            )
+            uow.commit()
+
+    def _dispatch(
+        self,
+        run_id: RunId,
+        view: P5RunView,
+        permit,
+        *,
+        runtime: _ExecutionRuntimeSelection | None = None,
+    ) -> P5DeliveryReport:
+        runtime = runtime or self.service._restore_execution_runtime(run_id)
         if view.action is None or view.binding is None or view.state.current_action_id is None:
             return P5DeliveryReport(None, "action_missing", "failed")
         if view.binding.backend_kind == "local_orca" and not self.allow_real_orca:
@@ -2277,17 +2401,17 @@ class P5Worker:
                     raise StateIntegrityError(
                         "P5 node budget does not match its registered protocol"
                     )
-                runtime = runtime_config(
+                runtime_payload = runtime_config(
                     state_root=self.service.state_root,
-                    executable=self.service.orca_executable,
-                    orca_version=self.service.orca_version,
+                    executable=runtime.executable,
+                    orca_version=runtime.orca_version,
                     profile_hash=binding.feature_profile_hash,
                     probe=False,
                     nprocs=node.budget.nprocs,
                     implicit_threads=protocol.implicit_threads,
                     parallel=protocol.parallel,
                 )
-                if runtime["runtime_config_hash"] != binding.runtime_config_hash:
+                if runtime_payload["runtime_config_hash"] != binding.runtime_config_hash:
                     raise StateIntegrityError(
                         "P5 runtime configuration does not match its trusted binding"
                     )
@@ -2339,6 +2463,34 @@ class P5Worker:
                     state = self.service._p5_state(snapshot)
                 else:
                     execution_id = job.execution_id
+                if binding.backend_kind == "local_orca":
+                    resources = ExecutionResourceRepository(uow.connection)
+                    slot = resources.get(RESOURCE_LOCAL_ORCA)
+                    if slot is None:
+                        raise StateIntegrityError("local ORCA resource slot is missing")
+                    if slot.status == "unknown" and slot.owner_execution_id == str(execution_id):
+                        raise LaunchStateUnknown(
+                            "the local ORCA resource is held by an unknown launch state"
+                        )
+                    if slot.status == "held":
+                        if slot.owner_execution_id != str(execution_id) or (
+                            slot.owner_generation != permit.generation
+                        ):
+                            raise ResourceUnavailable(
+                                "the project local ORCA resource is held by another execution"
+                            )
+                    elif slot.status == "free":
+                        if not resources.try_acquire(
+                            execution_id=str(execution_id),
+                            generation=permit.generation,
+                            host_identity=job.host_identity,
+                            now_utc=format_utc(self.service.clock.now_utc()),
+                        ):
+                            raise ResourceUnavailable(
+                                "the project local ORCA resource became busy before launch"
+                            )
+                    else:
+                        raise StateIntegrityError("local ORCA resource slot has an invalid state")
                 uow.commit()
             request = LaunchRequest(
                 state_root=self.service.state_root,
@@ -2347,13 +2499,13 @@ class P5Worker:
                 node=node,
                 input_bytes=input_bytes,
                 geometry_bytes=geometry_bytes,
-                executable=self.service.orca_executable,
+                executable=runtime.executable,
                 allow_real=self.allow_real_orca,
                 requested_at_utc=self.service.clock.now_utc(),
                 permit=permit,
-                runtime_config=runtime,
+                runtime_config=runtime_payload,
             )
-            observation = self.service.backend.start_or_reconcile(request)
+            observation = runtime.backend.start_or_reconcile(request)
             if observation.status is P5JobStatus.NEEDS_RECONCILIATION:
                 current = self.service.inspect(run_id)
                 result = self.service._mark_needs_reconciliation(
@@ -2365,6 +2517,10 @@ class P5Worker:
                     ),
                     expected_revision=current.revision,
                     reason=observation.message or "backend returned an unknown launch state",
+                )
+                self._mark_resource_unknown(
+                    run_id,
+                    observation.message or "backend returned an unknown launch state",
                 )
                 refreshed = self.service.inspect(run_id)
                 return P5DeliveryReport(
@@ -2440,6 +2596,8 @@ class P5Worker:
                 refreshed.state.phase.value,
                 observation.physical_start_count,
             )
+        except ResourceUnavailable as error:
+            return P5DeliveryReport(None, error.code, view.state.phase.value)
         except Exception as error:
             if isinstance(error, LaunchStateUnknown):
                 try:
@@ -2457,6 +2615,7 @@ class P5Worker:
                         reason=str(error),
                     )
                     refreshed = self.service.inspect(run_id)
+                    self._mark_resource_unknown(run_id, str(error))
                     return P5DeliveryReport(
                         current.state.current_execution_id,
                         result.code,
@@ -2464,6 +2623,8 @@ class P5Worker:
                     )
                 except Exception as reconciliation_error:
                     error = reconciliation_error
+            if view.binding is not None and view.binding.backend_kind == "local_orca":
+                self._mark_resource_unknown(run_id, str(error))
             return P5DeliveryReport(None, getattr(error, "code", "p5_dispatch_error"), "failed")
 
     def _pending_runs(self) -> list[RunId]:
@@ -2482,6 +2643,19 @@ class P5Worker:
             values = [RunId(str(row[0])) for row in rows]
             uow.commit()
             return values
+
+
+class _LaunchResourceReadiness:
+    """Outbox claim hook that shares the claim transaction's SQLite handle."""
+
+    def __init__(self, worker: P5Worker) -> None:
+        self.worker = worker
+
+    def bind_connection(self, connection) -> None:
+        self.worker._resource_connection = connection
+
+    def __call__(self, effect, snapshot, now) -> bool:
+        return self.worker._resource_ready(effect, snapshot, now)
 
 
 __all__ = ["P5ApplicationService", "P5DeliveryReport", "P5RunView", "P5Worker"]

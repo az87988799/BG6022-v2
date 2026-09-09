@@ -27,9 +27,12 @@ and query a completed delivery without recalculation.
    `%maxcore 384`, one implicit thread. SP-only, solvent, Gibbs/ZPE, TS/IRC,
    arbitrary methods, and unsupported electronic states are rejected without
    silent substitution.
-4. Use the deterministic baseline planner by default. The fake planner is for
-   offline tests. The DeepSeek adapter is opt-in, uses Chat Completions JSON
-   output, and is bounded by durable per-turn/session budgets; it has no tools,
+4. Keep the library-compatible baseline/fake adapters available for offline
+   tests, while the single user-facing terminal launcher defaults to the
+   explicit `real` profile. That profile uses the DeepSeek adapter and the v2
+   JSON contract; `deepseek_fake` is the explicit DeepSeek + fake execution
+   profile, and `offline` is the no-network baseline profile. DeepSeek calls
+   use bounded durable per-turn/session budgets; the adapter has no tools,
    database access, ORCA access, or implicit retry.
 5. Accept plan, confirm identity, and approve each P5 node as separate,
    object-bound server-side tokens. Natural-language acknowledgements can
@@ -40,13 +43,20 @@ and query a completed delivery without recalculation.
    an output request can change presentation without mutating the physical
    delivery or re-running a calculation.
 7. P7 CLI commands are explicit `agent-*` commands so legacy run-oriented
-   commands remain compatible. `--allow-real-orca` only enables a backend; it
-   never substitutes for a P5 grant.
+   commands remain compatible. The fixed terminal launcher selects one
+   immutable profile for the session, freezes that profile into the approval
+   card, and rejects incompatible planner/backend/fallback combinations.
+   Real readiness is a prerequisite for issuing an executable approval token;
+   profile selection never substitutes for a P5 grant.
 
 ## Consequences
 
 The P7 state graph is recoverable across processes and crash windows, but the
-initial implementation adds more durable records and requires migration 8.
+initial implementation adds more durable records and requires migrations 8
+and 9. Migration 9 adds one project-scoped `local_orca` resource slot so
+multiple tasks/processes cannot claim more than one physical ORCA job; an
+unknown launch state is retained for explicit reconciliation rather than
+being auto-released.
 Offline fake-chain tests are strong evidence for orchestration and binding,
 not evidence of a new real ORCA calculation, a live DeepSeek benefit, or Owner
 acceptance. Those gates remain separately reported in `docs/P7_ACCEPTANCE.md`.

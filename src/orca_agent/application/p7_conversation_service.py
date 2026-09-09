@@ -9,6 +9,7 @@ from pathlib import Path
 
 from orca_agent.application.errors import InvalidTransitionError, RevisionConflictError
 from orca_agent.application.p7_query_service import P7QueryService
+from orca_agent.application.p7_runtime_config import P7RuntimeConfig
 from orca_agent.application.p7_task_service import P7TaskService
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import AttemptId, ConversationId, TurnId, new_id
@@ -46,7 +47,13 @@ from orca_agent.llm.ports import (
     PlannerPort,
     validate_interpretation,
 )
-from orca_agent.orchestration.p7_versions import P7_POLICY_VERSION, PROMPT_VERSION, TURN_SCHEMA
+from orca_agent.orchestration.p7_versions import (
+    P7_POLICY_VERSION,
+    PROMPT_VERSION,
+    PROMPT_VERSION_V2,
+    TURN_SCHEMA,
+    TURN_SCHEMA_V2,
+)
 from orca_agent.planning.p7_validator import P7PlanValidator
 
 _MODEL_LEASE_SECONDS = 90
@@ -81,6 +88,7 @@ class P7ConversationService:
         fallback: str = "none",
         allow_llm: bool = False,
         planner_name: str = "baseline",
+        runtime_config: P7RuntimeConfig | None = None,
     ) -> None:
         self.state_root = Path(state_root).resolve()
         self.clock = clock or SystemClock()
@@ -92,17 +100,33 @@ class P7ConversationService:
         self.fallback = fallback
         self.allow_llm = allow_llm
         self.planner_name = planner_name
+        self.runtime_config = (
+            runtime_config
+            or getattr(self.task_service, "runtime_config", None)
+            or P7RuntimeConfig.legacy(
+                self.state_root,
+                planner_name=planner_name,
+                allow_llm=allow_llm,
+                allow_network=False,
+                backend_kind="fake",
+                allow_real_orca=False,
+            )
+        )
+        if self.runtime_config.profile in {"real", "deepseek_fake"} and fallback != "none":
+            raise ValueError("real DeepSeek profiles require fallback=none")
+        self.allow_llm = self.runtime_config.allow_llm
+        self.planner_name = self.runtime_config.planner_name
         self.validator = P7PlanValidator(self.task_service.catalog)
 
     # Conversation lifecycle ----------------------------------------
     def new_conversation(
-        self, *, conversation_id: ConversationId | None = None, budget: int = 120
+        self, *, conversation_id: ConversationId | None = None, budget: int | None = None
     ) -> dict[str, object]:
         now = self.clock.now_utc()
         state = ConversationState.create(
             conversation_id=conversation_id,
             now=now,
-            model_call_budget=budget,
+            model_call_budget=(self.runtime_config.model_call_budget if budget is None else budget),
         )
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
@@ -146,6 +170,46 @@ class P7ConversationService:
                 raise RevisionConflictError("conversation changed while closing")
             uow.commit()
             return updated.model_dump(mode="json")
+
+    def select_task(
+        self, conversation_id: ConversationId | str, selector: str
+    ) -> dict[str, object]:
+        """Set the active task in one conversation transaction."""
+
+        conversation = str(conversation_id)
+        value = selector.strip()
+        if not value:
+            raise ValueError("task ID or alias is required")
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            state = records.get_conversation(conversation)
+            if state is None:
+                raise ValueError("conversation was not found")
+            task = records.get_task(conversation, value) or records.get_task_by_alias(
+                conversation, value
+            )
+            if task is None:
+                raise ValueError("task ID or alias was not found in this conversation")
+            if state.active_task_id == task.task_id:
+                uow.commit()
+                return {
+                    "conversation": state.model_dump(mode="json"),
+                    "task": task.model_dump(mode="json"),
+                }
+            updated = _state_with(
+                state,
+                active_task_id=task.task_id,
+                revision=state.revision + 1,
+                updated_at_utc=self.clock.now_utc(),
+            )
+            if not records.update_conversation(updated, expected_revision=state.revision):
+                raise RevisionConflictError("conversation changed while selecting a task")
+            uow.commit()
+            return {
+                "conversation": updated.model_dump(mode="json"),
+                "task": task.model_dump(mode="json"),
+            }
 
     # Turn processing -------------------------------------------------
     def message(self, conversation_id: ConversationId | str, text: str) -> dict[str, object]:
@@ -199,9 +263,7 @@ class P7ConversationService:
                 error_message=str(error),
             )
 
-    def _set_turn_status(
-        self, conversation: str, turn_id: str, status: TurnStatus
-    ) -> bool:
+    def _set_turn_status(self, conversation: str, turn_id: str, status: TurnStatus) -> bool:
         now = self.clock.now_utc()
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
@@ -318,11 +380,30 @@ class P7ConversationService:
             for item in turns
             if item.status is TurnStatus.COMPLETED
         )
+        pending_actions = records.list_pending(str(state.conversation_id))
+        deepseek_input = getattr(self.planner, "adapter_id", "") == "deepseek_chat"
         facts = {
             "policy_version": P7_POLICY_VERSION,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": PROMPT_VERSION_V2 if deepseek_input else PROMPT_VERSION,
+            "model_input_schema_version": TURN_SCHEMA_V2 if deepseek_input else TURN_SCHEMA,
+            "runtime_profile": self.runtime_config.profile,
+            "model": self.runtime_config.model,
+            "model_call_budget": self.runtime_config.model_call_budget,
+            "capabilities": [
+                item.model_dump(mode="json") for item in self.task_service.catalog.list()
+            ],
             "capability_ids": [item.capability_id for item in self.task_service.catalog.list()],
             "active_task_id": state.active_task_id,
+            "pending_actions": [
+                {
+                    "task_id": item.task_id,
+                    "action_type": item.action_type,
+                    "target_id": item.target_id,
+                    "expected_revision": item.expected_revision,
+                    "status": item.status,
+                }
+                for item in pending_actions
+            ],
         }
         while True:
             plain = {
@@ -387,114 +468,51 @@ class P7ConversationService:
         if getattr(planner, "adapter_id", "") == "baseline":
             return planner.interpret(context), ResponseSource.BASELINE, None
 
-        state = self.get_state(str(context.conversation_id))
-        if state.model_calls >= state.model_call_budget:
-            if self.fallback == "baseline":
-                return (
-                    BaselinePlanner().interpret(context),
-                    ResponseSource.BASELINE,
-                    "model_budget_exhausted",
-                )
-            return None, ResponseSource.PROGRAM, "model_budget_exhausted"
         request_payload = {
             "adapter_id": getattr(planner, "adapter_id", "unknown"),
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": (
+                PROMPT_VERSION_V2
+                if getattr(planner, "adapter_id", "") == "deepseek_chat"
+                else PROMPT_VERSION
+            ),
+            "schema_version": (
+                TURN_SCHEMA_V2
+                if getattr(planner, "adapter_id", "") == "deepseek_chat"
+                else TURN_SCHEMA
+            ),
             "turn_id": turn_id,
         }
-        attempt_id = str(new_id(AttemptId))
-        now = self.clock.now_utc()
-        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
-            uow.begin()
-            records = P7RecordRepository(uow.connection)
-            prior = records.get_model_attempt(turn_id, "interpret")
-            if prior is not None:
-                receipt = records.get_model_receipt(str(prior["attempt_id"]))
-                if receipt is not None:
-                    uow.commit()
-                    response = self._response_from_receipt(receipt)
-                    return self._validate_model_response(response, context, turn_id)
-                if prior["status"] in {"started", "reserved"}:
-                    records.update_model_attempt(str(prior["attempt_id"]), status="unknown")
-                    uow.commit()
-                    return None, ResponseSource.DEEPSEEK, "outcome_unknown"
-            records.insert_model_attempt(
-                {
-                    "attempt_id": attempt_id,
-                    "turn_id": turn_id,
-                    "slot": "interpret",
-                    "generation": 1,
-                    "status": "started",
-                    "request": request_payload,
-                    "request_hash": sha256_hex(request_payload),
-                    "context_hash": context.snapshot_hash,
-                    "lease_expires_at_utc": format_utc(
-                        now + timedelta(seconds=_MODEL_LEASE_SECONDS)
-                    ),
-                    "started_at_utc": format_utc(now),
-                    "created_at_utc": format_utc(now),
-                }
+        decision, attempt_id, receipt = self._prepare_model_attempt(
+            context, turn_id=turn_id, slot="interpret", request_payload=request_payload
+        )
+        source = self._source_for_provider(getattr(planner, "adapter_id", ""))
+        if decision == "replay" and receipt is not None:
+            if not self._turn_is_active(str(context.conversation_id), turn_id):
+                return None, ResponseSource.PROGRAM, "turn_cancelled"
+            return self._validate_model_response(
+                self._response_from_receipt(receipt), context, turn_id
             )
-            uow.commit()
+        if decision != "call" or attempt_id is None:
+            return None, source, decision
+        if not self._turn_is_active(str(context.conversation_id), turn_id):
+            self._cancel_model_attempt(attempt_id)
+            return None, ResponseSource.PROGRAM, "turn_cancelled"
 
-        response = planner.interpret(context)
-        if isinstance(response, TurnInterpretation):
+        try:
+            response = planner.interpret(context)
+        except Exception as error:
             response = ModelCallResponse(
                 provider=getattr(planner, "adapter_id", "planner"),
                 model=getattr(planner, "model", None),
-                content=json.dumps(response.model_dump(mode="json"), ensure_ascii=False),
-                raw_bytes=json.dumps(response.model_dump(mode="json"), ensure_ascii=False).encode(
-                    "utf-8"
-                ),
+                error_code="planner_error",
+                error_message=str(error)[:512],
             )
-        if not isinstance(response, ModelCallResponse):
-            response = ModelCallResponse(
-                provider=getattr(planner, "adapter_id", "planner"),
-                model=getattr(planner, "model", None),
-                error_code="invalid_planner_response",
-                error_message="planner returned an unsupported response object",
-            )
-        raw = response.raw_bytes or (response.content.encode("utf-8") if response.content else None)
-        receipt_id = f"modelreceipt_{uuid.uuid4().hex}"
-        receipt_values = {
-            "receipt_id": receipt_id,
-            "attempt_id": attempt_id,
-            "provider": response.provider,
-            "model": response.model,
-            "outcome": "success" if response.error_code is None and response.content else "error",
-            "response_bytes": raw,
-            "response_hash": None
-            if raw is None
-            else sha256_hex(raw.decode("utf-8", errors="replace")),
-            "provider_request_id": response.provider_request_id,
-            "usage": thaw_json(response.usage),
-            "error_code": response.error_code,
-            "error_message": response.error_message,
-            "received_at_utc": format_utc(self.clock.now_utc()),
-        }
-        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
-            uow.begin()
-            records = P7RecordRepository(uow.connection)
-            records.insert_model_receipt(receipt_values)
-            current_turn = records.get_turn(str(context.conversation_id), turn_id)
-            attempt_status = (
-                "cancelled"
-                if current_turn is None or current_turn.status is TurnStatus.CANCELLED
-                else "receipted"
-            )
-            records.update_model_attempt(
-                attempt_id, status=attempt_status, receipt_id=receipt_id
-            )
-            current = records.get_conversation(str(context.conversation_id))
-            if current is not None:
-                updated = _state_with(
-                    current,
-                    model_calls=current.model_calls + 1,
-                    updated_at_utc=self.clock.now_utc(),
-                )
-                records.update_conversation(updated, expected_revision=current.revision)
-            uow.commit()
+        response = self._coerce_model_response(response, planner)
+        self._record_model_response(attempt_id, str(context.conversation_id), turn_id, response)
+        if not self._turn_is_active(str(context.conversation_id), turn_id):
+            return None, ResponseSource.PROGRAM, "turn_cancelled"
         validated = self._validate_model_response(response, context, turn_id)
         if validated[0] is not None or validated[2] != "invalid_model_output":
             return validated
@@ -532,6 +550,17 @@ class P7ConversationService:
                 ResponseSource.DEEPSEEK if response.provider == "deepseek" else ResponseSource.FAKE,
                 "invalid_model_output",
             )
+        if response.provider == "deepseek" and (
+            interpretation.schema_version != TURN_SCHEMA_V2
+            or interpretation.prompt_version != PROMPT_VERSION_V2
+        ):
+            if self.fallback == "baseline":
+                return (
+                    BaselinePlanner().interpret(context),
+                    ResponseSource.BASELINE,
+                    "invalid_model_output",
+                )
+            return None, ResponseSource.DEEPSEEK, "invalid_model_output"
         source = ResponseSource.DEEPSEEK if response.provider == "deepseek" else ResponseSource.FAKE
         return interpretation.model_copy(update={"source": source}), source, None
 
@@ -555,45 +584,33 @@ class P7ConversationService:
             "adapter_id": getattr(planner, "adapter_id", "unknown"),
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": (
+                PROMPT_VERSION_V2
+                if getattr(planner, "adapter_id", "") == "deepseek_chat"
+                else PROMPT_VERSION
+            ),
+            "schema_version": (
+                TURN_SCHEMA_V2
+                if getattr(planner, "adapter_id", "") == "deepseek_chat"
+                else TURN_SCHEMA
+            ),
             "turn_id": turn_id,
             "original_response_hash": sha256_hex(raw_content),
         }
-        attempt_id = str(new_id(AttemptId))
-        now = self.clock.now_utc()
-        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
-            uow.begin()
-            records = P7RecordRepository(uow.connection)
-            prior = records.get_model_attempt(turn_id, "format_repair")
-            if prior is not None:
-                receipt = records.get_model_receipt(str(prior["attempt_id"]))
-                if receipt is not None:
-                    uow.commit()
-                    return self._validate_model_response(
-                        self._response_from_receipt(receipt), context, turn_id
-                    )
-                if prior["status"] in {"started", "reserved"}:
-                    records.update_model_attempt(str(prior["attempt_id"]), status="unknown")
-                    uow.commit()
-                    return None, source, "outcome_unknown"
-            records.insert_model_attempt(
-                {
-                    "attempt_id": attempt_id,
-                    "turn_id": turn_id,
-                    "slot": "format_repair",
-                    "generation": 1,
-                    "status": "started",
-                    "request": request_payload,
-                    "request_hash": sha256_hex(request_payload),
-                    "context_hash": context.snapshot_hash,
-                    "lease_expires_at_utc": format_utc(
-                        now + timedelta(seconds=_MODEL_LEASE_SECONDS)
-                    ),
-                    "started_at_utc": format_utc(now),
-                    "created_at_utc": format_utc(now),
-                }
+        decision, attempt_id, receipt = self._prepare_model_attempt(
+            context, turn_id=turn_id, slot="format_repair", request_payload=request_payload
+        )
+        if decision == "replay" and receipt is not None:
+            if not self._turn_is_active(str(context.conversation_id), turn_id):
+                return None, ResponseSource.PROGRAM, "turn_cancelled"
+            return self._validate_model_response(
+                self._response_from_receipt(receipt), context, turn_id
             )
-            uow.commit()
+        if decision != "call" or attempt_id is None:
+            return None, source, decision
+        if not self._turn_is_active(str(context.conversation_id), turn_id):
+            self._cancel_model_attempt(attempt_id)
+            return None, ResponseSource.PROGRAM, "turn_cancelled"
         try:
             response = repair(context, invalid_response)
         except Exception as error:
@@ -603,21 +620,109 @@ class P7ConversationService:
                 error_code="format_repair_error",
                 error_message=str(error)[:512],
             )
-        if isinstance(response, TurnInterpretation):
-            encoded = json.dumps(response.model_dump(mode="json"), ensure_ascii=False)
-            response = ModelCallResponse(
-                provider=getattr(planner, "adapter_id", "planner"),
-                model=getattr(planner, "model", None),
-                content=encoded,
-                raw_bytes=encoded.encode("utf-8"),
+        response = self._coerce_model_response(response, planner, repair=True)
+        self._record_model_response(attempt_id, str(context.conversation_id), turn_id, response)
+        if not self._turn_is_active(str(context.conversation_id), turn_id):
+            return None, ResponseSource.PROGRAM, "turn_cancelled"
+        return self._validate_model_response(response, context, turn_id)
+
+    def _prepare_model_attempt(
+        self,
+        context: ContextSnapshot,
+        *,
+        turn_id: str,
+        slot: str,
+        request_payload: dict[str, object],
+    ) -> tuple[str, str | None, dict[str, object] | None]:
+        """Reserve and count one model call before crossing the provider boundary."""
+
+        attempt_id = str(new_id(AttemptId))
+        now = self.clock.now_utc()
+        conversation = str(context.conversation_id)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            state = records.get_conversation(conversation)
+            turn = records.get_turn(conversation, turn_id)
+            if (
+                state is None
+                or turn is None
+                or state.current_turn_id != turn_id
+                or turn.status
+                in {
+                    TurnStatus.COMPLETED,
+                    TurnStatus.FAILED,
+                    TurnStatus.OUTCOME_UNKNOWN,
+                    TurnStatus.CANCELLED,
+                }
+            ):
+                uow.commit()
+                return "turn_cancelled", None, None
+
+            prior = records.get_model_attempt(turn_id, slot)
+            if prior is not None:
+                receipt = records.get_model_receipt(str(prior["attempt_id"]))
+                if receipt is not None:
+                    uow.commit()
+                    return "replay", None, receipt
+                if prior["status"] in {"reserved", "started"}:
+                    records.update_model_attempt(str(prior["attempt_id"]), status="unknown")
+                    uow.commit()
+                    return "outcome_unknown", None, None
+                if prior["status"] == "cancelled":
+                    uow.commit()
+                    return "turn_cancelled", None, None
+                uow.commit()
+                return "outcome_unknown", None, None
+
+            attempt_count = int(
+                records.connection.execute(
+                    "SELECT COUNT(*) FROM p7_model_attempts WHERE turn_id=?", (turn_id,)
+                ).fetchone()[0]
             )
-        if not isinstance(response, ModelCallResponse):
-            response = ModelCallResponse(
-                provider=getattr(planner, "adapter_id", "planner"),
-                model=getattr(planner, "model", None),
-                error_code="invalid_format_repair_response",
-                error_message="format_repair returned an unsupported response object",
+            if attempt_count >= _MAX_TURN_MODEL_CALLS:
+                uow.commit()
+                return "model_call_limit", None, None
+            counted_calls = max(state.model_calls, attempt_count)
+            if counted_calls >= state.model_call_budget:
+                uow.commit()
+                return "model_budget_exhausted", None, None
+            records.insert_model_attempt(
+                {
+                    "attempt_id": attempt_id,
+                    "turn_id": turn_id,
+                    "slot": slot,
+                    "generation": 1,
+                    "status": "reserved",
+                    "request": request_payload,
+                    "request_hash": sha256_hex(request_payload),
+                    "context_hash": context.snapshot_hash,
+                    "lease_expires_at_utc": format_utc(
+                        now + timedelta(seconds=_MODEL_LEASE_SECONDS)
+                    ),
+                    "started_at_utc": None,
+                    "created_at_utc": format_utc(now),
+                }
             )
+            records.update_model_attempt(
+                attempt_id,
+                status="started",
+                started_at_utc=format_utc(now),
+            )
+            updated = _state_with(
+                state,
+                model_calls=counted_calls + 1,
+                revision=state.revision + 1,
+                updated_at_utc=now,
+            )
+            if not records.update_conversation(updated, expected_revision=state.revision):
+                raise RevisionConflictError("conversation changed while reserving model call")
+            uow.commit()
+        return "call", attempt_id, None
+
+    def _record_model_response(
+        self, attempt_id: str, conversation: str, turn_id: str, response: ModelCallResponse
+    ) -> None:
         raw = response.raw_bytes or (response.content.encode("utf-8") if response.content else None)
         receipt_id = f"modelreceipt_{uuid.uuid4().hex}"
         receipt_values = {
@@ -640,25 +745,73 @@ class P7ConversationService:
             uow.begin()
             records = P7RecordRepository(uow.connection)
             records.insert_model_receipt(receipt_values)
-            current_turn = records.get_turn(str(context.conversation_id), turn_id)
-            attempt_status = (
-                "cancelled"
-                if current_turn is None or current_turn.status is TurnStatus.CANCELLED
-                else "receipted"
-            )
+            current_turn = records.get_turn(conversation, turn_id)
             records.update_model_attempt(
-                attempt_id, status=attempt_status, receipt_id=receipt_id
+                attempt_id,
+                status=(
+                    "cancelled"
+                    if current_turn is not None and current_turn.status is TurnStatus.CANCELLED
+                    else "receipted"
+                ),
+                receipt_id=receipt_id,
             )
-            current = records.get_conversation(str(context.conversation_id))
-            if current is not None:
-                updated = _state_with(
-                    current,
-                    model_calls=current.model_calls + 1,
-                    updated_at_utc=self.clock.now_utc(),
-                )
-                records.update_conversation(updated, expected_revision=current.revision)
             uow.commit()
-        return self._validate_model_response(response, context, turn_id)
+
+    def _turn_is_active(self, conversation: str, turn_id: str) -> bool:
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            state = records.get_conversation(conversation)
+            turn = records.get_turn(conversation, turn_id)
+            active = bool(
+                state is not None
+                and turn is not None
+                and state.current_turn_id == turn_id
+                and turn.status
+                not in {
+                    TurnStatus.COMPLETED,
+                    TurnStatus.FAILED,
+                    TurnStatus.OUTCOME_UNKNOWN,
+                    TurnStatus.CANCELLED,
+                }
+            )
+            uow.commit()
+            return active
+
+    def _cancel_model_attempt(self, attempt_id: str) -> None:
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            P7RecordRepository(uow.connection).update_model_attempt(attempt_id, status="cancelled")
+            uow.commit()
+
+    @staticmethod
+    def _source_for_provider(provider: str) -> ResponseSource:
+        return ResponseSource.DEEPSEEK if provider == "deepseek_chat" else ResponseSource.FAKE
+
+    @staticmethod
+    def _coerce_model_response(
+        response: object, planner: object, *, repair: bool = False
+    ) -> ModelCallResponse:
+        if isinstance(response, TurnInterpretation):
+            encoded = json.dumps(response.model_dump(mode="json"), ensure_ascii=False)
+            return ModelCallResponse(
+                provider=getattr(planner, "adapter_id", "planner"),
+                model=getattr(planner, "model", None),
+                content=encoded,
+                raw_bytes=encoded.encode("utf-8"),
+            )
+        if isinstance(response, ModelCallResponse):
+            return response
+        return ModelCallResponse(
+            provider=getattr(planner, "adapter_id", "planner"),
+            model=getattr(planner, "model", None),
+            error_code="invalid_format_repair_response" if repair else "invalid_planner_response",
+            error_message=(
+                "format_repair returned an unsupported response object"
+                if repair
+                else "planner returned an unsupported response object"
+            ),
+        )
 
     @staticmethod
     def _response_from_receipt(receipt: dict[str, object]) -> ModelCallResponse:
@@ -673,7 +826,11 @@ class P7ConversationService:
                     content_value = body["choices"][0]["message"]["content"]
                     content = content_value if isinstance(content_value, str) else None
                 except (KeyError, IndexError, TypeError, ValueError):
-                    content = None
+                    # Test transports and embedders may return the model JSON
+                    # directly rather than the provider envelope.  Preserve
+                    # that durable content for local receipt replay without
+                    # relaxing the live HTTP adapter's envelope checks.
+                    content = decoded
             else:
                 content = decoded
         return ModelCallResponse(
@@ -710,16 +867,64 @@ class P7ConversationService:
         for index, item in enumerate(interpretation.subrequests):
             if isinstance(item, CalculationIntent):
                 result = self._calculation(conversation, turn, item)
+                result.setdefault("response_source", ResponseSource.PROGRAM.value)
             elif isinstance(item, ChemistryQAIntent):
-                result = {
-                    "text": item.answer_draft or BaselinePlanner._chemistry_answer(item.question),
-                    "payload": {"kind": "chemistry_qa", "answer_source": "planner_draft"},
-                }
+                if item.requires_task_context:
+                    try:
+                        query = self.query_service.query(
+                            conversation,
+                            request={
+                                "kind": "result",
+                                "text": item.question,
+                                "task_alias": item.task_alias,
+                            },
+                        )
+                        view = query.get("view")
+                        if isinstance(view, dict) and view.get("rendered_text"):
+                            text = str(view["rendered_text"])
+                        else:
+                            text = self._task_fact_unavailable_text(query)
+                        result = {
+                            "text": text,
+                            "payload": {
+                                "kind": "chemistry_qa",
+                                "answer_source": ResponseSource.PROGRAM.value,
+                                "query": query,
+                            },
+                            "task_id": query.get("selected_task_id"),
+                            "response_source": ResponseSource.PROGRAM.value,
+                        }
+                    except ValueError as error:
+                        result = {
+                            "text": f"无法读取已验证任务数据：{error}",
+                            "payload": {
+                                "kind": "chemistry_qa",
+                                "answer_source": ResponseSource.PROGRAM.value,
+                                "code": "verified_task_query_failed",
+                            },
+                            "response_source": ResponseSource.PROGRAM.value,
+                        }
+                else:
+                    answer = item.answer_draft.strip() if item.answer_draft else ""
+                    result = {
+                        "text": answer or "模型未提供可用的化学知识回答正文。",
+                        "payload": {
+                            "kind": "chemistry_qa",
+                            "answer_source": (
+                                source.value if answer else ResponseSource.PROGRAM.value
+                            ),
+                        },
+                        "response_source": source.value if answer else ResponseSource.PROGRAM.value,
+                    }
             elif isinstance(item, GeneralQAIntent):
+                answer = item.answer_draft.strip() if item.answer_draft else ""
                 result = {
-                    "text": item.answer_draft
-                    or "我可以回答一般问题，也可以查询当前会话中的已验证任务。",
-                    "payload": {"kind": "general_qa", "answer_source": "planner_draft"},
+                    "text": answer or "模型未提供可用的一般问题回答正文。",
+                    "payload": {
+                        "kind": "general_qa",
+                        "answer_source": source.value if answer else ResponseSource.PROGRAM.value,
+                    },
+                    "response_source": source.value if answer else ResponseSource.PROGRAM.value,
                 }
             elif isinstance(item, ContextQueryIntent):
                 try:
@@ -739,14 +944,20 @@ class P7ConversationService:
                         "text": self._query_text(query),
                         "payload": query,
                         "task_id": query.get("selected_task_id"),
+                        "response_source": ResponseSource.PROGRAM.value,
                     }
                 except ValueError as error:
                     result = {
                         "text": f"无法唯一定位查询对象：{error}",
                         "payload": {"code": "query_ambiguous", "error": str(error)},
+                        "response_source": ResponseSource.PROGRAM.value,
                     }
             else:
-                result = {"text": "未识别的请求。", "payload": {"code": "unsupported_intent"}}
+                result = {
+                    "text": "未识别的请求。",
+                    "payload": {"code": "unsupported_intent"},
+                    "response_source": ResponseSource.PROGRAM.value,
+                }
             if result.get("task_id"):
                 task_id = str(result["task_id"])
                 task_ids.append(task_id)
@@ -767,6 +978,25 @@ class P7ConversationService:
             "pending_actions": pending_tokens,
             "active_task_id": last_task_id,
         }
+
+    @staticmethod
+    def _task_fact_unavailable_text(query: dict[str, object]) -> str:
+        error = query.get("error")
+        if isinstance(error, dict):
+            if error.get("code") == "task_ambiguous":
+                candidates = error.get("candidates", [])
+                labels = ", ".join(
+                    str(item.get("alias", item.get("task_id", "")))
+                    for item in candidates
+                    if isinstance(item, dict)
+                )
+                return f"无法唯一定位任务，因此不会把模型草稿当作计算结果。请指定任务：{labels}。"
+            if error.get("code") in {"task_not_found_or_ambiguous", "task_not_found"}:
+                return "没有找到可查询的会话任务；不会把模型草稿当作计算结果。"
+        status = query.get("task_status")
+        if status:
+            return f"当前任务状态为 {status}，没有可供本次回答引用的已验证结果。"
+        return "当前没有可供本次回答引用的已验证任务结果。"
 
     def _unique_pending_action(
         self, conversation: str, text: str
@@ -910,6 +1140,7 @@ class P7ConversationService:
             turn_id=turn.turn_id,
             existing_request=existing,
             accept_recommendations=acceptance,
+            user_text=turn.user_text,
         )
         if task is not None and existing is not None:
             # A revised draft gets a new task revision but keeps the stable
@@ -973,7 +1204,10 @@ class P7ConversationService:
             records.stale_task_pending(current.task_id, new_revision=updated.revision)
             if not records.update_task(updated, expected_revision=current.revision):
                 raise RevisionConflictError("draft revision raced with another update")
-            if state is TaskPhase.PLAN_READY:
+            if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
+                execution_profile = self.task_service._plan_execution_profile(
+                    normalized.plan.protocol_id
+                )
                 self.task_service._insert_pending(
                     records,
                     conversation_id=conversation,
@@ -989,6 +1223,8 @@ class P7ConversationService:
                         "output_spec_hash": normalized.request.output_spec.output_spec_hash,
                         "capability_id": normalized.plan.capability_id,
                         "capability_version": normalized.plan.capability_version,
+                        "execution_profile": execution_profile,
+                        "execution_profile_hash": sha256_hex(execution_profile),
                     },
                     now=now,
                 )
@@ -1032,6 +1268,15 @@ class P7ConversationService:
     def _plan_text(view: dict[str, object], validation) -> str:
         task = view["task"]
         if validation.status is ValidationStatus.VALID:
+            blocked = view.get("execution_blocked")
+            if isinstance(blocked, dict):
+                reasons = "；".join(str(item) for item in blocked.get("reasons", []))
+                return (
+                    f"已为任务 {task['alias']} 生成受支持的 Opt → Freq → 独立 SP 计划。"
+                    "当前 real profile 的 ORCA 执行条件未就绪，已展示计划但没有发放"
+                    "可执行确认 token。"
+                    f"请先完成本地 doctor 后重新提交或修改计划。原因：{reasons or '未提供'}。"
+                )
             pending = view.get("pending_actions", [])
             return (
                 f"已为任务 {task['alias']} 生成受支持的 Opt → Freq → 独立 SP 计划。"
@@ -1136,6 +1381,13 @@ class P7ConversationService:
             for index, item in enumerate(responses):
                 if not isinstance(item, dict):
                     continue
+                item_source = source
+                raw_item_source = item.get("response_source")
+                if raw_item_source is not None:
+                    try:
+                        item_source = ResponseSource(str(raw_item_source))
+                    except ValueError:
+                        item_source = source
                 response_records.append(
                     ResponseRecord.create(
                         response_id=f"response_{uuid.uuid4().hex}",
@@ -1143,7 +1395,7 @@ class P7ConversationService:
                         conversation_id=ConversationId(conversation),
                         subrequest_index=index,
                         intent=IntentKind(str(item.get("intent", "general_qa"))),
-                        source=source,
+                        source=item_source,
                         text=str(item.get("text", "")),
                         payload=item,
                         created_at_utc=now,

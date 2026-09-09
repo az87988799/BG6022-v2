@@ -162,20 +162,24 @@ def _query_output_spec(text: str) -> dict[str, object]:
             "quantities": [{"kind": "execution_status", "required": True}],
             "layout": "prose",
         }
-    return _output_spec(text) if _has_any(
-        text,
-        (
-            "只显示",
-            "仅显示",
-            "独立单点",
-            "单点能量",
-            "优化结构",
-            "频率",
-            "小数",
-            "单位",
-            "table",
-        ),
-    ) else {}
+    return (
+        _output_spec(text)
+        if _has_any(
+            text,
+            (
+                "只显示",
+                "仅显示",
+                "独立单点",
+                "单点能量",
+                "优化结构",
+                "频率",
+                "小数",
+                "单位",
+                "table",
+            ),
+        )
+        else {}
+    )
 
 
 def _operations(text: str) -> tuple[str, ...]:
@@ -218,6 +222,28 @@ def _calculation(
         hard.append(f"method={method}")
     if environment:
         hard.append(f"environment={environment}")
+    parameter_evidence: dict[str, object] = {}
+    for field_name, pattern in (
+        ("charge", _CHARGE),
+        ("multiplicity", _MULTIPLICITY),
+    ):
+        match = pattern.search(text)
+        if match is not None:
+            parameter_evidence[field_name] = {
+                "origin": "current_message",
+                "quote": match.group(0),
+            }
+    if method:
+        parameter_evidence["method"] = {
+            "origin": "current_message",
+            "quote": method_match.group(0) if method_match is not None else method,
+        }
+    if environment:
+        environment_match = re.search(r"水溶液|溶液|solvent|aqueous|solution", text, re.I)
+        parameter_evidence["environment"] = {
+            "origin": "current_message",
+            "quote": environment_match.group(0) if environment_match else environment,
+        }
     return CalculationIntent(
         action=action,
         molecule_kind=molecule_kind,
@@ -232,6 +258,7 @@ def _calculation(
         prohibited_requests=tuple(prohibited),
         output_spec=_output_spec(text),
         requested_execution=_has_any(text, ("开始", "执行", "run it", "start it", "approve")),
+        parameter_evidence=parameter_evidence,
     )
 
 

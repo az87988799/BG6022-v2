@@ -1680,6 +1680,45 @@ P7_CONVERSATION_STATEMENTS = (
 )
 
 
+# P7 real execution has one project-wide physical ORCA capacity slot.  The
+# row is intentionally explicit instead of inferred from active jobs: an
+# unknown launch must remain held until an operator reconciles it.
+P7_EXECUTION_RESOURCE_STATEMENTS = (
+    """
+    CREATE TABLE execution_resource_slots (
+        resource_key       TEXT PRIMARY KEY,
+        owner_execution_id TEXT,
+        owner_generation   INTEGER,
+        host_identity      TEXT,
+        status              TEXT NOT NULL CHECK(status IN ('free', 'held', 'unknown')),
+        acquired_at_utc    TEXT,
+        released_at_utc    TEXT,
+        evidence_ref       TEXT,
+        CHECK (
+            (status = 'free'
+             AND owner_execution_id IS NULL
+             AND owner_generation IS NULL
+             AND host_identity IS NULL)
+            OR
+            (status IN ('held', 'unknown')
+             AND owner_execution_id IS NOT NULL
+             AND owner_generation IS NOT NULL
+             AND owner_generation >= 1
+             AND host_identity IS NOT NULL)
+        )
+    )
+    """.strip(),
+    """
+    INSERT INTO execution_resource_slots(
+        resource_key, owner_execution_id, owner_generation, host_identity,
+        status, acquired_at_utc, released_at_utc, evidence_ref
+    ) VALUES (
+        'project.local_orca', NULL, NULL, NULL, 'free', NULL, NULL, NULL
+    )
+    """.strip(),
+)
+
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
@@ -1727,6 +1766,11 @@ DEFAULT_MIGRATIONS = (
         version=8,
         name="p7_conversation_task_result_delivery",
         statements=P7_CONVERSATION_STATEMENTS,
+    ),
+    Migration(
+        version=9,
+        name="p7_project_execution_resource_slot",
+        statements=P7_EXECUTION_RESOURCE_STATEMENTS,
     ),
 )
 
@@ -1853,6 +1897,7 @@ __all__ = [
     "V4_DISPATCH_PERMIT_AND_COMMAND_RECEIPT_STATEMENTS",
     "P3_WORKFLOW_STATEMENTS",
     "P5_LOCAL_JOB_STATEMENTS",
+    "P7_EXECUTION_RESOURCE_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",

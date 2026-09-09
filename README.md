@@ -18,9 +18,12 @@ replace real acceptance.
 
 P7 adds a guarded natural-language conversation surface, deterministic task
 planning, P4/P5/P6 handoffs, immutable delivery records, separately hashed
-display views, and a direct terminal launcher. Use
-[P7 usage](docs/p7-usage.md) for the interactive entry point. P7 remains an
-implementation candidate until the Owner accepts the pushed commit.
+display views, and one direct terminal launcher. The launcher defaults to the
+real DeepSeek → PubChem/RDKit → local ORCA profile; `offline` and
+`deepseek_fake` are explicit test profiles. Copy `.env.example` to `.env` and
+use [P7 usage](docs/p7-usage.md) for the terminal entry and commands. P7
+remains an implementation candidate until the Owner accepts the pushed
+commit.
 
 ## V2-P0–P3 foundation
 

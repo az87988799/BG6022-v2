@@ -238,9 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
     chat_target = agent_chat.add_mutually_exclusive_group(required=True)
     chat_target.add_argument("--new-conversation", action="store_true")
     chat_target.add_argument("--conversation")
-    agent_chat.add_argument(
-        "--planner", choices=("baseline", "fake", "deepseek_chat"), required=True
-    )
+    agent_chat.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_chat.add_argument("--planner", choices=("baseline", "fake", "deepseek_chat"))
+    agent_chat.add_argument("--model-call-budget", type=int)
+    agent_chat.add_argument("--orca-executable", type=Path)
+    agent_chat.add_argument("--orca-version")
+    agent_chat.add_argument("--doctor", action="store_true")
     agent_chat.add_argument("--allow-llm", action="store_true")
     agent_chat.add_argument("--allow-real-orca", action="store_true")
     agent_chat.add_argument("--backend", choices=("fake", "local_orca"), default="fake")
@@ -254,9 +257,11 @@ def build_parser() -> argparse.ArgumentParser:
     agent_message.add_argument("--conversation", required=True)
     agent_message.add_argument("--text", required=True)
     agent_message.add_argument("--save-request", type=Path, required=True)
-    agent_message.add_argument(
-        "--planner", choices=("baseline", "fake", "deepseek_chat"), default="baseline"
-    )
+    agent_message.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_message.add_argument("--planner", choices=("baseline", "fake", "deepseek_chat"))
+    agent_message.add_argument("--model-call-budget", type=int)
+    agent_message.add_argument("--orca-executable", type=Path)
+    agent_message.add_argument("--orca-version")
     agent_message.add_argument("--allow-llm", action="store_true")
     agent_message.add_argument("--fallback", choices=("none", "baseline"), default="none")
     agent_message.add_argument("--json", action="store_true")
@@ -265,12 +270,14 @@ def build_parser() -> argparse.ArgumentParser:
     agent_work.add_argument("--conversation", required=True)
     agent_work.add_argument("--max-effects", type=int, default=16)
     agent_work.add_argument("--max-seconds", type=float, default=30.0)
+    agent_work.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_work.add_argument("--model-call-budget", type=int)
+    agent_work.add_argument("--orca-executable", type=Path)
+    agent_work.add_argument("--orca-version")
     agent_work.add_argument("--allow-llm", action="store_true")
     agent_work.add_argument("--allow-real-orca", action="store_true")
     agent_work.add_argument("--backend", choices=("fake", "local_orca"), default="fake")
-    agent_work.add_argument(
-        "--planner", choices=("baseline", "fake", "deepseek_chat"), default="baseline"
-    )
+    agent_work.add_argument("--planner", choices=("baseline", "fake", "deepseek_chat"))
     agent_work.add_argument("--fallback", choices=("none", "baseline"), default="none")
     agent_work.add_argument("--watch", action="store_true")
     agent_work.add_argument("--json", action="store_true")
@@ -279,6 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
     agent_query.add_argument("--conversation", required=True)
     agent_query.add_argument("--task")
     agent_query.add_argument("--request-json", type=Path, required=True)
+    agent_query.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_query.add_argument("--model-call-budget", type=int)
+    agent_query.add_argument("--orca-executable", type=Path)
+    agent_query.add_argument("--orca-version")
     agent_query.add_argument("--json", action="store_true")
 
     agent_action = subparsers.add_parser("agent-action")
@@ -286,23 +297,39 @@ def build_parser() -> argparse.ArgumentParser:
     agent_action.add_argument("--token", required=True)
     agent_action.add_argument("--decision", choices=("accept", "reject"), required=True)
     agent_action.add_argument("--save-request", type=Path, required=True)
+    agent_action.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_action.add_argument("--model-call-budget", type=int)
+    agent_action.add_argument("--orca-executable", type=Path)
+    agent_action.add_argument("--orca-version")
     agent_action.add_argument("--json", action="store_true")
 
     agent_cancel = subparsers.add_parser("agent-cancel-task")
     agent_cancel.add_argument("--conversation", required=True)
     agent_cancel.add_argument("--task", required=True)
     agent_cancel.add_argument("--expected-revision", type=int, required=True)
+    agent_cancel.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_cancel.add_argument("--model-call-budget", type=int)
+    agent_cancel.add_argument("--orca-executable", type=Path)
+    agent_cancel.add_argument("--orca-version")
     agent_cancel.add_argument("--json", action="store_true")
 
     agent_interrupt = subparsers.add_parser("agent-interrupt-turn")
     agent_interrupt.add_argument("--conversation", required=True)
     agent_interrupt.add_argument("--turn", required=True)
+    agent_interrupt.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_interrupt.add_argument("--model-call-budget", type=int)
+    agent_interrupt.add_argument("--orca-executable", type=Path)
+    agent_interrupt.add_argument("--orca-version")
     agent_interrupt.add_argument("--json", action="store_true")
 
     agent_link = subparsers.add_parser("agent-link-result")
     agent_link.add_argument("--conversation", required=True)
     agent_link.add_argument("--workflow", choices=("p5", "p6"), required=True)
     agent_link.add_argument("--run", required=True)
+    agent_link.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_link.add_argument("--model-call-budget", type=int)
+    agent_link.add_argument("--orca-executable", type=Path)
+    agent_link.add_argument("--orca-version")
     agent_link.add_argument("--json", action="store_true")
 
     agent_export = subparsers.add_parser("agent-export")
@@ -310,11 +337,19 @@ def build_parser() -> argparse.ArgumentParser:
     agent_export.add_argument("--task")
     agent_export.add_argument("--format", choices=("md", "json"), default="md")
     agent_export.add_argument("--output", type=Path, required=True)
+    agent_export.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_export.add_argument("--model-call-budget", type=int)
+    agent_export.add_argument("--orca-executable", type=Path)
+    agent_export.add_argument("--orca-version")
     agent_export.add_argument("--json", action="store_true")
 
     agent_verify = subparsers.add_parser("agent-verify")
     agent_verify.add_argument("--conversation", required=True)
     agent_verify.add_argument("--task")
+    agent_verify.add_argument("--profile", choices=("real", "deepseek_fake", "offline"))
+    agent_verify.add_argument("--model-call-budget", type=int)
+    agent_verify.add_argument("--orca-executable", type=Path)
+    agent_verify.add_argument("--orca-version")
     agent_verify.add_argument("--json", action="store_true")
     return parser
 
@@ -826,6 +861,10 @@ def main(argv: list[str] | None = None) -> int:
 def _handle_p7_cli(args) -> int:
     """Dispatch the explicit P7 CLI without changing legacy run commands."""
 
+    from orca_agent.application.p7_runtime_config import (
+        P7RuntimeConfig,
+        load_project_environment,
+    )
     from orca_agent.bootstrap.p7_modules import build_p7_runtime
     from orca_agent.domain.ids import ConversationId, RunId
     from orca_agent.llm.ports import strict_json_loads
@@ -835,19 +874,57 @@ def _handle_p7_cli(args) -> int:
         MessageCommand,
     )
 
-    planner_name = getattr(args, "planner", "baseline")
+    requested_planner = getattr(args, "planner", None)
+    planner_name = requested_planner or "baseline"
     allow_llm = bool(getattr(args, "allow_llm", False))
     fallback = getattr(args, "fallback", "none")
     backend_kind = getattr(args, "backend", "fake")
     allow_real_orca = bool(getattr(args, "allow_real_orca", False))
-    runtime = build_p7_runtime(
-        args.state_root,
-        planner_name=planner_name,
-        allow_llm=allow_llm,
-        fallback=fallback,
-        backend_kind=backend_kind,
-        allow_real_orca=allow_real_orca,
-    )
+    effective_allow_real_orca = allow_real_orca
+    profile = getattr(args, "profile", None)
+    if profile is None:
+        profile = load_project_environment(Path.cwd()).get("BG6022_P7_PROFILE")
+    if getattr(args, "profile", None) is None and requested_planner in {
+        "baseline",
+        "deepseek_chat",
+    }:
+        # An explicit legacy planner is still a CLI-level override of the
+        # project profile, matching the terminal launcher precedence.
+        profile = "offline" if requested_planner == "baseline" else "deepseek_fake"
+    if profile is not None:
+        expected_planner = "baseline" if profile == "offline" else "deepseek_chat"
+        if requested_planner is not None and requested_planner != expected_planner:
+            raise ValueError(f"P7 profile={profile} 与 planner={requested_planner} 组合不合法")
+        config = P7RuntimeConfig.for_profile(
+            profile,
+            args.state_root,
+            project_root=Path.cwd(),
+            model_call_budget=getattr(args, "model_call_budget", None),
+            orca_executable=getattr(args, "orca_executable", None),
+            orca_version=getattr(args, "orca_version", None),
+        )
+        if getattr(args, "doctor", False):
+            from orca_agent.execution.orca_config import doctor
+
+            result = doctor(
+                args.state_root,
+                executable=config.orca_executable,
+                probe=True,
+                expected_version=config.expected_orca_version,
+            )
+            result["profile"] = config.public_dict()
+            return _emit(result, bool(result.get("ready")), getattr(args, "json", False))
+        runtime = build_p7_runtime(args.state_root, fallback=fallback, runtime_config=config)
+        effective_allow_real_orca = config.allow_real_orca
+    else:
+        runtime = build_p7_runtime(
+            args.state_root,
+            planner_name=planner_name,
+            allow_llm=allow_llm,
+            fallback=fallback,
+            backend_kind=backend_kind,
+            allow_real_orca=allow_real_orca,
+        )
 
     if args.operation == "agent-chat":
         from orca_agent.interfaces.p7_chat import P7ChatDriver
@@ -895,7 +972,7 @@ def _handle_p7_cli(args) -> int:
                 conversation_id,
                 max_effects=args.max_effects,
                 max_seconds=args.max_seconds,
-                allow_real_orca=args.allow_real_orca,
+                allow_real_orca=effective_allow_real_orca,
             )
             return _emit(result, True, args.json)
         started = time.monotonic()
@@ -907,7 +984,7 @@ def _handle_p7_cli(args) -> int:
                 conversation_id,
                 max_effects=max(args.max_effects - effects, 1),
                 max_seconds=min(1.0, max(remaining, 0.1)),
-                allow_real_orca=args.allow_real_orca,
+                allow_real_orca=effective_allow_real_orca,
             )
             effects += int(result.get("effects", 0))
             batches.append(result)

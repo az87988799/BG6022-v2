@@ -90,6 +90,8 @@ class P7QueryService:
             return result
         view = self.task_service.task_view(conversation, selected.task_id)
         result["task"] = view["task"]
+        if "execution_blocked" in view:
+            result["execution_blocked"] = view["execution_blocked"]
         result["task_sources"] = {
             key: value for key, value in view.items() if key in {"p4", "p5", "p6"}
         }
@@ -315,8 +317,7 @@ class P7QueryService:
     def _alias_from_text(text: str) -> str | None:
         lowered = text.casefold()
         if any(
-            marker in lowered
-            for marker in ("刚才", "上次", "当前任务", "this task", "that task")
+            marker in lowered for marker in ("刚才", "上次", "当前任务", "this task", "that task")
         ):
             return "当前任务"
         return None

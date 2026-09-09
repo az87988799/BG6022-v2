@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "p7.intake-plan.v1",
+  "$id": "p7.intake-plan.v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "prompt_version", "subrequests"],
   "properties": {
-    "schema_version": {"const": "p7.turn.v1"},
-    "prompt_version": {"const": "p7.intake-plan.v1"},
+    "schema_version": {"const": "p7.turn.v2"},
+    "prompt_version": {"const": "p7.intake-plan.v2"},
     "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
     "source": {
       "enum": ["program", "baseline", "fake", "deepseek_chat", "user"]
@@ -81,6 +81,7 @@
         "environment": {"type": ["string", "null"]},
         "hard_constraints": {"type": "array", "items": {"type": "string"}},
         "prohibited_requests": {"type": "array", "items": {"type": "string"}},
+        "parameter_evidence": {"type": "object"},
         "output_spec": {"$ref": "#/$defs/outputSpec"},
         "missing_fields": {"type": "array", "items": {"type": "string"}},
         "requested_execution": {"type": "boolean"}
@@ -89,12 +90,12 @@
     "chemistryQA": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intent", "question"],
+      "required": ["intent", "question", "answer_draft"],
       "properties": {
         "intent": {"const": "chemistry_qa"},
         "question": {"type": "string", "minLength": 1},
         "task_alias": {"type": ["string", "null"]},
-        "answer_draft": {"type": ["string", "null"]},
+        "answer_draft": {"type": "string", "minLength": 1},
         "requires_task_context": {"type": "boolean"},
         "cited_fact_aliases": {"type": "array", "items": {"type": "string"}}
       }
@@ -102,11 +103,11 @@
     "generalQA": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["intent", "question"],
+      "required": ["intent", "question", "answer_draft"],
       "properties": {
         "intent": {"const": "general_qa"},
         "question": {"type": "string", "minLength": 1},
-        "answer_draft": {"type": ["string", "null"]}
+        "answer_draft": {"type": "string", "minLength": 1}
       }
     },
     "contextQuery": {

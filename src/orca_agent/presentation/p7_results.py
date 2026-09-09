@@ -31,6 +31,27 @@ from orca_agent.orchestration.p7_versions import P7_POLICY_VERSION
 
 P7_PRESENTATION_VERSION = "p7-presenter-v1"
 
+_SOURCE_ALIASES = {
+    "opt": "opt",
+    "optimization": "opt",
+    "geometry_optimization": "opt",
+    "geometry optimization": "opt",
+    "freq": "freq",
+    "frequency": "freq",
+    "vibrational": "freq",
+    "vibrational_frequency": "freq",
+    "sp": "sp",
+    "single_point": "sp",
+    "single point": "sp",
+    "independent_sp": "sp",
+    "independent single point": "sp",
+}
+
+
+def _source_primitive_key(item: object) -> str:
+    value = getattr(item, "primitive", "")
+    return str(getattr(value, "value", value)).casefold().strip()
+
 
 def _dump(value: object) -> object:
     model_dump = getattr(value, "model_dump", None)
@@ -273,7 +294,9 @@ class P7ResultPresenter:
                     kind,
                     required,
                     p5_view,
-                    reason=("独立 SP 尚未完成" if primitive == "sp" else "Opt 末步能量尚未完成"),
+                    reason=self._source_selection_reason(
+                        primitive, selector, p5_results, p6_results
+                    ),
                 )
             energy = getattr(source, "energy", None)
             token = getattr(source, "energy_token", None)
@@ -302,7 +325,12 @@ class P7ResultPresenter:
         if kind is OutputKind.VIBRATIONAL_FREQUENCIES:
             source = self._find_source("freq", selector, p5_results, p6_results)
             if source is None:
-                return self._missing(kind, required, p5_view, reason="Freq 节点尚未完成")
+                return self._missing(
+                    kind,
+                    required,
+                    p5_view,
+                    reason=self._source_selection_reason("freq", selector, p5_results, p6_results),
+                )
             frequencies = tuple(getattr(source, "frequencies", ()))
             if not frequencies:
                 return self._missing(kind, required, p5_view, reason="来源记录没有频率数据")
@@ -481,26 +509,95 @@ class P7ResultPresenter:
         p5_results: tuple[P5ResultRecord, ...],
         p6_results: tuple[P6SourceResultRef, ...],
     ) -> P5ResultRecord | P6SourceResultRef | None:
-        candidates: tuple[P5ResultRecord | P6SourceResultRef, ...] = p6_results or p5_results
-        if selector:
-            selected = tuple(
-                item
-                for item in candidates
-                if selector
-                in {
-                    primitive,
-                    getattr(item, "primitive", None),
-                    str(getattr(item, "record_id", getattr(item, "result_id", ""))),
-                }
-            )
-            if selected:
-                return selected[-1]
-        matches = tuple(
-            item
-            for item in candidates
-            if getattr(item.primitive, "value", item.primitive) == primitive
+        _, requested, primitive_matches = P7ResultPresenter._source_matches(
+            primitive, p5_results, p6_results
         )
-        return matches[-1] if matches else None
+        if not primitive_matches:
+            return None
+
+        value = (selector or "").strip()
+        if not value:
+            return primitive_matches[0] if len(primitive_matches) == 1 else None
+
+        selector_key = _SOURCE_ALIASES.get(value.casefold(), value.casefold())
+        if selector_key in _SOURCE_ALIASES.values():
+            if selector_key != requested:
+                return None
+            return primitive_matches[0] if len(primitive_matches) == 1 else None
+
+        exact_ids = {
+            value,
+            value.removeprefix("p5.result:"),
+            value.removeprefix("p6.result:"),
+        }
+        selected = tuple(
+            item
+            for item in primitive_matches
+            if str(getattr(item, "record_id", getattr(item, "result_id", ""))) in exact_ids
+            or P7ResultPresenter._source_id(item) in exact_ids
+        )
+        return selected[0] if len(selected) == 1 else None
+
+    @staticmethod
+    def _source_matches(
+        primitive: str,
+        p5_results: tuple[P5ResultRecord, ...],
+        p6_results: tuple[P6SourceResultRef, ...],
+    ) -> tuple[
+        tuple[P5ResultRecord | P6SourceResultRef, ...],
+        str,
+        tuple[P5ResultRecord | P6SourceResultRef, ...],
+    ]:
+        candidates: tuple[P5ResultRecord | P6SourceResultRef, ...] = tuple(
+            p6_results if p6_results else p5_results
+        )
+        normalized = primitive.casefold().strip()
+        requested = _SOURCE_ALIASES.get(normalized, normalized)
+        matches = tuple(item for item in candidates if _source_primitive_key(item) == requested)
+        return candidates, requested, matches
+
+    @staticmethod
+    def _source_selection_reason(
+        primitive: str,
+        selector: str | None,
+        p5_results: tuple[P5ResultRecord, ...],
+        p6_results: tuple[P6SourceResultRef, ...],
+    ) -> str:
+        _, requested, matches = P7ResultPresenter._source_matches(primitive, p5_results, p6_results)
+        label = {"opt": "Opt", "freq": "Freq", "sp": "independent SP"}.get(requested, primitive)
+        if not matches:
+            return f"{label} 来源记录尚未完成"
+
+        value = (selector or "").strip()
+        if not value:
+            if len(matches) > 1:
+                return f"{label} 来源记录有多个，请指定 selector 以消除歧义"
+            return f"{label} 来源记录不可用"
+
+        selector_key = _SOURCE_ALIASES.get(value.casefold(), value.casefold())
+        if selector_key in _SOURCE_ALIASES.values():
+            if selector_key != requested:
+                return f"selector {value!r} 与请求阶段 {label} 冲突"
+            if len(matches) > 1:
+                return f"{label} 来源记录有多个，请指定具体 record_id"
+            return f"{label} 来源记录不可用"
+
+        exact_ids = {
+            value,
+            value.removeprefix("p5.result:"),
+            value.removeprefix("p6.result:"),
+        }
+        selected = tuple(
+            item
+            for item in matches
+            if str(getattr(item, "record_id", getattr(item, "result_id", ""))) in exact_ids
+            or P7ResultPresenter._source_id(item) in exact_ids
+        )
+        if not selected:
+            return f"没有找到与 selector {value!r} 匹配的 {label} 来源记录"
+        if len(selected) > 1:
+            return f"selector {value!r} 匹配到多个 {label} 来源记录"
+        return f"{label} 来源记录不可用"
 
     @staticmethod
     def _missing(

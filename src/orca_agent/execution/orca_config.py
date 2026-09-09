@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import importlib.util
 import os
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -109,6 +112,8 @@ def runtime_config(
     nprocs: int = 1,
     implicit_threads: int = 1,
     parallel: bool = False,
+    total_memory_mb: int | None = None,
+    maxcore_mb: int | None = None,
 ) -> dict[str, object]:
     if type(nprocs) is not int or nprocs < 1:
         raise ValueError("runtime nprocs must be a positive integer")
@@ -116,6 +121,14 @@ def runtime_config(
         raise ValueError("runtime implicit threads must be exactly one")
     if type(parallel) is not bool or (nprocs > 1 and not parallel):
         raise ValueError("multi-process runtime requires parallel mode")
+    if total_memory_mb is not None and (type(total_memory_mb) is not int or total_memory_mb < 256):
+        raise ValueError("runtime total memory must be at least 256 MB")
+    if maxcore_mb is not None and (type(maxcore_mb) is not int or maxcore_mb < 1):
+        raise ValueError("runtime maxcore must be positive")
+    if total_memory_mb is not None and maxcore_mb is not None:
+        expected_maxcore = (total_memory_mb * 75) // (100 * nprocs)
+        if maxcore_mb != expected_maxcore:
+            raise ValueError("runtime maxcore must follow the 75% per-process rule")
     result: dict[str, object] = {
         "platform": os.name,
         "state_root": str(Path(state_root).resolve()),
@@ -123,6 +136,10 @@ def runtime_config(
         "nprocs": nprocs,
         "implicit_threads": implicit_threads,
     }
+    if total_memory_mb is not None:
+        result["total_memory_mb"] = total_memory_mb
+    if maxcore_mb is not None:
+        result["maxcore_mb"] = maxcore_mb
     if nprocs > 1 or parallel:
         result.update(
             {
@@ -159,6 +176,16 @@ def validate_runtime_config(
         raise ValueError("runtime nprocs does not match the trusted budget")
     if config.get("implicit_threads") != 1:
         raise ValueError("runtime implicit threads must be exactly one")
+    if "total_memory_mb" in config:
+        if type(config["total_memory_mb"]) is not int or int(config["total_memory_mb"]) < 256:
+            raise ValueError("runtime total memory is invalid")
+    if "maxcore_mb" in config:
+        if type(config["maxcore_mb"]) is not int or int(config["maxcore_mb"]) < 1:
+            raise ValueError("runtime maxcore is invalid")
+    if "total_memory_mb" in config and "maxcore_mb" in config:
+        expected_maxcore = (int(config["total_memory_mb"]) * 75) // (100 * expected_nprocs)
+        if int(config["maxcore_mb"]) != expected_maxcore:
+            raise ValueError("runtime maxcore is not bound to total memory and nprocs")
     has_parallel_fields = "parallel" in config or "thread_environment" in config
     if expected_nprocs > 1 or expected_parallel:
         if config.get("parallel") is not expected_parallel:
@@ -196,6 +223,8 @@ def doctor(
     *,
     executable: str | Path | None = None,
     probe: bool = False,
+    expected_version: str = "6.1.1",
+    orca_version: str | None = None,
 ) -> dict[str, object]:
     root = Path(state_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -206,6 +235,9 @@ def doctor(
         "work_root_writable": False,
         "real_execution": False,
         "probe": probe,
+        "expected_orca_version": expected_version,
+        "thread_environment": dict(_THREAD_ENVIRONMENT),
+        "available_memory_mb": available_physical_memory_mb(),
     }
     work = root / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -216,17 +248,59 @@ def doctor(
         checks["work_root_writable"] = True
     except OSError:
         checks["work_root_writable"] = False
+    dependency_checks: dict[str, bool] = {}
+    for module_name in ("numpy", "rdkit", "httpx"):
+        try:
+            dependency_checks[module_name] = importlib.util.find_spec(module_name) is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            dependency_checks[module_name] = False
+    checks["dependencies"] = dependency_checks
+    mpiexec = shutil.which("mpiexec")
+    checks["mpi_available"] = mpiexec is not None
+    checks["mpi_smoke"] = {
+        "attempted": False,
+        "ready": False,
+        "executable": mpiexec,
+    }
+    if mpiexec is not None:
+        smoke = checks["mpi_smoke"]
+        assert isinstance(smoke, dict)
+        smoke["attempted"] = True
+        try:
+            completed = subprocess.run(
+                [mpiexec, "-n", "4", sys.executable, "-c", "pass"],
+                capture_output=True,
+                cwd=root,
+                timeout=20,
+                check=False,
+                shell=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            smoke["ready"] = completed.returncode == 0
+            if completed.returncode != 0:
+                smoke["error"] = (completed.stderr or completed.stdout).decode(
+                    "utf-8", errors="replace"
+                )[:512]
+        except (OSError, subprocess.TimeoutExpired) as error:
+            smoke["error"] = type(error).__name__
+    checks["mpi_smoke_ready"] = bool(checks["mpi_smoke"].get("ready"))
+    checks["memory_sufficient"] = (
+        checks["available_memory_mb"] is None or int(checks["available_memory_mb"]) >= 2048
+    )
     if executable is not None:
         try:
             target = Path(executable).expanduser().resolve()
             digest = executable_sha256(target)
-            version = probe_orca_version(target) if probe else None
+            digest_after = executable_sha256(target)
+            if digest != digest_after:
+                raise RuntimeError("ORCA executable changed while being fingerprinted")
+            version = probe_orca_version(target) if probe else orca_version
             checks.update(
                 {
                     "executable": str(target),
                     "executable_sha256": digest,
                     "orca_version": version,
-                    "real_execution": version is not None and version.startswith("6.1"),
+                    "real_execution": version == expected_version,
                 }
             )
         except (OSError, ValueError, RuntimeError) as error:
@@ -237,7 +311,14 @@ def doctor(
                     "real_execution": False,
                 }
             )
-    checks["ready"] = bool(checks["state_root_exists"] and checks["work_root_writable"])
+    checks["ready"] = bool(
+        checks["state_root_exists"]
+        and checks["work_root_writable"]
+        and checks["real_execution"]
+        and checks["memory_sufficient"]
+        and all(dependency_checks.values())
+        and (checks["mpi_smoke_ready"] or os.name != "nt")
+    )
     return checks
 
 

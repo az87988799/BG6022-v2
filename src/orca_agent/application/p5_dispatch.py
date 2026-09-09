@@ -17,6 +17,21 @@ class P5EffectCompletion:
         self.service = service
 
     def complete(self, permit, result):
+        if not result.success and result.error_code is HandlerErrorCode.RESOURCE_BUSY:
+            # A project-wide capacity miss is a wait condition, not a
+            # business failure.  Return the leased effect to pending without
+            # appending a P5 event or consuming the physical launch budget.
+            with SQLiteUnitOfWork(self.service.database_path, clock=self.service.clock) as uow:
+                uow.begin()
+                uow.outbox.retry_dispatch_in_transaction(
+                    permit=permit,
+                    now=self.service.clock.now_utc(),
+                    error_code=HandlerErrorCode.RESOURCE_BUSY,
+                )
+                uow.commit()
+                return EffectCompletionReport(
+                    permit.effect.effect_id, "resource_busy", permit.generation
+                )
         outcome = "succeeded" if result.success else "dead_letter"
         command_id = completion_command_id(permit.effect.effect_id, permit.generation, outcome)
         with SQLiteUnitOfWork(self.service.database_path, clock=self.service.clock) as uow:

@@ -27,15 +27,22 @@ Repair regressions additionally covered:
 - invalid model output used one durable format-repair slot;
 - current-task and display-only queries preserved task/query identity; and
 - the shared terminal driver required an explicit action token for generic
-  acknowledgements.
+  acknowledgements;
+- real-profile configuration without a ready ORCA did not issue an executable
+  approval token;
+- a DeepSeek v1 response was rejected at the v2 boundary without fallback;
+- task-context QA used only the program's verified query result, not the model
+  draft; and
+- ambiguous result sources reported the selector conflict instead of choosing
+  an arbitrary record.
 
 This note is offline fake evidence, not a real ORCA or live-model gate.
 
 Final local verification:
 
-- `tests/p7`: 22 passed.
-- Existing offline suite: 637 passed, 1 skipped, with
-  `tests/test_offline.py` excluded because `pytest-socket` is not installed in
-  this environment.
-- `ruff check src tests`, `compileall`, and wheel build passed; the wheel
-  contains the three files under `orca_agent/resources/p7/`.
+- `tests/p7`: 28 passed.
+- Full local suite: 644 passed, 1 skipped, 1 warning.
+- `ruff check src tests scripts`, `ruff format --check src tests scripts`,
+  `compileall`, `python -m build --wheel --no-isolation`, and
+  `python -m uv lock --check` passed. The wheel contains all three P7
+  resources under `orca_agent/resources/p7/`.

@@ -17,7 +17,9 @@ from ..orchestration.p7_versions import (
     P7_CONVERSATION_ENGINE,
     P7_SCHEMA_VERSION,
     PROMPT_VERSION,
+    PROMPT_VERSION_V2,
     TURN_SCHEMA,
+    TURN_SCHEMA_V2,
 )
 from ..orchestration.temporal import ensure_utc
 from .hashing import sha256_hex, verify_sha256
@@ -182,6 +184,7 @@ class CalculationIntent(P7Model):
     output_spec: FrozenJsonObject = {}
     missing_fields: tuple[str, ...] = ()
     requested_execution: bool = False
+    parameter_evidence: FrozenJsonObject = {}
 
     @field_validator("molecule_value", "task_alias", "method", "environment")
     @classmethod
@@ -213,6 +216,11 @@ class CalculationIntent(P7Model):
     @field_validator("output_spec", mode="before")
     @classmethod
     def _output_object(cls, value: object) -> FrozenJsonObject:
+        return freeze_json_object({} if value is None else value)
+
+    @field_validator("parameter_evidence", mode="before")
+    @classmethod
+    def _parameter_evidence(cls, value: object) -> FrozenJsonObject:
         return freeze_json_object({} if value is None else value)
 
 
@@ -292,14 +300,19 @@ Subrequest = Annotated[
 class TurnInterpretation(P7Model):
     """The only model output accepted by the application boundary."""
 
-    schema_version: Literal[TURN_SCHEMA] = TURN_SCHEMA
-    prompt_version: Literal[PROMPT_VERSION] = PROMPT_VERSION
+    schema_version: Literal[TURN_SCHEMA, TURN_SCHEMA_V2] = TURN_SCHEMA
+    prompt_version: Literal[PROMPT_VERSION, PROMPT_VERSION_V2] = PROMPT_VERSION
     subrequests: tuple[Subrequest, ...] = Field(min_length=1, max_length=4)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source: ResponseSource = ResponseSource.BASELINE
 
     @model_validator(mode="after")
     def _request_limits(self) -> TurnInterpretation:
+        if (self.schema_version, self.prompt_version) not in {
+            (TURN_SCHEMA, PROMPT_VERSION),
+            (TURN_SCHEMA_V2, PROMPT_VERSION_V2),
+        }:
+            raise ValueError("turn schema and prompt version are not a supported pair")
         new_calculations = sum(
             item.intent is IntentKind.CHEMICAL_CALCULATION
             and item.action in {CalculationAction.PLAN_NEW, CalculationAction.REVISE_DRAFT}
@@ -307,6 +320,12 @@ class TurnInterpretation(P7Model):
         )
         if new_calculations > 1:
             raise ValueError("a turn may contain at most one new calculation request")
+        if self.schema_version == TURN_SCHEMA_V2:
+            for item in self.subrequests:
+                if isinstance(item, (ChemistryQAIntent, GeneralQAIntent)) and not (
+                    item.answer_draft and item.answer_draft.strip()
+                ):
+                    raise ValueError("v2 QA responses require a non-empty answer_draft")
         return self
 
 

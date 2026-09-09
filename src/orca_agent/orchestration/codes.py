@@ -18,6 +18,7 @@ class HandlerErrorCode(StrEnum):
     INVALID_HANDLER_RESULT = "invalid_handler_result"
     DISPATCH_BLOCKED = "dispatch_blocked"
     STORAGE_BUSY = "storage_busy"
+    RESOURCE_BUSY = "resource_busy"
 
 
 _HANDLER_MESSAGES = {
@@ -26,6 +27,9 @@ _HANDLER_MESSAGES = {
     HandlerErrorCode.INVALID_HANDLER_RESULT: "The handler returned an invalid result.",
     HandlerErrorCode.DISPATCH_BLOCKED: "The effect was blocked by dispatch policy.",
     HandlerErrorCode.STORAGE_BUSY: "The effect could not be persisted because storage was busy.",
+    HandlerErrorCode.RESOURCE_BUSY: (
+        "The project execution resource is currently held by another task."
+    ),
 }
 
 

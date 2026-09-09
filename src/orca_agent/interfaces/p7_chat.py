@@ -52,9 +52,8 @@ class P7ChatDriver:
         """Serve stdin until EOF or an explicit exit command."""
 
         if not self.json_output:
-            self._write_line(
-                "P7 对话已启动。输入自然语言；/help 查看命令；输入 /exit 退出。"
-            )
+            self._write_line(self._banner())
+            self._write_line("P7 对话已启动。输入自然语言；/help 查看命令；输入 /exit 退出。")
         self._emit_state()
         lines: queue.Queue[str | None] = queue.Queue()
 
@@ -89,6 +88,10 @@ class P7ChatDriver:
         stripped = text.strip()
         if not stripped:
             return {"accepted": True, "code": "empty_input"}
+        if stripped.casefold() in {"退出", "quit", "exit"}:
+            result = {"accepted": True, "code": "exit", "text": "已退出 P7 对话。"}
+            self._emit(result)
+            return result
         if stripped.startswith("/"):
             result = self._handle_command(stripped)
             self._emit(result)
@@ -131,7 +134,8 @@ class P7ChatDriver:
                 "code": "help",
                 "text": (
                     "/new 新会话；/resume <conversation_id> 恢复；/tasks 查看任务；"
-                    "/status 查看当前任务；/accept <token> 接受待办；"
+                    "/status 查看当前任务；/use <任务> 切换当前任务；"
+                    "/reconcile <任务> 核对既有 P5；/accept <token> 接受待办；"
                     "/reject <token> 拒绝待办；/exit 退出。"
                 ),
             }
@@ -144,20 +148,61 @@ class P7ChatDriver:
         if name == "/tasks":
             try:
                 tasks = self.runtime.task.list_tasks(self.conversation_id)
+                state = self.runtime.conversation.get_state(self.conversation_id)
                 return {
                     "accepted": True,
                     "code": "tasks",
                     "conversation_id": self.conversation_id,
-                    "tasks": [item.model_dump(mode="json") for item in tasks],
+                    "selected_task_id": state.active_task_id,
+                    "tasks": [
+                        {
+                            "task_id": item.task_id,
+                            "alias": item.alias,
+                            "summary": self._task_summary(item),
+                            "state": item.state.value,
+                            "revision": item.revision,
+                            "selected": item.task_id == state.active_task_id,
+                        }
+                        for item in tasks
+                    ],
                 }
             except Exception as error:
                 return self._error("tasks_error", error)
         if name == "/status":
             try:
-                return self.runtime.query.query(
+                query = self.runtime.query.query(
                     self.conversation_id,
                     request={"kind": "conversation", "text": "当前任务状态"},
                 )
+                tasks = query.get("tasks", [])
+                selected_id = query.get("selected_task_id")
+                selected = next(
+                    (
+                        item
+                        for item in tasks
+                        if isinstance(item, dict) and item.get("task_id") == selected_id
+                    ),
+                    None,
+                )
+                if isinstance(selected, dict) and isinstance(query.get("execution_blocked"), dict):
+                    selected = {**selected, "execution_blocked": query["execution_blocked"]}
+                pending = [
+                    item
+                    for item in query.get("pending_actions", [])
+                    if isinstance(item, dict)
+                    and item.get("status", "pending") == "pending"
+                    and (selected_id is None or item.get("task_id") == selected_id)
+                ]
+                return {
+                    "accepted": True,
+                    "code": "status",
+                    "conversation_id": self.conversation_id,
+                    "current_task": selected,
+                    "selected_task_id": selected_id,
+                    "pending_actions": pending,
+                    "block_reason": self._block_reason(selected),
+                    "query": query,
+                }
             except Exception as error:
                 return self._error("status_error", error)
         if name in {"/accept", "/approve", "/reject"}:
@@ -165,15 +210,43 @@ class P7ChatDriver:
                 return {"accepted": False, "code": "token_required"}
             return self._apply_action(argument, "accept" if name != "/reject" else "reject")
         if name == "/use":
-            return {
-                "accepted": True,
-                "code": "task_selector",
-                "text": (
-                    "后续“当前任务”查询会按会话活动任务解析；"
-                    "如有多个任务，请使用任务别名或 ID。"
-                ),
-                "selector": argument or None,
-            }
+            if not argument:
+                return {
+                    "accepted": False,
+                    "code": "task_required",
+                    "text": "用法：/use <任务别名或任务ID>。",
+                }
+            try:
+                result = self.runtime.conversation.select_task(self.conversation_id, argument)
+                return {
+                    "accepted": True,
+                    "code": "task_selected",
+                    "text": f"已切换当前任务：{result['task']['alias']}。",
+                    **result,
+                }
+            except Exception as error:
+                return self._error("task_select_error", error)
+        if name == "/reconcile":
+            if not argument:
+                return {
+                    "accepted": False,
+                    "code": "task_required",
+                    "text": "用法：/reconcile <任务别名或任务ID>。",
+                }
+            try:
+                task = self._find_task(argument)
+                if task is None:
+                    raise ValueError("task ID or alias was not found")
+                return {
+                    "accepted": True,
+                    "code": "reconciled",
+                    "text": f"已请求核对任务 {task.alias} 的既有 P5 状态；不会新建计算。",
+                    "response": self.runtime.task.reconcile_task(
+                        self.conversation_id, task.task_id
+                    ),
+                }
+            except Exception as error:
+                return self._error("reconcile_error", error)
         return {"accepted": False, "code": "unknown_command", "text": "未知命令，请输入 /help。"}
 
     def _new_conversation(self) -> dict[str, object]:
@@ -297,16 +370,10 @@ class P7ChatDriver:
 
     def _has_pending_actions(self) -> bool:
         try:
-            return bool(self.runtime.task_view(self.conversation_id))
-        except AttributeError:
-            try:
-                pending = self.runtime.query.query(self.conversation_id).get("pending_actions", [])
-                return any(
-                    isinstance(item, dict) and item.get("status") == "pending"
-                    for item in pending
-                )
-            except Exception:
-                return False
+            pending = self.runtime.query.query(self.conversation_id).get("pending_actions", [])
+            return any(
+                isinstance(item, dict) and item.get("status") == "pending" for item in pending
+            )
         except Exception:
             return False
 
@@ -315,8 +382,22 @@ class P7ChatDriver:
             self._write_line(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
             return
         text = payload.get("text")
-        if isinstance(text, str) and text:
+        token_notice = payload.get("code") == "pending_action" and payload.get("token")
+        if isinstance(text, str) and text and not token_notice:
             self._write_line(text)
+        responses = payload.get("responses")
+        if isinstance(responses, list):
+            for response in responses:
+                if not isinstance(response, dict):
+                    continue
+                response_text = response.get("text")
+                if isinstance(response_text, str) and response_text and response_text != text:
+                    self._write_line(response_text)
+                response_payload = response.get("payload")
+                if isinstance(response_payload, dict):
+                    view = response_payload.get("view")
+                    if isinstance(view, dict) and view.get("rendered_text"):
+                        self._write_line(str(view["rendered_text"]))
         code = payload.get("code")
         if code in {"pending_action", "action_applied"} and payload.get("token"):
             self._write_line(
@@ -335,7 +416,25 @@ class P7ChatDriver:
                 self._write_line(str(view["rendered_text"]))
         elif code == "tasks":
             tasks = payload.get("tasks", [])
-            self._write_line(f"会话内任务数：{len(tasks) if isinstance(tasks, list) else 0}。")
+            selected = payload.get("selected_task_id")
+            self._write_line(
+                f"会话内任务数：{len(tasks) if isinstance(tasks, list) else 0}；"
+                f"当前任务：{selected or '未选择'}。"
+            )
+        elif code == "status":
+            current = payload.get("current_task")
+            if isinstance(current, dict):
+                self._write_line(
+                    f"当前任务：{current.get('alias', current.get('task_id'))}；"
+                    f"状态：{current.get('state', 'unknown')}。"
+                )
+            else:
+                self._write_line("当前没有选中的任务。")
+            pending = payload.get("pending_actions", [])
+            if isinstance(pending, list) and pending:
+                self._write_line(f"待办数：{len(pending)}。")
+            if payload.get("block_reason"):
+                self._write_line(f"阻塞原因：{payload['block_reason']}")
         elif code in {"session", "new_conversation", "conversation_resumed"}:
             self._write_line(f"会话：{payload.get('conversation_id', self.conversation_id)}")
         elif code not in {None, "session"} and not text:
@@ -349,6 +448,53 @@ class P7ChatDriver:
         if self.on_conversation_changed is not None:
             self.on_conversation_changed(self.conversation_id)
 
+    def _find_task(self, selector: str):
+        value = selector.strip().casefold()
+        tasks = self.runtime.task.list_tasks(self.conversation_id)
+        matches = tuple(
+            item
+            for item in tasks
+            if item.task_id == selector.strip() or item.alias.casefold() == value
+        )
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _task_summary(task) -> str:
+        request = task.request
+        if request is None or request.molecule_value is None:
+            return "未定义分子"
+        kind = request.molecule_kind.value if request.molecule_kind else "molecule"
+        return f"{kind}={request.molecule_value}"
+
+    @staticmethod
+    def _block_reason(task: dict[str, object] | None) -> str | None:
+        if not isinstance(task, dict):
+            return None
+        state = task.get("state")
+        if state == "reconciliation_required":
+            return "下游 P5 启动状态未知；请使用 /reconcile。"
+        if state == "execution_pending":
+            return "等待用户逐项批准 P5 执行节点。"
+        blocked = task.get("execution_blocked")
+        if isinstance(blocked, dict):
+            reasons = blocked.get("reasons", [])
+            return "真实 ORCA 尚未就绪：" + "；".join(str(item) for item in reasons)
+        return None
+
+    def _banner(self) -> str:
+        config = getattr(self.runtime, "config", None)
+        if config is None:
+            return "P7 profile=legacy planner=unknown backend=unknown"
+        public = config.public_dict()
+        return (
+            "P7 "
+            f"profile={public['profile']} model={public['model']} "
+            f"identity={public['identity_provider']} backend={public['backend']} "
+            f"budget={public['model_call_budget']} "
+            f"ORCA={public['orca_version'] or '未配置'} "
+            f"readiness={'ready' if public['execution_ready'] else 'blocked'}"
+        )
+
     @staticmethod
     def _action_text(action: dict[str, object]) -> str:
         labels = {
@@ -361,9 +507,7 @@ class P7ChatDriver:
     @staticmethod
     def _is_generic_ack(text: str) -> bool:
         collapsed = "".join(
-            character
-            for character in text.casefold()
-            if character not in " \t\r\n，。,.!?！？"
+            character for character in text.casefold() if character not in " \t\r\n，。,.!?！？"
         )
         return collapsed in {
             "好",

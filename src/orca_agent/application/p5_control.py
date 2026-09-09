@@ -70,15 +70,15 @@ def deliver_control(service, run_id, *, enqueue=True):
                 uow.commit()
                 return HandlerResult(success=True)
             uow.commit()
-        service._restore_execution_runtime(run_id)
+        runtime = service._restore_execution_runtime(run_id)
         if permit.effect.effect_type == "external.p5.cancel_job":
-            service.backend.cancel(execution, str(permit.effect.effect_id))
+            runtime.backend.cancel(execution, str(permit.effect.effect_id))
         # Acknowledge the short OS observation before the business collector
         # transitions the run to terminal. This preserves the shared invariant
         # that terminal runs cannot retain dispatching effects. A crash between
         # acknowledgement and collection is recovered by a new observation,
         # never by relaunching the numerical job.
-        service.backend.poll(execution)
+        runtime.backend.poll(execution)
         results.append(execution)
         return HandlerResult(success=True)
 

@@ -16,6 +16,8 @@ from orca_agent.application.errors import (
 from orca_agent.application.p4_service import P4ApplicationService
 from orca_agent.application.p5_service import P5ApplicationService
 from orca_agent.application.p6_service import P6ApplicationService
+from orca_agent.application.p7_runtime_config import P7RuntimeConfig
+from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import (
     ActionId,
     CommandId,
@@ -86,9 +88,21 @@ class P7TaskService:
         allow_network: bool = False,
         backend_kind: str = "fake",
         allow_real_orca: bool = False,
+        runtime_config: P7RuntimeConfig | None = None,
     ) -> None:
         self.state_root = Path(state_root).resolve()
         self.clock = clock or SystemClock()
+        self.runtime_config = runtime_config or P7RuntimeConfig.legacy(
+            self.state_root,
+            planner_name="baseline",
+            allow_llm=False,
+            allow_network=allow_network,
+            backend_kind=backend_kind,
+            allow_real_orca=allow_real_orca,
+        )
+        allow_network = self.runtime_config.allow_network
+        backend_kind = self.runtime_config.backend_kind
+        allow_real_orca = self.runtime_config.allow_real_orca
         self.catalog = catalog or build_capability_catalog()
         self.p4 = p4_service or P4ApplicationService(
             self.state_root,
@@ -100,7 +114,14 @@ class P7TaskService:
             self.state_root,
             clock=self.clock,
             backend_kind=backend_kind,
+            orca_executable=self.runtime_config.orca_executable,
+            orca_version=self.runtime_config.orca_version,
             allow_real_orca=allow_real_orca,
+            required_orca_version=(
+                self.runtime_config.expected_orca_version
+                if self.runtime_config.profile == "real"
+                else None
+            ),
         )
         self.p6 = p6_service or P6ApplicationService(self.state_root, clock=self.clock)
         self.presenter = P7ResultPresenter()
@@ -141,6 +162,11 @@ class P7TaskService:
             ],
             "delivery": None if delivery is None else delivery.model_dump(mode="json"),
         }
+        if task.state is TaskPhase.PLAN_READY and not self.runtime_config.execution_ready:
+            result["execution_blocked"] = {
+                "code": "execution_not_ready",
+                "reasons": list(self.runtime_config.execution_readiness_reasons),
+            }
         if task.p4_run_id:
             result["p4"] = self._safe_inspect(self.p4.inspect, RunId(task.p4_run_id))
         if task.p5_run_id:
@@ -206,7 +232,8 @@ class P7TaskService:
                 link_kind="active",
                 now=now,
             )
-            if state is TaskPhase.PLAN_READY:
+            if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
+                execution_profile = self._plan_execution_profile(normalized.plan.protocol_id)
                 self._insert_pending(
                     records,
                     conversation_id=conversation,
@@ -222,6 +249,8 @@ class P7TaskService:
                         "output_spec_hash": normalized.request.output_spec.output_spec_hash,
                         "capability_id": normalized.plan.capability_id,
                         "capability_version": normalized.plan.capability_version,
+                        "execution_profile": execution_profile,
+                        "execution_profile_hash": sha256_hex(execution_profile),
                     },
                     now=now,
                 )
@@ -342,6 +371,21 @@ class P7TaskService:
             if pending.action_type == "accept_plan":
                 if task is None or task.plan is None or task.request is None:
                     raise StateIntegrityError("plan approval is missing its task plan")
+                pending_payload = thaw_json(pending.payload)
+                if not isinstance(pending_payload, dict):
+                    raise StateIntegrityError("plan approval payload is not an object")
+                expected_profile = pending_payload.get("execution_profile")
+                expected_profile_hash = pending_payload.get("execution_profile_hash")
+                if isinstance(expected_profile, dict) and expected_profile_hash != sha256_hex(
+                    expected_profile
+                ):
+                    raise StateIntegrityError("plan approval execution profile is invalid")
+                if isinstance(expected_profile, dict) and expected_profile_hash != sha256_hex(
+                    self._plan_execution_profile(task.plan.protocol_id)
+                ):
+                    raise InvalidTransitionError(
+                        "the saved execution profile differs from the current P7 profile"
+                    )
                 p4_run_id = new_id(RunId)
                 p4_conversation_id = new_id(ConversationId)
                 command_id = new_id(CommandId)
@@ -474,11 +518,23 @@ class P7TaskService:
             "provider": (
                 IdentityProvider.LOCAL.value
                 if request.molecule_kind is MoleculeInputType.SMILES
-                else IdentityProvider.FAKE.value
+                else (
+                    IdentityProvider.PUBCHEM.value
+                    if self.runtime_config.identity_provider == "pubchem"
+                    else IdentityProvider.FAKE.value
+                )
             ),
             "protocol_id": _P4_PROTOCOL_ID,
             "new_conversation": True,
             "requested_at_utc": format_utc(now),
+        }
+
+    def _plan_execution_profile(self, protocol_id: str) -> dict[str, object]:
+        return {
+            "profile": self.runtime_config.public_dict(),
+            "profile_hash": self.runtime_config.profile_hash,
+            "protocol_id": protocol_id,
+            "protocol_hash": P5_DEFAULT_PROTOCOL.protocol_hash,
         }
 
     def _submit_p4_handoff(self, task: TaskRecord, handoff: HandoffRecord) -> object:
@@ -551,6 +607,20 @@ class P7TaskService:
     def _approve_execution(
         self, task: TaskRecord, payload: dict[str, object], now: datetime
     ) -> object:
+        profile = payload.get("execution_profile")
+        profile_hash = payload.get("execution_profile_hash")
+        if profile is not None:
+            if not isinstance(profile, dict) or profile_hash != sha256_hex(profile):
+                raise StateIntegrityError("execution approval profile is invalid")
+            profile_hash_value = profile.get("profile_hash")
+            if profile_hash_value is not None:
+                # The nested hash is a display/provenance value; the outer
+                # hash above binds the whole approval card.  A changed runtime
+                # cannot reuse a token created under another profile.
+                if profile_hash_value != self.runtime_config.profile_hash:
+                    raise InvalidTransitionError(
+                        "execution approval was created under a different P7 profile"
+                    )
         result = self.p5.approve(
             run_id=RunId(str(payload["run_id"])),
             conversation_id=ConversationId(str(payload["conversation_id"])),
@@ -624,6 +694,8 @@ class P7TaskService:
             raise ValueError("max_effects must be positive")
         if max_seconds <= 0:
             raise ValueError("max_seconds must be positive")
+        if allow_real_orca is None:
+            allow_real_orca = self.allow_real_orca
         started = time.monotonic()
         effects = 0
         activity: list[dict[str, object]] = []
@@ -684,6 +756,26 @@ class P7TaskService:
             )
             if replay is not None:
                 return replay
+            if (
+                p4_view.candidate_bundle is None
+                or not p4_view.candidate_bundle.confirmable
+                or len(p4_view.candidate_bundle.candidates) != 1
+            ):
+                return 0, {
+                    "task_id": task.task_id,
+                    "step": "identity_clarification",
+                    "reason": "identity_candidate_is_not_unique",
+                    "candidate_count": (
+                        0
+                        if p4_view.candidate_bundle is None
+                        else len(p4_view.candidate_bundle.candidates)
+                    ),
+                    "reason_codes": (
+                        []
+                        if p4_view.candidate_bundle is None
+                        else list(p4_view.candidate_bundle.reason_codes)
+                    ),
+                }
             token = self._ensure_identity_action(task, p4_view)
             if token is None:
                 return 1, {
@@ -719,6 +811,13 @@ class P7TaskService:
             )
             if replay is not None:
                 return replay
+            if not self.runtime_config.execution_ready:
+                return 0, {
+                    "task_id": task.task_id,
+                    "step": "execution_blocked",
+                    "reason": "real_execution_not_ready",
+                    "details": list(self.runtime_config.execution_readiness_reasons),
+                }
             token = self._ensure_approval_action(latest, p5_view)
             return 0, {"task_id": task.task_id, "step": "execution_pending", "token": token}
         if p5_view.state.phase in {
@@ -734,6 +833,15 @@ class P7TaskService:
                 "task_id": task.task_id,
                 "step": "p5.worker",
                 "reports": [_as_json(item) for item in reports],
+            }
+        if p5_view.state.phase is P5Phase.NEEDS_RECONCILIATION:
+            self._refresh_task_state_if_needed(task, TaskPhase.RECONCILIATION_REQUIRED)
+            return 0, {
+                "task_id": task.task_id,
+                "step": "reconciliation_required",
+                "reason": p5_view.state.last_error_message
+                or p5_view.state.last_outcome_code
+                or "launch_state_unknown",
             }
         if p5_view.state.phase in {P5Phase.FAILED, P5Phase.CANCELLED}:
             self._create_delivery(task, p5_view=p5_view, p6_view=None)
@@ -983,6 +1091,7 @@ class P7TaskService:
         if view.action is None or view.binding is None:
             raise StateIntegrityError("P5 approval phase has no action/binding")
         now = _now(self.clock)
+        execution_profile = self._execution_profile(view)
         payload = {
             "run_id": str(view.run_id),
             "conversation_id": str(view.conversation_id),
@@ -996,6 +1105,9 @@ class P7TaskService:
             "node_id": view.action.node_id,
             "primitive_id": view.action.primitive_id,
             "budget": view.binding.budget.model_dump(mode="json"),
+            "execution_profile": execution_profile,
+            "execution_profile_hash": sha256_hex(execution_profile),
+            "confirmation": self._confirmation_card(task, view),
         }
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
@@ -1025,6 +1137,69 @@ class P7TaskService:
             )
             uow.commit()
             return action.token
+
+    def _execution_profile(self, view) -> dict[str, object]:
+        binding = view.binding
+        if binding is None:
+            raise StateIntegrityError("execution profile has no binding")
+        return {
+            "profile": self.runtime_config.public_dict(),
+            "profile_hash": self.runtime_config.profile_hash,
+            "backend_kind": binding.backend_kind,
+            "orca_version": binding.orca_version,
+            "executable_sha256": binding.executable_sha256,
+            "protocol_id": view.plan.protocol_id,
+            "protocol_hash": view.plan.protocol_hash,
+            "node_id": None if view.action is None else view.action.node_id,
+            "budget": binding.budget.model_dump(mode="json"),
+        }
+
+    def _confirmation_card(self, task: TaskRecord, view) -> dict[str, object]:
+        molecule: dict[str, object] = {
+            "input_kind": None,
+            "original_input": None,
+            "name_cas_cid": None,
+            "canonical_smiles": None,
+            "formula": None,
+            "charge": None,
+            "multiplicity": None,
+            "source": None,
+            "unique_candidate": False,
+        }
+        request = task.request
+        if request is not None:
+            molecule["input_kind"] = (
+                None if request.molecule_kind is None else request.molecule_kind.value
+            )
+            molecule["original_input"] = request.molecule_value
+            molecule["charge"] = None if request.charge is None else request.charge.value
+            molecule["multiplicity"] = (
+                None if request.multiplicity is None else request.multiplicity.value
+            )
+            if request.molecule_kind is not None and request.molecule_kind.value in {
+                "name",
+                "cas",
+                "cid",
+            }:
+                molecule["name_cas_cid"] = request.molecule_value
+        try:
+            if task.p4_run_id:
+                p4_view = self.p4.inspect(RunId(task.p4_run_id))
+                confirmed = p4_view.confirmed_molecule
+                if confirmed is not None:
+                    molecule.update(
+                        {
+                            "canonical_smiles": confirmed.canonical_isomeric_smiles,
+                            "formula": confirmed.molecular_formula,
+                            "source": confirmed.provider.value,
+                            "unique_candidate": True,
+                        }
+                    )
+        except Exception:
+            # Confirmation is a display aid; the typed P5 hashes remain the
+            # authoritative approval boundary.
+            pass
+        return molecule
 
     def _ensure_p6(self, task: TaskRecord, p5_view) -> tuple[int, dict[str, object]]:
         now = _now(self.clock)
@@ -1187,6 +1362,45 @@ class P7TaskService:
             return delivery
 
     # Direct task controls -------------------------------------------
+    def reconcile_task(
+        self, conversation_id: ConversationId | str, task_id: str
+    ) -> dict[str, object]:
+        """Reconcile an existing P5 launch without creating a new job."""
+
+        task = self.get_task(conversation_id, task_id)
+        if task is None:
+            raise ValueError("task was not found in this conversation")
+        if not task.p5_run_id:
+            raise InvalidTransitionError("task has no P5 execution to reconcile")
+        p5_view = self.p5.inspect(RunId(task.p5_run_id))
+        if p5_view.state.phase is P5Phase.NEEDS_RECONCILIATION:
+            reports = self.p5.create_worker(allow_real_orca=self.allow_real_orca).run_once(
+                run_id=p5_view.run_id, limit=1
+            )
+            p5_view = self.p5.inspect(p5_view.run_id)
+        else:
+            reports = ()
+        phase = p5_view.state.phase
+        if phase is P5Phase.NEEDS_RECONCILIATION:
+            self._refresh_task_state_if_needed(task, TaskPhase.RECONCILIATION_REQUIRED)
+        elif phase in {
+            P5Phase.DISPATCH_PENDING,
+            P5Phase.RUNNING,
+            P5Phase.COLLECTING,
+            P5Phase.CANCELLING,
+        }:
+            self._refresh_task_state_if_needed(task, TaskPhase.EXECUTING)
+        elif phase is P5Phase.COMPLETED:
+            self._refresh_task_state_if_needed(task, TaskPhase.ASSESSING)
+        elif phase in {P5Phase.FAILED, P5Phase.CANCELLED}:
+            self._create_delivery(task, p5_view=p5_view, p6_view=None)
+        refreshed = self.get_task(conversation_id, task_id) or task
+        return self._view(refreshed) | {
+            "reconciled": True,
+            "reports": [_as_json(item) for item in reports],
+            "p5_phase": phase.value,
+        }
+
     def cancel_task(
         self,
         conversation_id: ConversationId | str,

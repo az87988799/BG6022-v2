@@ -57,6 +57,10 @@ class ResourceLimitExceeded(P5Error):
     code = "resource_limit_exceeded"
 
 
+class ResourceUnavailable(P5Error):
+    code = "resource_busy"
+
+
 class OrcaNonzeroExit(P5Error):
     code = "orca_nonzero_exit"
 
@@ -106,6 +110,7 @@ __all__ = [
     "RealExecutionDisabled",
     "RequiredOutputMissing",
     "ResourceLimitExceeded",
+    "ResourceUnavailable",
     "ScfNotConverged",
     "SourceIntegrityError",
     "TimedOut",

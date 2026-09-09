@@ -1,19 +1,23 @@
 BG6022 P7 intake planner
-schema_version: p7.turn.v1
-prompt_version: p7.intake-plan.v1
+schema_version: p7.turn.v2
+prompt_version: p7.intake-plan.v2
 
-Return one JSON object only, matching the published p7.intake-plan.v1 schema.
+Return one JSON object only, matching the published p7.intake-plan.v2 schema.
 Preserve the user's ordered subrequests and explicit constraints. Use no more
 than four ordered subrequests and at most one new calculation in a turn.
 
 The only intent objects are:
 
 - chemical_calculation: action, molecule_kind/molecule_value, charge,
-  multiplicity, operations, method, environment, output_spec, and explicit
-  missing_fields or prohibited_requests when applicable.
+  multiplicity, operations, method, environment, parameter_evidence,
+  output_spec, and explicit missing_fields or prohibited_requests when
+  applicable. parameter_evidence must quote only text from the current user
+  message for method, environment, charge, or multiplicity; if absent, leave
+  the corresponding parameter unresolved for the application to recommend or
+  clarify.
 - chemistry_qa: required question, optional task_alias, answer_draft,
   requires_task_context, and cited_fact_aliases.
-- general_qa: required question and optional answer_draft.
+- general_qa: required question and a non-empty answer_draft.
 - context_query: required query, optional task_alias, output_spec, and
   requested_display_change.
 
@@ -25,7 +29,7 @@ capability, structure, electronic-state, output, and approval validation.
 
 Minimal examples:
 
-{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"general_qa","question":"你好"}]}
-{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"chemistry_qa","question":"优化和单点有什么区别？","requires_task_context":false}]}
-{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"context_query","query":"刚才算完了吗？","task_alias":"当前任务"}]}
-{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"context_query","query":"只显示独立单点能量，保留六位小数","task_alias":"当前任务","requested_display_change":true,"output_spec":{"schema_version":"p7.output.v1","quantities":[{"kind":"independent_sp_electronic_energy","required":true}],"precision":6}}]}
+{"schema_version":"p7.turn.v2","prompt_version":"p7.intake-plan.v2","subrequests":[{"intent":"general_qa","question":"你好","answer_draft":"你好，我可以帮助你查询或规划任务。"}]}
+{"schema_version":"p7.turn.v2","prompt_version":"p7.intake-plan.v2","subrequests":[{"intent":"chemistry_qa","question":"优化和单点有什么区别？","answer_draft":"优化改变几何结构，单点在给定结构上计算能量。","requires_task_context":false}]}
+{"schema_version":"p7.turn.v2","prompt_version":"p7.intake-plan.v2","subrequests":[{"intent":"context_query","query":"刚才算完了吗？","task_alias":"当前任务"}]}
+{"schema_version":"p7.turn.v2","prompt_version":"p7.intake-plan.v2","subrequests":[{"intent":"context_query","query":"只显示独立单点能量，保留六位小数","task_alias":"当前任务","requested_display_change":true,"output_spec":{"schema_version":"p7.output.v1","quantities":[{"kind":"independent_sp_electronic_energy","required":true}],"precision":6}}]}

@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from orca_agent.application.p7_runtime_config import load_project_environment
 from orca_agent.domain.p7_conversation import ContextSnapshot
 from orca_agent.llm.ports import ModelCallRequest, ModelCallResponse, ModelMessage
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
 MAX_RESPONSE_BYTES = 256 * 1024
 HTTP_DEADLINE_SECONDS = 45.0
-_PROJECT_ENV_KEYS = frozenset({"DEEPSEEK_API_KEY", "BG6022_P7_MODEL"})
 
 
 class DeepSeekChatAdapter:
@@ -164,10 +163,31 @@ class DeepSeekChatAdapter:
         remaining = max(self.timeout_seconds - (time.monotonic() - started), 0.1)
         timeout = httpx.Timeout(remaining, connect=min(10.0, remaining))
         with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
-            response = client.post(self.endpoint, content=encoded, headers=headers)
-            raw = response.content
+            with client.stream("POST", self.endpoint, content=encoded, headers=headers) as response:
+                chunks: list[bytes] = []
+                total = 0
+                too_large = False
+                for chunk in response.iter_bytes():
+                    if time.monotonic() - started > self.timeout_seconds:
+                        return ModelCallResponse(
+                            provider="deepseek",
+                            model=request.model,
+                            error_code="timeout",
+                            error_message="DeepSeek request exceeded the overall deadline",
+                            raw_bytes=b"".join(chunks)[:MAX_RESPONSE_BYTES],
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                        )
+                    total += len(chunk)
+                    if total > MAX_RESPONSE_BYTES:
+                        too_large = True
+                        remaining = max(MAX_RESPONSE_BYTES - (total - len(chunk)), 0)
+                        if remaining:
+                            chunks.append(chunk[:remaining])
+                        break
+                    chunks.append(chunk)
+                raw = b"".join(chunks)
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if len(raw) > MAX_RESPONSE_BYTES:
+            if too_large:
                 return ModelCallResponse(
                     provider="deepseek",
                     model=request.model,
@@ -198,11 +218,30 @@ class DeepSeekChatAdapter:
                 document = json.loads(raw)
                 choice = document["choices"][0]
                 message = choice["message"]
+                if message.get("refusal"):
+                    raise _ProviderOutputError("model_refusal", "DeepSeek refused the request")
+                if message.get("tool_calls"):
+                    raise _ProviderOutputError(
+                        "tool_call_not_allowed", "DeepSeek returned a tool call"
+                    )
                 content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("response content is empty")
+                if choice.get("finish_reason") == "length":
+                    raise _ProviderOutputError(
+                        "model_output_truncated", "DeepSeek output reached the token limit"
+                    )
                 usage = document.get("usage", {})
                 request_id = document.get("id")
+            except _ProviderOutputError as error:
+                return ModelCallResponse(
+                    provider="deepseek",
+                    model=request.model,
+                    error_code=error.code,
+                    error_message=error.message,
+                    raw_bytes=raw,
+                    elapsed_ms=elapsed_ms,
+                )
             except (TypeError, ValueError, KeyError, IndexError) as error:
                 return ModelCallResponse(
                     provider="deepseek",
@@ -252,31 +291,7 @@ def _runtime_environment(environ: Mapping[str, str] | None) -> Mapping[str, str]
 
     if environ is not None:
         return environ
-    values = dict(os.environ)
-    env_path = _project_env_path()
-    try:
-        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
-    except FileNotFoundError:
-        return values
-    except OSError:
-        return values
-    for line in lines:
-        entry = line.strip()
-        if not entry or entry.startswith("#"):
-            continue
-        if entry.startswith("export "):
-            entry = entry[7:].lstrip()
-        key, separator, raw_value = entry.partition("=")
-        key = key.strip()
-        if not separator or key not in _PROJECT_ENV_KEYS:
-            continue
-        if values.get(key):
-            continue
-        value = raw_value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[key] = value
-    return values
+    return load_project_environment(_project_env_path().parent)
 
 
 def _project_env_path() -> Path:
@@ -287,6 +302,13 @@ def _project_env_path() -> Path:
         if (parent / "pyproject.toml").is_file():
             return parent / ".env"
     return current
+
+
+class _ProviderOutputError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 __all__ = [
