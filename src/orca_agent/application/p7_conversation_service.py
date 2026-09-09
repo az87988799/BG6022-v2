@@ -9,7 +9,7 @@ from pathlib import Path
 
 from orca_agent.application.errors import InvalidTransitionError, RevisionConflictError
 from orca_agent.application.p7_query_service import P7QueryService
-from orca_agent.application.p7_runtime_config import P7RuntimeConfig
+from orca_agent.application.p7_runtime_config import LEGACY_PROFILE, P7RuntimeConfig
 from orca_agent.application.p7_task_service import P7TaskService
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import AttemptId, ConversationId, TurnId, new_id
@@ -32,6 +32,7 @@ from orca_agent.domain.p7_conversation import (
     TurnRecord,
     TurnStatus,
 )
+from orca_agent.domain.p7_planning import PlanProposal
 from orca_agent.domain.p7_task import (
     StopReason,
     TaskPhase,
@@ -51,9 +52,12 @@ from orca_agent.orchestration.p7_versions import (
     P7_POLICY_VERSION,
     PROMPT_VERSION,
     PROMPT_VERSION_V2,
+    PROMPT_VERSION_V3,
     TURN_SCHEMA,
     TURN_SCHEMA_V2,
+    TURN_SCHEMA_V3,
 )
+from orca_agent.planning.p7_plan_compiler import operations_from_proposal, proposal_from_operations
 from orca_agent.planning.p7_validator import P7PlanValidator
 
 _MODEL_LEASE_SECONDS = 90
@@ -116,7 +120,10 @@ class P7ConversationService:
             raise ValueError("real DeepSeek profiles require fallback=none")
         self.allow_llm = self.runtime_config.allow_llm
         self.planner_name = self.runtime_config.planner_name
-        self.validator = P7PlanValidator(self.task_service.catalog)
+        self.validator = P7PlanValidator(
+            self.task_service.catalog,
+            enable_candidate_planning=self.runtime_config.profile != LEGACY_PROFILE,
+        )
 
     # Conversation lifecycle ----------------------------------------
     def new_conversation(
@@ -310,6 +317,12 @@ class P7ConversationService:
         self, conversation: str, text: str
     ) -> tuple[ConversationState, TurnRecord, ContextSnapshot]:
         now = self.clock.now_utc()
+        trusted_opt_sources: dict[str, dict[str, object]] = {}
+        if self.validator.enable_candidate_planning:
+            try:
+                trusted_opt_sources = self.task_service.trusted_opt_sources(conversation)
+            except Exception:
+                trusted_opt_sources = {}
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
             records = P7RecordRepository(uow.connection)
@@ -327,7 +340,12 @@ class P7ConversationService:
                     TurnStatus.CANCELLED,
                 }:
                     raise InvalidTransitionError("turn_in_progress")
-            context = self._context_snapshot(records, state, text)
+            context = self._context_snapshot(
+                records,
+                state,
+                text,
+                trusted_opt_sources=trusted_opt_sources,
+            )
             turn = TurnRecord.create(
                 turn_id=str(new_id(TurnId)),
                 conversation_id=ConversationId(conversation),
@@ -356,6 +374,8 @@ class P7ConversationService:
         records: P7RecordRepository,
         state: ConversationState,
         text: str,
+        *,
+        trusted_opt_sources: dict[str, dict[str, object]] | None = None,
     ) -> ContextSnapshot:
         tasks = records.list_tasks(str(state.conversation_id))
         turns = records.list_turns(str(state.conversation_id), limit=12)
@@ -382,10 +402,30 @@ class P7ConversationService:
         )
         pending_actions = records.list_pending(str(state.conversation_id))
         deepseek_input = getattr(self.planner, "adapter_id", "") == "deepseek_chat"
+        trusted_opt_sources = trusted_opt_sources or {}
+        trusted_objects: dict[str, dict[str, object]] = {}
+        for value in trusted_opt_sources.values():
+            task_id = value.get("task_id")
+            alias = value.get("alias")
+            if not isinstance(task_id, str) or not isinstance(alias, str):
+                continue
+            trusted_objects[task_id] = {
+                "task_id": task_id,
+                "alias": alias,
+                "input_ref": f"task:{alias}.optimized_geometry",
+                "result_id": value.get("result_id"),
+                "source_run_id": value.get("source_run_id"),
+                "protocol_id": value.get("protocol_id"),
+                "protocol_hash": value.get("protocol_hash"),
+                "confirmed_molecule_hash": value.get("confirmed_molecule_hash"),
+                "completed": True,
+            }
+        planning_records = records.list_planning_records(conversation_id=str(state.conversation_id))
         facts = {
             "policy_version": P7_POLICY_VERSION,
-            "prompt_version": PROMPT_VERSION_V2 if deepseek_input else PROMPT_VERSION,
-            "model_input_schema_version": TURN_SCHEMA_V2 if deepseek_input else TURN_SCHEMA,
+            "prompt_version": PROMPT_VERSION_V3 if deepseek_input else PROMPT_VERSION,
+            "model_input_schema_version": TURN_SCHEMA_V3 if deepseek_input else TURN_SCHEMA,
+            "candidate_planning_enabled": self.validator.enable_candidate_planning,
             "runtime_profile": self.runtime_config.profile,
             "model": self.runtime_config.model,
             "model_call_budget": self.runtime_config.model_call_budget,
@@ -404,7 +444,37 @@ class P7ConversationService:
                 }
                 for item in pending_actions
             ],
+            "trusted_opt_sources": sorted(
+                trusted_objects.values(),
+                key=lambda item: (str(item["alias"]), str(item["task_id"])),
+            ),
+            "planning_feedback": [
+                {
+                    "proposal_id": item.proposal_id,
+                    "task_id": item.task_id,
+                    "task_revision": item.task_revision,
+                    "validation_status": item.validation_status.value,
+                    "validation_issues": list(item.validation_issues),
+                    "feedback": item.feedback.model_dump(mode="json"),
+                }
+                for item in planning_records[-12:]
+            ],
         }
+        if self.validator.enable_candidate_planning:
+            facts["planning_rules"] = {
+                "max_nodes": 3,
+                "real_concurrency": 1,
+                "total_memory_mb": 2048,
+                "maxcore_mb": 384,
+                "allowed_sequences": [
+                    ["opt"],
+                    ["sp"],
+                    ["opt", "freq"],
+                    ["opt", "sp"],
+                    ["opt", "freq", "sp"],
+                    ["freq_from_completed_opt"],
+                ],
+            }
         while True:
             plain = {
                 "schema_version": TURN_SCHEMA,
@@ -473,12 +543,12 @@ class P7ConversationService:
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
             "prompt_version": (
-                PROMPT_VERSION_V2
+                PROMPT_VERSION_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else PROMPT_VERSION
             ),
             "schema_version": (
-                TURN_SCHEMA_V2
+                TURN_SCHEMA_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else TURN_SCHEMA
             ),
@@ -551,8 +621,11 @@ class P7ConversationService:
                 "invalid_model_output",
             )
         if response.provider == "deepseek" and (
-            interpretation.schema_version != TURN_SCHEMA_V2
-            or interpretation.prompt_version != PROMPT_VERSION_V2
+            (interpretation.schema_version, interpretation.prompt_version)
+            not in {
+                (TURN_SCHEMA_V2, PROMPT_VERSION_V2),
+                (TURN_SCHEMA_V3, PROMPT_VERSION_V3),
+            }
         ):
             if self.fallback == "baseline":
                 return (
@@ -585,12 +658,12 @@ class P7ConversationService:
             "model": getattr(planner, "model", None),
             "context_hash": context.snapshot_hash,
             "prompt_version": (
-                PROMPT_VERSION_V2
+                PROMPT_VERSION_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else PROMPT_VERSION
             ),
             "schema_version": (
-                TURN_SCHEMA_V2
+                TURN_SCHEMA_V3
                 if getattr(planner, "adapter_id", "") == "deepseek_chat"
                 else TURN_SCHEMA
             ),
@@ -1008,28 +1081,31 @@ class P7ConversationService:
             for character in text.strip().casefold()
             if character not in {" ", "\t", "\r", "\n", ",", "，", "。", ".", "!", "！", "?", "？"}
         )
-        if collapsed not in {
-            "好",
-            "好的",
-            "可以",
-            "行",
-            "继续",
-            "这个",
-            "接受",
-            "接受计划",
-            "接受这个",
-            "开始吧",
-            "继续执行",
-            "goahead",
-            "approve",
-            "accept",
-        }:
+        action_by_token = {
+            "接受计划": "accept_plan",
+            "接受这个计划": "accept_plan",
+            "确认计划": "accept_plan",
+            "approveplan": "accept_plan",
+            "acceptplan": "accept_plan",
+            "确认身份": "confirm_identity",
+            "确认这个分子": "confirm_identity",
+            "confirmidentity": "confirm_identity",
+            "批准执行": "approve_execution",
+            "批准节点": "approve_execution",
+            "继续执行": "approve_execution",
+            "goahead": "approve_execution",
+            "approve": "approve_execution",
+        }
+        expected_action = action_by_token.get(collapsed)
+        if expected_action is None:
             return None
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
             records = P7RecordRepository(uow.connection)
             pending = tuple(
-                item for item in records.list_pending(conversation) if item.status == "pending"
+                item
+                for item in records.list_pending(conversation)
+                if item.status == "pending" and item.action_type == expected_action
             )
             uow.commit()
         if len(pending) != 1:
@@ -1119,6 +1195,41 @@ class P7ConversationService:
                 "pending_actions": pending,
             }
         task = self._resolve_task(conversation, intent.task_alias)
+        if (
+            task is not None
+            and intent.action in {CalculationAction.PLAN_NEW, CalculationAction.REVISE_DRAFT}
+            and task.state
+            in {
+                TaskPhase.PLAN_READY,
+                TaskPhase.NEEDS_CLARIFICATION,
+                TaskPhase.DRAFT,
+            }
+            and task.accepted_plan_hash is None
+            and task.p4_run_id is None
+            and task.p5_run_id is None
+            and self._looks_like_plan_revision(turn.user_text)
+        ):
+            desired = self._revision_operations(task, intent, turn.user_text)
+            intent = intent.model_copy(
+                update={
+                    "action": CalculationAction.REVISE_DRAFT,
+                    "task_alias": task.alias,
+                    "operations": desired,
+                    "plan_proposal": proposal_from_operations(
+                        desired,
+                        goal=turn.user_text,
+                        requested_outputs=tuple(
+                            item.kind.value
+                            for item in (
+                                task.request.output_spec.quantities
+                                if task.request is not None
+                                else ()
+                            )
+                        ),
+                        action=CalculationAction.REVISE_DRAFT.value,
+                    ).model_dump(mode="json"),
+                }
+            )
         acceptance = self._is_recommendation_acceptance(turn.user_text)
         existing = (
             task.request
@@ -1127,7 +1238,11 @@ class P7ConversationService:
             in {
                 TaskPhase.NEEDS_CLARIFICATION,
                 TaskPhase.DRAFT,
+                TaskPhase.PLAN_READY,
             }
+            and task.accepted_plan_hash is None
+            and task.p4_run_id is None
+            and task.p5_run_id is None
             else None
         )
         if intent.action is CalculationAction.REVISE_DRAFT and existing is None:
@@ -1135,17 +1250,61 @@ class P7ConversationService:
                 "text": "当前没有可修改的待澄清计算草稿。",
                 "payload": {"code": "draft_not_found"},
             }
+        trusted_artifacts = self.task_service.trusted_opt_sources(conversation)
+        source_request = None
+        # A completed Opt may be the immutable source for a new Freq-only
+        # task.  Keep the new task/revision boundary, but carry the exact P4
+        # identity and parameter provenance forward instead of asking P4 to
+        # resolve the molecule again.
+        if (
+            task is not None
+            and task.request is not None
+            and intent.action is CalculationAction.PLAN_NEW
+            and self._operations_for_intent(intent) == ("freq",)
+            and intent.molecule_kind is None
+            and intent.molecule_value is None
+            and intent.charge is None
+            and intent.multiplicity is None
+            and intent.method is None
+            and intent.environment is None
+        ):
+            raw_output = thaw_json(intent.output_spec)
+            requested_outputs = (
+                tuple(
+                    str(item["kind"])
+                    for item in raw_output.get("quantities", [])
+                    if isinstance(item, dict) and isinstance(item.get("kind"), str)
+                )
+                if isinstance(raw_output, dict)
+                else ()
+            )
+            source_request = task.request
+            intent = intent.model_copy(
+                update={
+                    "task_alias": task.alias,
+                    "plan_proposal": proposal_from_operations(
+                        ("freq",),
+                        goal=turn.user_text,
+                        requested_outputs=requested_outputs
+                        or ("vibrational_frequencies", "local_minimum_support"),
+                        action=CalculationAction.PLAN_NEW.value,
+                        source_input_ref=f"task:{task.alias}.optimized_geometry",
+                    ).model_dump(mode="json"),
+                }
+            )
         normalized = self.validator.normalize(
             intent,
             turn_id=turn.turn_id,
             existing_request=existing,
+            source_request=source_request,
             accept_recommendations=acceptance,
             user_text=turn.user_text,
+            trusted_artifacts=trusted_artifacts,
         )
         if task is not None and existing is not None:
             # A revised draft gets a new task revision but keeps the stable
             # alias.  Old pending plan tokens are made stale by the update.
-            return self._revise_task(conversation, task, normalized)
+            return self._revise_task(conversation, task, normalized, turn_id=turn.turn_id)
         view = self.task_service.create_task(
             conversation,
             alias=intent.task_alias,
@@ -1161,7 +1320,9 @@ class P7ConversationService:
             "pending_actions": view.get("pending_actions", []),
         }
 
-    def _revise_task(self, conversation: str, task: TaskRecord, normalized) -> dict[str, object]:
+    def _revise_task(
+        self, conversation: str, task: TaskRecord, normalized, *, turn_id: str
+    ) -> dict[str, object]:
         # TaskService intentionally exposes creation as the normal path; for a
         # draft revision preserve the task identity and increment its revision
         # in one P7 transaction.
@@ -1172,7 +1333,13 @@ class P7ConversationService:
             current = records.get_task(conversation, task.task_id)
             if current is None:
                 raise ValueError("draft task disappeared")
-            if current.state not in {TaskPhase.NEEDS_CLARIFICATION, TaskPhase.DRAFT}:
+            if (
+                current.state
+                not in {TaskPhase.NEEDS_CLARIFICATION, TaskPhase.DRAFT, TaskPhase.PLAN_READY}
+                or current.accepted_plan_hash is not None
+                or current.p4_run_id is not None
+                or current.p5_run_id is not None
+            ):
                 raise InvalidTransitionError("task draft is no longer editable")
             state = (
                 TaskPhase.PLAN_READY
@@ -1204,6 +1371,13 @@ class P7ConversationService:
             records.stale_task_pending(current.task_id, new_revision=updated.revision)
             if not records.update_task(updated, expected_revision=current.revision):
                 raise RevisionConflictError("draft revision raced with another update")
+            self.task_service._insert_planning_record(
+                records,
+                task=updated,
+                normalized=normalized,
+                turn_id=turn_id,
+                now=now,
+            )
             if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
                 execution_profile = self.task_service._plan_execution_profile(
                     normalized.plan.protocol_id
@@ -1237,6 +1411,60 @@ class P7ConversationService:
             "pending_actions": view.get("pending_actions", []),
         }
 
+    @staticmethod
+    def _looks_like_plan_revision(text: str) -> bool:
+        lowered = text.casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "去掉",
+                "删除",
+                "移除",
+                "保留优化",
+                "改成只做",
+                "remove",
+                "without",
+                "drop",
+            )
+        ) and any(marker in lowered for marker in ("频率", "freq", "单点", "sp", "优化", "opt"))
+
+    @staticmethod
+    def _revision_operations(
+        task: TaskRecord, intent: CalculationIntent, text: str
+    ) -> tuple[str, ...]:
+        current = (
+            tuple(task.request.operations) if task.request is not None else ("opt", "freq", "sp")
+        )
+        lowered = text.casefold()
+        if any(
+            marker in lowered
+            for marker in (
+                "去掉频率",
+                "删除频率",
+                "移除频率",
+                "without freq",
+                "without frequency",
+                "remove freq",
+                "remove frequency",
+                "drop freq",
+                "drop frequency",
+            )
+        ):
+            return tuple(item for item in current if item != "freq") or ("opt",)
+        if any(
+            marker in lowered
+            for marker in ("去掉单点", "删除单点", "移除单点", "remove sp", "drop sp")
+        ):
+            return tuple(item for item in current if item != "sp") or ("opt",)
+        if any(
+            marker in lowered
+            for marker in ("去掉优化", "删除优化", "移除优化", "remove opt", "drop opt")
+        ):
+            return tuple(item for item in current if item != "opt") or ("sp",)
+        if intent.operations:
+            return tuple(intent.operations)
+        return current
+
     def _resolve_task(self, conversation: str, alias: str | None) -> TaskRecord | None:
         tasks = self.task_service.list_tasks(conversation)
         if alias:
@@ -1264,22 +1492,47 @@ class P7ConversationService:
             return next((item for item in tasks if item.task_id == state.active_task_id), None)
         return None
 
+    def _operations_for_intent(self, intent: CalculationIntent) -> tuple[str, ...]:
+        """Read execution scope from either the legacy field or the v3 proposal."""
+
+        if intent.operations:
+            return tuple(intent.operations)
+        if intent.plan_proposal is None:
+            return ()
+        try:
+            proposal = PlanProposal.model_validate_json(
+                json.dumps(thaw_json(intent.plan_proposal), ensure_ascii=False), strict=True
+            )
+        except (TypeError, ValueError):
+            return ()
+        return operations_from_proposal(proposal, self.task_service.catalog)
+
     @staticmethod
     def _plan_text(view: dict[str, object], validation) -> str:
         task = view["task"]
+        plan = task.get("plan") if isinstance(task, dict) else None
+        labels = {"opt": "Opt", "freq": "Freq", "sp": "独立 SP"}
+        sequence = (
+            " → ".join(
+                labels.get(str(item.get("kind")), str(item.get("kind")))
+                for item in (plan.get("nodes", []) if isinstance(plan, dict) else [])
+                if isinstance(item, dict)
+            )
+            or "未编译"
+        )
         if validation.status is ValidationStatus.VALID:
             blocked = view.get("execution_blocked")
             if isinstance(blocked, dict):
                 reasons = "；".join(str(item) for item in blocked.get("reasons", []))
                 return (
-                    f"已为任务 {task['alias']} 生成受支持的 Opt → Freq → 独立 SP 计划。"
+                    f"已为任务 {task['alias']} 生成受支持的 {sequence} 计划。"
                     "当前 real profile 的 ORCA 执行条件未就绪，已展示计划但没有发放"
                     "可执行确认 token。"
                     f"请先完成本地 doctor 后重新提交或修改计划。原因：{reasons or '未提供'}。"
                 )
             pending = view.get("pending_actions", [])
             return (
-                f"已为任务 {task['alias']} 生成受支持的 Opt → Freq → 独立 SP 计划。"
+                f"已为任务 {task['alias']} 生成受支持的 {sequence} 计划。"
                 "请明确接受计划后才会进入身份确认；不会自动启动执行。"
                 + (f"待办 token：{pending[0]['token']}" if pending else "")
             )
@@ -1316,6 +1569,19 @@ class P7ConversationService:
     @staticmethod
     def _is_recommendation_acceptance(text: str) -> bool:
         lowered = text.casefold()
+        if any(
+            marker in lowered
+            for marker in (
+                "不接受",
+                "不要",
+                "拒绝",
+                "不按",
+                "not accept",
+                "do not accept",
+                "without",
+            )
+        ):
+            return False
         return any(
             item in lowered
             for item in ("接受推荐", "按推荐", "接受这个推荐", "accept recommendation")

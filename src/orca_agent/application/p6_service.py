@@ -402,9 +402,18 @@ class P6ApplicationService:
                 "complete_results": sum(
                     item.parse_status == P5ParseStatus.COMPLETE.value for item in source.results
                 ),
+                "requested_primitives": list(
+                    dict.fromkeys(item.primitive for item in source.results)
+                ),
+                "unrequested_primitives": [
+                    item
+                    for item in ("opt", "freq", "sp")
+                    if item not in {result.primitive for result in source.results}
+                ],
                 "evidence": len(evidence),
                 "claims": len(claims),
                 "minimum_status": None if assessment is None else assessment.minimum_status.value,
+                "minimum_reason": None if assessment is None else assessment.minimum_reason,
                 "report_manifest_id": None
                 if manifest is None
                 else str(manifest.report_manifest_id),
@@ -1289,6 +1298,7 @@ def _make_assessment(
             freq.observations.normal_modes,
             policy,
         )
+    requested_nodes = tuple(dict.fromkeys(item.result.primitive.value for item in bundles))
     evaluation = evaluate_minimum(
         policy=policy,
         opt_converged=opt_converged,
@@ -1298,6 +1308,7 @@ def _make_assessment(
         context_supported=context_supported,
         hessian_complete=hessian_complete,
         mode_analysis=mode_analysis,
+        requested_nodes=requested_nodes,
     )
     evidence_ids = tuple(item.evidence_id for item in ingestion.evidence)
     checks = tuple(
@@ -1426,22 +1437,24 @@ def _make_claims(
                             subject_result_id=bundle.source_ref.result_id,
                         )
                     )
-    subject = next(
-        (
-            item.source_ref.result_id
-            for item in ingestion.results
-            if item.result.primitive is P5NodeKind.FREQ
-        ),
-        ingestion.results[-1].source_ref.result_id,
-    )
-    values.append(
-        build_minimum_claim(
-            assessment=assessment,
-            policy=policy,
-            subject_result_id=subject,
-            evidence_hashes=tuple(item.evidence_hash for item in evidence),
+    requested_nodes = {item.result.primitive.value for item in ingestion.results}
+    if {"opt", "freq"}.issubset(requested_nodes):
+        subject = next(
+            (
+                item.source_ref.result_id
+                for item in ingestion.results
+                if item.result.primitive is P5NodeKind.FREQ
+            ),
+            ingestion.results[-1].source_ref.result_id,
         )
-    )
+        values.append(
+            build_minimum_claim(
+                assessment=assessment,
+                policy=policy,
+                subject_result_id=subject,
+                evidence_hashes=tuple(item.evidence_hash for item in evidence),
+            )
+        )
     return tuple(values)
 
 

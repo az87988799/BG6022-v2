@@ -32,7 +32,93 @@ def evaluate_minimum(
     context_supported: bool,
     hessian_complete: bool,
     mode_analysis: ModeAnalysis | None,
+    requested_nodes: tuple[str, ...] | None = None,
 ) -> MinimumEvaluation:
+    requested = (
+        None
+        if requested_nodes is None
+        else frozenset(item.casefold().strip() for item in requested_nodes)
+    )
+    if requested is not None and not {"opt", "freq"}.issubset(requested):
+        checks = (
+            ScientificCheck(
+                check_id="opt_converged",
+                status=(
+                    "not_applicable"
+                    if "opt" not in requested
+                    else "passed"
+                    if opt_converged
+                    else "failed"
+                ),
+                summary=(
+                    "Opt was not requested"
+                    if "opt" not in requested
+                    else "Opt convergence is required"
+                ),
+            ),
+            ScientificCheck(
+                check_id="freq_complete",
+                status=(
+                    "not_applicable"
+                    if "freq" not in requested
+                    else "passed"
+                    if freq_complete
+                    else "failed"
+                ),
+                summary=(
+                    "Freq was not requested"
+                    if "freq" not in requested
+                    else "Freq output and Hessian are complete"
+                ),
+            ),
+            ScientificCheck(
+                check_id="geometry_binding",
+                status=(
+                    "not_applicable"
+                    if not {"opt", "freq"}.issubset(requested)
+                    else "passed"
+                    if geometry_bound
+                    else "failed"
+                ),
+                summary=(
+                    "Opt/Freq geometry binding is not applicable to this scope"
+                    if not {"opt", "freq"}.issubset(requested)
+                    else "Freq uses the bound optimized geometry"
+                ),
+            ),
+            ScientificCheck(
+                check_id="method_scope",
+                status="passed" if method_supported else "failed",
+                summary="Method and ORCA version are in policy",
+            ),
+            ScientificCheck(
+                check_id="state_scope",
+                status="passed" if context_supported else "failed",
+                summary="Charge, multiplicity and gas environment are in policy",
+            ),
+            ScientificCheck(
+                check_id="hessian",
+                status=(
+                    "not_applicable"
+                    if "freq" not in requested
+                    else "passed"
+                    if hessian_complete
+                    else "failed"
+                ),
+                summary=(
+                    "Hessian was not requested"
+                    if "freq" not in requested
+                    else "Hessian layout is complete"
+                ),
+            ),
+        )
+        return MinimumEvaluation(
+            P6MinimumStatus.INCONCLUSIVE,
+            "minimum_assessment_not_requested",
+            checks,
+            (),
+            ("local_minimum_support_not_requested",),
+        )
     missing: list[str] = []
     for ok, name in (
         (opt_converged, "optimized_geometry_not_converged"),

@@ -12,11 +12,28 @@ from orca_agent.domain.hashing import sha256_hex, verify_sha256
 from orca_agent.domain.ids import WorkflowRecordId, new_id
 from orca_agent.domain.p7_task import OutputKind, P7Model
 from orca_agent.orchestration.p7_versions import CAPABILITY_VIEW_SCHEMA
-from orca_agent.planning.p5_protocols import P5_DEFAULT_PROTOCOL
+from orca_agent.planning.p5_protocols import (
+    P5_DEFAULT_PROTOCOL,
+    P5_FREQ_FROM_OPT_4CORE_2048,
+    P5_OPT_FREQ_4CORE_2048,
+    P5_OPT_FREQ_SP_4CORE_2048,
+    P5_OPT_ONLY_4CORE_2048,
+    P5_OPT_SP_4CORE_2048,
+    P5_SP_INITIAL_4CORE_2048,
+    P5ProtocolSpec,
+)
 from orca_agent.planning.registry import METHOD_R2SCAN3C, fixed_registry_snapshot
 
 P7_BASELINE_CAPABILITY_ID = "chem.ground_state_baseline.v1"
 P7_BASELINE_CAPABILITY_VERSION = "1"
+
+P7_OPT_CAPABILITY_ID = "orca.opt.v1"
+P7_FREQ_CAPABILITY_ID = "orca.freq.v1"
+P7_SP_CAPABILITY_ID = "orca.sp.v1"
+P7_OPT_FREQ_CAPABILITY_ID = "orca.opt_freq.v1"
+P7_OPT_SP_CAPABILITY_ID = "orca.opt_sp.v1"
+P7_OPT_FREQ_SP_CAPABILITY_ID = "orca.opt_freq_sp.v1"
+P7_CAPABILITY_VERSION = "1"
 
 
 def _text(value: str, name: str, maximum: int = 256) -> str:
@@ -198,10 +215,109 @@ def _baseline_descriptor() -> CapabilityDescriptor:
     )
 
 
+def _registered_descriptor(
+    *,
+    capability_id: str,
+    purpose: str,
+    protocol: P5ProtocolSpec,
+    input_kinds: tuple[str, ...] = ("name", "cas", "cid", "smiles"),
+    output_kinds: tuple[OutputKind, ...],
+    dependencies: tuple[str, ...] = ("p4", "p5", "p6"),
+) -> CapabilityDescriptor:
+    registry = fixed_registry_snapshot(record_id=new_id(WorkflowRecordId))
+    return CapabilityDescriptor.create(
+        capability_id=capability_id,
+        version=P7_CAPABILITY_VERSION,
+        purpose=purpose,
+        input_kinds=input_kinds,
+        output_kinds=output_kinds,
+        method_profile_id=METHOD_R2SCAN3C.registry_id,
+        method_profile_hash=METHOD_R2SCAN3C.entry_hash,
+        environment="gas",
+        protocol_id=protocol.protocol_id,
+        protocol_hash=protocol.protocol_hash,
+        registry_snapshot_id=str(registry.record_id),
+        registry_snapshot_hash=registry.snapshot_hash,
+        implementation_id="orca.p5.p6.registered.v1",
+        execution_kind="registered_workflow",
+        dependencies=dependencies,
+    )
+
+
+def _planning_descriptors() -> tuple[CapabilityDescriptor, ...]:
+    energy = (
+        OutputKind.OPT_FINAL_ELECTRONIC_ENERGY,
+        OutputKind.OPTIMIZED_GEOMETRY,
+        OutputKind.EXECUTION_STATUS,
+    )
+    return (
+        _registered_descriptor(
+            capability_id=P7_OPT_CAPABILITY_ID,
+            purpose="one starting geometry; geometry optimization and optional Opt energy",
+            protocol=P5_OPT_ONLY_4CORE_2048,
+            output_kinds=energy,
+        ),
+        _registered_descriptor(
+            capability_id=P7_FREQ_CAPABILITY_ID,
+            purpose="frequency/Hessian check bound to a completed Opt geometry",
+            protocol=P5_FREQ_FROM_OPT_4CORE_2048,
+            input_kinds=("completed_opt",),
+            output_kinds=(
+                OutputKind.VIBRATIONAL_FREQUENCIES,
+                OutputKind.LOCAL_MINIMUM_SUPPORT,
+                OutputKind.EXECUTION_STATUS,
+            ),
+        ),
+        _registered_descriptor(
+            capability_id=P7_SP_CAPABILITY_ID,
+            purpose="independent single point on an explicitly selected geometry",
+            protocol=P5_SP_INITIAL_4CORE_2048,
+            output_kinds=(
+                OutputKind.INDEPENDENT_SP_ELECTRONIC_ENERGY,
+                OutputKind.EXECUTION_STATUS,
+            ),
+        ),
+        _registered_descriptor(
+            capability_id=P7_OPT_FREQ_CAPABILITY_ID,
+            purpose="optimization followed by a frequency/Hessian local-minimum check",
+            protocol=P5_OPT_FREQ_4CORE_2048,
+            output_kinds=(
+                OutputKind.OPT_FINAL_ELECTRONIC_ENERGY,
+                OutputKind.VIBRATIONAL_FREQUENCIES,
+                OutputKind.LOCAL_MINIMUM_SUPPORT,
+                OutputKind.OPTIMIZED_GEOMETRY,
+                OutputKind.EXECUTION_STATUS,
+            ),
+        ),
+        _registered_descriptor(
+            capability_id=P7_OPT_SP_CAPABILITY_ID,
+            purpose="optimization followed by an independent single point on its XYZ",
+            protocol=P5_OPT_SP_4CORE_2048,
+            output_kinds=(
+                OutputKind.OPT_FINAL_ELECTRONIC_ENERGY,
+                OutputKind.INDEPENDENT_SP_ELECTRONIC_ENERGY,
+                OutputKind.OPTIMIZED_GEOMETRY,
+                OutputKind.EXECUTION_STATUS,
+            ),
+        ),
+        _registered_descriptor(
+            capability_id=P7_OPT_FREQ_SP_CAPABILITY_ID,
+            purpose="optimization, frequency check, and independent single point",
+            protocol=P5_OPT_FREQ_SP_4CORE_2048,
+            output_kinds=tuple(OutputKind),
+        ),
+    )
+
+
 def build_capability_catalog(
     extra_modules: Iterable[CapabilityModule] = (),
 ) -> CapabilityCatalog:
-    catalog = CapabilityCatalog((RegisteredCapability(_baseline_descriptor()),))
+    catalog = CapabilityCatalog(
+        tuple(
+            RegisteredCapability(item)
+            for item in (_baseline_descriptor(), *_planning_descriptors())
+        )
+    )
     for module in extra_modules:
         catalog = catalog.register(module)
     return catalog
@@ -213,6 +329,13 @@ __all__ = [
     "CapabilityModule",
     "P7_BASELINE_CAPABILITY_ID",
     "P7_BASELINE_CAPABILITY_VERSION",
+    "P7_CAPABILITY_VERSION",
+    "P7_FREQ_CAPABILITY_ID",
+    "P7_OPT_CAPABILITY_ID",
+    "P7_OPT_FREQ_CAPABILITY_ID",
+    "P7_OPT_FREQ_SP_CAPABILITY_ID",
+    "P7_OPT_SP_CAPABILITY_ID",
+    "P7_SP_CAPABILITY_ID",
     "RegisteredCapability",
     "build_capability_catalog",
 ]

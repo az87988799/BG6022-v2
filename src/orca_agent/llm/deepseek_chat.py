@@ -263,8 +263,8 @@ class DeepSeekChatAdapter:
 
 
 def _system_prompt() -> str:
-    prompt = _read_p7_resource("intake.prompt.txt")
-    schema = _read_p7_resource("intake.schema.json")
+    prompt = _read_p7_resource("intake.v3.prompt.txt")
+    schema = _read_p7_resource("intake.v3.schema.json")
     return f"{prompt}\n\nPublished JSON Schema:\n{schema}"
 
 

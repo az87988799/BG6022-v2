@@ -47,6 +47,7 @@ class P7ChatDriver:
         self.on_conversation_changed = on_conversation_changed
         self._seen_pending: set[str] = set()
         self._seen_terminal: set[str] = set()
+        self._seen_activity: set[str] = set()
 
     def run(self) -> int:
         """Serve stdin until EOF or an explicit exit command."""
@@ -255,6 +256,7 @@ class P7ChatDriver:
             self.conversation_id = str(state["conversation_id"])
             self._seen_pending.clear()
             self._seen_terminal.clear()
+            self._seen_activity.clear()
             self._notify_conversation_changed()
             return {"accepted": True, "code": "new_conversation", **state}
         except Exception as error:
@@ -266,6 +268,7 @@ class P7ChatDriver:
             self.conversation_id = str(state.conversation_id)
             self._seen_pending.clear()
             self._seen_terminal.clear()
+            self._seen_activity.clear()
             self._notify_conversation_changed()
             return {
                 "accepted": True,
@@ -319,8 +322,19 @@ class P7ChatDriver:
             )
         except Exception as error:
             result = self._error("progress_error", error)
-        if result.get("effects") or result.get("activity"):
-            self._emit({"accepted": True, "code": "progress", **result})
+        activity = result.get("activity", [])
+        visible_activity: list[object] = []
+        if isinstance(activity, list):
+            for item in activity:
+                key = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+                if key in self._seen_activity:
+                    continue
+                self._seen_activity.add(key)
+                visible_activity.append(item)
+        if result.get("effects") or visible_activity:
+            progress = {"accepted": True, "code": "progress", **result}
+            progress["activity"] = visible_activity
+            self._emit(progress)
         self._emit_pending_and_terminal(result)
         return result
 

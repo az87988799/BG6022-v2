@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from orca_agent.domain.hashing import sha256_hex
@@ -16,6 +17,7 @@ from orca_agent.domain.p7_conversation import (
     ParameterSource,
     ParameterValue,
 )
+from orca_agent.domain.p7_planning import PlanProposal
 from orca_agent.domain.p7_task import (
     CalculationPlan,
     CalculationRequest,
@@ -37,6 +39,12 @@ from orca_agent.planning.p7_parameter_policy import (
     MoleculePrecheckResult,
     accepted_recommendation,
 )
+from orca_agent.planning.p7_plan_compiler import (
+    P7PlanCompiler,
+    PlanCompilation,
+    operations_from_proposal,
+    proposal_from_operations,
+)
 
 DEFAULT_OPERATIONS = ("opt", "freq", "sp")
 SUPPORTED_METHOD_NAMES = {"r2scan-3c", "r²scan-3c", "r2scan3c", "baseline.r2scan3c.v1"}
@@ -49,6 +57,10 @@ class NormalizedPlan:
     validation: PlanValidation
     plan: CalculationPlan | None
     precheck: MoleculePrecheckResult | None
+    proposal: PlanProposal | None = None
+    compilation: PlanCompilation | None = None
+    source_task_id: str | None = None
+    external_opt_result_id: str | None = None
 
 
 def _parameter(
@@ -79,13 +91,80 @@ def _parameter(
     )
 
 
-def output_spec_from_intent(intent: CalculationIntent) -> OutputSpec:
+def output_spec_for_operations(operations: tuple[str, ...]) -> OutputSpec:
+    """Return the smallest output contract for one approved execution scope."""
+
+    quantities: list[OutputQuantity] = []
+    if operations == ("opt",):
+        quantities.append(OutputQuantity(kind=OutputKind.OPTIMIZED_GEOMETRY))
+    elif operations == ("sp",):
+        quantities.append(
+            OutputQuantity(
+                kind=OutputKind.INDEPENDENT_SP_ELECTRONIC_ENERGY,
+                source_selector="sp",
+            )
+        )
+    elif operations == ("freq",):
+        quantities.extend(
+            (
+                OutputQuantity(kind=OutputKind.VIBRATIONAL_FREQUENCIES, source_selector="freq"),
+                OutputQuantity(kind=OutputKind.LOCAL_MINIMUM_SUPPORT),
+            )
+        )
+    elif operations == ("opt", "freq"):
+        quantities.extend(
+            (
+                OutputQuantity(kind=OutputKind.OPT_FINAL_ELECTRONIC_ENERGY, required=True),
+                OutputQuantity(kind=OutputKind.VIBRATIONAL_FREQUENCIES, source_selector="freq"),
+                OutputQuantity(kind=OutputKind.LOCAL_MINIMUM_SUPPORT),
+            )
+        )
+    elif operations == ("opt", "sp"):
+        quantities.extend(
+            (
+                OutputQuantity(kind=OutputKind.OPTIMIZED_GEOMETRY),
+                OutputQuantity(
+                    kind=OutputKind.INDEPENDENT_SP_ELECTRONIC_ENERGY,
+                    source_selector="sp",
+                ),
+            )
+        )
+    else:
+        return OutputSpec.default()
+    return OutputSpec.create(quantities=quantities)
+
+
+def output_spec_from_intent(
+    intent: CalculationIntent,
+    *,
+    operations: tuple[str, ...] | None = None,
+    base_spec: OutputSpec | None = None,
+) -> OutputSpec:
     """Parse the model's rendering proposal without accepting arbitrary kinds."""
 
     raw = thaw_json(intent.output_spec)
     if not isinstance(raw, dict) or not raw:
-        return OutputSpec.default()
+        if base_spec is not None:
+            return base_spec
+        return (
+            OutputSpec.default() if operations is None else output_spec_for_operations(operations)
+        )
     raw_quantities = raw.get("quantities")
+    if raw_quantities is None:
+        if "quantities" in raw:
+            raise ValueError("output_spec.quantities must be a non-empty array")
+        if base_spec is not None:
+            raw_quantities = [item.model_dump(mode="python") for item in base_spec.quantities]
+        elif operations is not None:
+            raw_quantities = [
+                item.model_dump(mode="python")
+                for item in output_spec_for_operations(operations).quantities
+            ]
+        else:
+            # Formatting-only model output (layout/style/language) does not
+            # change the scientific output scope.  Preserve the historical
+            # default for callers that have no base request yet.
+            return OutputSpec.default()
     if not isinstance(raw_quantities, list) or not raw_quantities:
         raise ValueError("output_spec.quantities must be a non-empty array")
     quantities: list[OutputQuantity] = []
@@ -112,13 +191,17 @@ def output_spec_from_intent(intent: CalculationIntent) -> OutputSpec:
         raise ValueError("output_spec.artifacts must be an array")
     return OutputSpec.create(
         quantities=quantities,
-        language=raw.get("language", "zh"),
-        style=raw.get("style", "concise"),
-        layout=raw.get("layout", "prose"),
-        units=units,
-        precision=raw.get("precision"),
-        artifacts=artifacts,
-        include_evidence=raw.get("include_evidence", False),
+        language=raw.get("language", "zh" if base_spec is None else base_spec.language),
+        style=raw.get("style", "concise" if base_spec is None else base_spec.style),
+        layout=raw.get("layout", "prose" if base_spec is None else base_spec.layout),
+        units=units
+        if "units" in raw
+        else ({} if base_spec is None else thaw_json(base_spec.units)),
+        precision=raw.get("precision", None if base_spec is None else base_spec.precision),
+        artifacts=artifacts if "artifacts" in raw else base_spec.artifacts if base_spec else (),
+        include_evidence=raw.get(
+            "include_evidence", False if base_spec is None else base_spec.include_evidence
+        ),
     )
 
 
@@ -130,9 +213,12 @@ class P7PlanValidator:
         catalog: CapabilityCatalog,
         *,
         precheck: MoleculePrecheck | None = None,
+        enable_candidate_planning: bool = True,
     ) -> None:
         self.catalog = catalog
         self.precheck = precheck or MoleculePrecheck()
+        self.enable_candidate_planning = enable_candidate_planning
+        self.compiler = P7PlanCompiler(catalog)
 
     def normalize(
         self,
@@ -140,9 +226,12 @@ class P7PlanValidator:
         *,
         turn_id: str,
         existing_request: CalculationRequest | None = None,
+        source_request: CalculationRequest | None = None,
         accept_recommendations: bool = False,
         user_text: str | None = None,
+        trusted_artifacts: Mapping[str, Mapping[str, object]] | None = None,
     ) -> NormalizedPlan:
+        proposal, proposal_error = self._proposal_from_intent(intent)
         if existing_request is not None and intent.action is CalculationAction.REVISE_DRAFT:
             values = existing_request.model_dump(mode="python")
             # Pydantic's model_dump returns dictionaries for nested models;
@@ -151,8 +240,17 @@ class P7PlanValidator:
             for field_name in ("charge", "multiplicity", "method", "environment", "output_spec"):
                 values[field_name] = getattr(existing_request, field_name)
             if intent.molecule_kind is not None:
+                molecule_changed = (
+                    intent.molecule_kind != existing_request.molecule_kind
+                    or intent.molecule_value != existing_request.molecule_value
+                )
                 values["molecule_kind"] = intent.molecule_kind
                 values["molecule_value"] = intent.molecule_value
+                if molecule_changed:
+                    # Structure-derived q/M recommendations belong to the old
+                    # identity and must never survive a molecule change.
+                    values["charge"] = None
+                    values["multiplicity"] = None
             if intent.charge is not None:
                 charge_quote = _explicit_evidence(intent, "charge", user_text)
                 values["charge"] = _parameter(
@@ -185,6 +283,8 @@ class P7PlanValidator:
                 )
             if intent.operations:
                 values["operations"] = intent.operations
+            elif self.enable_candidate_planning and proposal is not None:
+                values["operations"] = operations_from_proposal(proposal, self.catalog)
             if intent.method is not None:
                 method_quote = _explicit_evidence(intent, "method", user_text)
                 values["method"] = _parameter(
@@ -222,7 +322,15 @@ class P7PlanValidator:
                     ):
                         values[field_name] = accepted_recommendation(current)
             try:
-                values["output_spec"] = output_spec_from_intent(intent)
+                values["output_spec"] = (
+                    output_spec_from_intent(
+                        intent,
+                        operations=tuple(values["operations"]),
+                        base_spec=existing_request.output_spec,
+                    )
+                    if thaw_json(intent.output_spec)
+                    else existing_request.output_spec
+                )
             except ValueError as error:
                 values["output_spec"] = existing_request.output_spec
                 values["prohibited_requests"] = tuple(
@@ -241,9 +349,34 @@ class P7PlanValidator:
                 turn_id=turn_id,
                 accept_recommendations=accept_recommendations,
                 user_text=user_text,
+                proposal=proposal,
+                source_request=source_request,
             )
 
-        return self.validate(request, intent=intent)
+        normalized = self.validate(
+            request,
+            intent=intent,
+            proposal=proposal,
+            proposal_error=proposal_error,
+            trusted_artifacts=trusted_artifacts,
+        )
+        return normalized
+
+    @staticmethod
+    def _proposal_from_intent(
+        intent: CalculationIntent,
+    ) -> tuple[PlanProposal | None, str | None]:
+        if intent.plan_proposal is None:
+            return None, None
+        try:
+            return (
+                PlanProposal.model_validate_json(
+                    json.dumps(thaw_json(intent.plan_proposal), ensure_ascii=False), strict=True
+                ),
+                None,
+            )
+        except (TypeError, ValueError) as error:
+            return None, str(error)[:512]
 
     def _new_request(
         self,
@@ -252,7 +385,16 @@ class P7PlanValidator:
         turn_id: str,
         accept_recommendations: bool,
         user_text: str | None,
+        proposal: PlanProposal | None,
+        source_request: CalculationRequest | None = None,
     ) -> CalculationRequest:
+        if source_request is not None:
+            return self._new_follow_up_request(
+                intent,
+                turn_id=turn_id,
+                proposal=proposal,
+                source_request=source_request,
+            )
         source_reference = turn_id
         precheck: MoleculePrecheckResult | None = None
         if intent.molecule_kind is MoleculeInputType.SMILES and intent.molecule_value is not None:
@@ -447,7 +589,13 @@ class P7PlanValidator:
         )
         output_error: str | None = None
         try:
-            output_spec = output_spec_from_intent(intent)
+            operations = tuple(intent.operations)
+            if self.enable_candidate_planning and not operations and proposal is not None:
+                operations = operations_from_proposal(proposal, self.catalog)
+            output_spec = output_spec_from_intent(
+                intent,
+                operations=operations if self.enable_candidate_planning else None,
+            )
         except (TypeError, ValueError) as error:
             output_spec = OutputSpec.default()
             output_error = str(error)
@@ -464,7 +612,15 @@ class P7PlanValidator:
             molecule_value=intent.molecule_value,
             charge=charge,
             multiplicity=multiplicity,
-            operations=intent.operations or DEFAULT_OPERATIONS,
+            operations=(
+                tuple(intent.operations)
+                or (
+                    operations_from_proposal(proposal, self.catalog)
+                    if self.enable_candidate_planning and proposal is not None
+                    else ()
+                )
+                or (() if self.enable_candidate_planning else DEFAULT_OPERATIONS)
+            ),
             method=method,
             environment=environment,
             hard_constraints=intent.hard_constraints,
@@ -473,11 +629,61 @@ class P7PlanValidator:
             preview_only=not intent.requested_execution,
         )
 
+    def _new_follow_up_request(
+        self,
+        intent: CalculationIntent,
+        *,
+        turn_id: str,
+        proposal: PlanProposal | None,
+        source_request: CalculationRequest,
+    ) -> CalculationRequest:
+        """Create a new scope from a trusted task without re-resolving identity.
+
+        This path is intentionally separate from draft revision.  A completed
+        Opt task is immutable; a Freq follow-up receives a new request/task
+        while retaining the exact P4 identity and parameter provenance needed
+        by the P5 external-result binding.
+        """
+
+        operations = tuple(intent.operations)
+        if self.enable_candidate_planning and not operations and proposal is not None:
+            operations = operations_from_proposal(proposal, self.catalog)
+        if self.enable_candidate_planning and not operations:
+            operations = ("sp",)
+        output_spec = output_spec_from_intent(
+            intent,
+            operations=operations if self.enable_candidate_planning else None,
+        )
+        values = source_request.model_dump(mode="python")
+        for field_name in ("charge", "multiplicity", "method", "environment", "output_spec"):
+            values[field_name] = getattr(source_request, field_name)
+        values.update(
+            {
+                "request_id": str(new_id(WorkflowRecordId)),
+                "source_turn_id": turn_id,
+                "operations": operations,
+                "output_spec": output_spec,
+                "preview_only": not intent.requested_execution,
+                "hard_constraints": tuple(
+                    dict.fromkeys((*source_request.hard_constraints, *intent.hard_constraints))
+                ),
+                "prohibited_requests": tuple(
+                    dict.fromkeys(
+                        (*source_request.prohibited_requests, *intent.prohibited_requests)
+                    )
+                ),
+            }
+        )
+        return CalculationRequest.create(**values)
+
     def validate(
         self,
         request: CalculationRequest,
         *,
         intent: CalculationIntent | None = None,
+        proposal: PlanProposal | None = None,
+        proposal_error: str | None = None,
+        trusted_artifacts: Mapping[str, Mapping[str, object]] | None = None,
     ) -> NormalizedPlan:
         issues: list[str] = []
         missing: list[str] = []
@@ -509,7 +715,7 @@ class P7PlanValidator:
             missing.append("environment_evidence")
 
         operations = tuple(request.operations)
-        if operations != DEFAULT_OPERATIONS:
+        if not self.enable_candidate_planning and operations != DEFAULT_OPERATIONS:
             unsupported.append("only the complete Opt→Freq→independent SP protocol is available")
         if any(
             marker.casefold()
@@ -552,6 +758,9 @@ class P7PlanValidator:
         except (TypeError, ValueError):
             unsupported.append("invalid output specification")
 
+        if self.enable_candidate_planning and proposal_error is not None:
+            issues.append(f"invalid candidate plan: {proposal_error}")
+
         if unsupported:
             validation = PlanValidation.create(
                 status=ValidationStatus.UNSUPPORTED,
@@ -561,7 +770,7 @@ class P7PlanValidator:
                 unsupported_requests=tuple(dict.fromkeys(unsupported)),
                 request_hash=request.request_hash,
             )
-            return NormalizedPlan(request, validation, None, precheck)
+            return NormalizedPlan(request, validation, None, precheck, proposal=proposal)
         if missing:
             question = self._clarification_question(missing, request)
             validation = PlanValidation.create(
@@ -572,7 +781,7 @@ class P7PlanValidator:
                 clarification_question=question,
                 request_hash=request.request_hash,
             )
-            return NormalizedPlan(request, validation, None, precheck)
+            return NormalizedPlan(request, validation, None, precheck, proposal=proposal)
         if issues:
             validation = PlanValidation.create(
                 status=ValidationStatus.INVALID,
@@ -580,7 +789,77 @@ class P7PlanValidator:
                 issues=tuple(dict.fromkeys(issues)),
                 request_hash=request.request_hash,
             )
-            return NormalizedPlan(request, validation, None, precheck)
+            return NormalizedPlan(request, validation, None, precheck, proposal=proposal)
+
+        if self.enable_candidate_planning:
+            candidate = proposal or proposal_from_operations(
+                operations,
+                goal=(
+                    "、".join(item.kind.value for item in request.output_spec.quantities)
+                    or "完成受支持的化学计算"
+                ),
+                requested_outputs=tuple(item.kind.value for item in request.output_spec.quantities),
+                action=(intent.action.value if intent is not None else "plan_new"),
+            )
+            if proposal is None and not operations:
+                candidate = candidate.model_copy(
+                    update={"clarification_fields": ("execution_scope",)}
+                )
+            validation = PlanValidation.create(
+                status=ValidationStatus.VALID,
+                valid=True,
+                issues=(),
+                request_hash=request.request_hash,
+            )
+            compilation = self.compiler.compile(
+                request,
+                candidate,
+                validation=validation,
+                trusted_artifacts=trusted_artifacts,
+            )
+            if compilation.status is not ValidationStatus.VALID or compilation.plan is None:
+                missing_fields = (
+                    ("trusted_opt_result",)
+                    if compilation.status is ValidationStatus.NEEDS_CLARIFICATION
+                    and any(
+                        "trusted Opt" in item or "frequency requires" in item
+                        for item in compilation.issues
+                    )
+                    else ()
+                )
+                validation = PlanValidation.create(
+                    status=compilation.status,
+                    valid=False,
+                    issues=tuple(dict.fromkeys(compilation.issues)),
+                    missing_fields=missing_fields,
+                    unsupported_requests=(
+                        tuple(dict.fromkeys(compilation.issues))
+                        if compilation.status is ValidationStatus.UNSUPPORTED
+                        else ()
+                    ),
+                    clarification_question=compilation.clarification_question,
+                    request_hash=request.request_hash,
+                )
+                return NormalizedPlan(
+                    request,
+                    validation,
+                    None,
+                    precheck,
+                    proposal=candidate,
+                    compilation=compilation,
+                    source_task_id=compilation.source_task_id,
+                    external_opt_result_id=compilation.external_opt_result_id,
+                )
+            return NormalizedPlan(
+                request,
+                validation,
+                compilation.plan,
+                precheck,
+                proposal=candidate,
+                compilation=compilation,
+                source_task_id=compilation.source_task_id,
+                external_opt_result_id=compilation.external_opt_result_id,
+            )
 
         entry = self.catalog.require(P7_BASELINE_CAPABILITY_ID, "1")
         protocol = P5_DEFAULT_PROTOCOL
@@ -650,7 +929,7 @@ class P7PlanValidator:
         plan = plan.model_copy(
             update={"plan_hash": sha256_hex(plan.model_dump(mode="json", exclude={"plan_hash"}))}
         )
-        return NormalizedPlan(request, validation, plan, precheck)
+        return NormalizedPlan(request, validation, plan, precheck, proposal=proposal)
 
     @staticmethod
     def _clarification_question(missing: Iterable[str], request: CalculationRequest) -> str:
@@ -750,5 +1029,6 @@ __all__ = [
     "DEFAULT_OPERATIONS",
     "NormalizedPlan",
     "P7PlanValidator",
+    "output_spec_for_operations",
     "output_spec_from_intent",
 ]

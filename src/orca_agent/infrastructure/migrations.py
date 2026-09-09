@@ -1718,6 +1718,55 @@ P7_EXECUTION_RESOURCE_STATEMENTS = (
     """.strip(),
 )
 
+# Planning evidence is append-only and deliberately separate from the task
+# projection.  A task revision can be reconstructed from its exact proposal
+# binding; no repository code needs to guess by taking the latest row.
+P7_PLANNING_STATEMENTS = (
+    """
+    CREATE TABLE p7_plan_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        source_turn_id TEXT NOT NULL REFERENCES p7_turns(turn_id),
+        task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        action TEXT NOT NULL CHECK(action IN ('plan_new', 'revise_draft')),
+        request_hash TEXT NOT NULL CHECK(length(request_hash) = 64),
+        compiled_plan_hash TEXT CHECK(
+            compiled_plan_hash IS NULL OR length(compiled_plan_hash) = 64
+        ),
+        compiled_protocol_id TEXT,
+        source_task_id TEXT,
+        external_opt_result_id TEXT,
+        validation_status TEXT NOT NULL CHECK(
+            validation_status IN ('valid', 'needs_clarification', 'unsupported', 'invalid')
+        ),
+        record_json TEXT NOT NULL,
+        record_hash TEXT NOT NULL CHECK(length(record_hash) = 64),
+        created_at_utc TEXT NOT NULL,
+        UNIQUE(task_id, task_revision)
+    )
+    """.strip(),
+    (
+        "CREATE INDEX p7_plan_proposals_conversation ON p7_plan_proposals("
+        "conversation_id, created_at_utc, proposal_id)"
+    ),
+    "CREATE INDEX p7_plan_proposals_task ON p7_plan_proposals(task_id, task_revision)",
+    """
+    CREATE TRIGGER p7_plan_proposals_no_update
+    BEFORE UPDATE ON p7_plan_proposals
+    BEGIN
+        SELECT RAISE(ABORT, 'P7 planning records are immutable');
+    END;
+    """.strip(),
+    """
+    CREATE TRIGGER p7_plan_proposals_no_delete
+    BEFORE DELETE ON p7_plan_proposals
+    BEGIN
+        SELECT RAISE(ABORT, 'P7 planning records are append-only');
+    END;
+    """.strip(),
+)
+
 
 DEFAULT_MIGRATIONS = (
     Migration(
@@ -1771,6 +1820,11 @@ DEFAULT_MIGRATIONS = (
         version=9,
         name="p7_project_execution_resource_slot",
         statements=P7_EXECUTION_RESOURCE_STATEMENTS,
+    ),
+    Migration(
+        version=10,
+        name="p7_immutable_planning_records",
+        statements=P7_PLANNING_STATEMENTS,
     ),
 )
 
@@ -1898,6 +1952,7 @@ __all__ = [
     "P3_WORKFLOW_STATEMENTS",
     "P5_LOCAL_JOB_STATEMENTS",
     "P7_EXECUTION_RESOURCE_STATEMENTS",
+    "P7_PLANNING_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",

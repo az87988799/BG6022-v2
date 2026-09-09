@@ -227,8 +227,15 @@ class P7RuntimeConfig:
             state_root=Path(state_root),
             model=model or env_model,
             model_call_budget=budget,
-            orca_executable=orca_executable or env.get("BG6022_ORCA_EXECUTABLE"),
-            orca_version=orca_version or env.get("BG6022_ORCA_VERSION"),
+            # Only the real profile may carry an ORCA executable into P5.
+            # Keeping fake/offline profiles free of a stale machine path is
+            # important when the same project .env is used for both modes.
+            orca_executable=(
+                orca_executable or env.get("BG6022_ORCA_EXECUTABLE") if profile == "real" else None
+            ),
+            orca_version=(
+                orca_version or env.get("BG6022_ORCA_VERSION") if profile == "real" else None
+            ),
             **defaults,
         )
 

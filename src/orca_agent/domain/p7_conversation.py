@@ -18,8 +18,10 @@ from ..orchestration.p7_versions import (
     P7_SCHEMA_VERSION,
     PROMPT_VERSION,
     PROMPT_VERSION_V2,
+    PROMPT_VERSION_V3,
     TURN_SCHEMA,
     TURN_SCHEMA_V2,
+    TURN_SCHEMA_V3,
 )
 from ..orchestration.temporal import ensure_utc
 from .hashing import sha256_hex, verify_sha256
@@ -185,6 +187,12 @@ class CalculationIntent(P7Model):
     missing_fields: tuple[str, ...] = ()
     requested_execution: bool = False
     parameter_evidence: FrozenJsonObject = {}
+    # The planning proposal is an edge-contract payload.  ``None`` is
+    # excluded from serialized legacy intents so historical request/turn
+    # hashes remain byte-for-byte compatible.
+    plan_proposal: FrozenJsonObject | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @field_validator("molecule_value", "task_alias", "method", "environment")
     @classmethod
@@ -222,6 +230,11 @@ class CalculationIntent(P7Model):
     @classmethod
     def _parameter_evidence(cls, value: object) -> FrozenJsonObject:
         return freeze_json_object({} if value is None else value)
+
+    @field_validator("plan_proposal", mode="before")
+    @classmethod
+    def _plan_proposal(cls, value: object) -> FrozenJsonObject | None:
+        return None if value is None else freeze_json_object(value)
 
 
 class ChemistryQAIntent(P7Model):
@@ -300,8 +313,8 @@ Subrequest = Annotated[
 class TurnInterpretation(P7Model):
     """The only model output accepted by the application boundary."""
 
-    schema_version: Literal[TURN_SCHEMA, TURN_SCHEMA_V2] = TURN_SCHEMA
-    prompt_version: Literal[PROMPT_VERSION, PROMPT_VERSION_V2] = PROMPT_VERSION
+    schema_version: Literal[TURN_SCHEMA, TURN_SCHEMA_V2, TURN_SCHEMA_V3] = TURN_SCHEMA
+    prompt_version: Literal[PROMPT_VERSION, PROMPT_VERSION_V2, PROMPT_VERSION_V3] = PROMPT_VERSION
     subrequests: tuple[Subrequest, ...] = Field(min_length=1, max_length=4)
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source: ResponseSource = ResponseSource.BASELINE
@@ -311,6 +324,7 @@ class TurnInterpretation(P7Model):
         if (self.schema_version, self.prompt_version) not in {
             (TURN_SCHEMA, PROMPT_VERSION),
             (TURN_SCHEMA_V2, PROMPT_VERSION_V2),
+            (TURN_SCHEMA_V3, PROMPT_VERSION_V3),
         }:
             raise ValueError("turn schema and prompt version are not a supported pair")
         new_calculations = sum(
@@ -320,7 +334,7 @@ class TurnInterpretation(P7Model):
         )
         if new_calculations > 1:
             raise ValueError("a turn may contain at most one new calculation request")
-        if self.schema_version == TURN_SCHEMA_V2:
+        if self.schema_version in {TURN_SCHEMA_V2, TURN_SCHEMA_V3}:
             for item in self.subrequests:
                 if isinstance(item, (ChemistryQAIntent, GeneralQAIntent)) and not (
                     item.answer_draft and item.answer_draft.strip()

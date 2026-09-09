@@ -21,6 +21,7 @@ from orca_agent.domain.p7_conversation import (
     TurnRecord,
     TurnStatus,
 )
+from orca_agent.domain.p7_planning import PlanningRecord
 from orca_agent.domain.p7_task import (
     CalculationPlan,
     CalculationRequest,
@@ -410,6 +411,95 @@ class P7RecordRepository:
             created_at_utc=parse_utc(str(row[22])),
             updated_at_utc=parse_utc(str(row[23])),
         )
+
+    # Planning evidence ---------------------------------------------
+    def insert_planning_record(self, record: PlanningRecord) -> None:
+        payload = record.model_dump(mode="json")
+        self.connection.execute(
+            "INSERT INTO p7_plan_proposals("
+            "proposal_id, conversation_id, task_id, source_turn_id, task_revision, action, "
+            "request_hash, compiled_plan_hash, compiled_protocol_id, source_task_id, "
+            "external_opt_result_id, validation_status, record_json, record_hash, created_at_utc"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.proposal_id,
+                record.conversation_id,
+                record.task_id,
+                record.source_turn_id,
+                record.task_revision,
+                record.action,
+                record.request_hash,
+                record.compiled_plan_hash,
+                record.compiled_protocol_id,
+                record.source_task_id,
+                record.external_opt_result_id,
+                record.validation_status.value,
+                _json(payload),
+                record.record_hash,
+                format_utc(record.created_at_utc),
+            ),
+        )
+
+    def get_planning_record(self, proposal_id: str) -> PlanningRecord | None:
+        row = self.connection.execute(
+            "SELECT record_json, record_hash FROM p7_plan_proposals WHERE proposal_id=?",
+            (proposal_id,),
+        ).fetchone()
+        return None if row is None else self._planning_from_row(row)
+
+    def get_planning_record_for_task(
+        self, task_id: str, task_revision: int
+    ) -> PlanningRecord | None:
+        """Resolve the exact task revision; never fall back to the latest row."""
+
+        row = self.connection.execute(
+            "SELECT record_json, record_hash FROM p7_plan_proposals "
+            "WHERE task_id=? AND task_revision=?",
+            (task_id, task_revision),
+        ).fetchone()
+        return None if row is None else self._planning_from_row(row)
+
+    def get_planning_record_for_plan(
+        self, task_id: str, request_hash: str, compiled_plan_hash: str
+    ) -> PlanningRecord | None:
+        """Load the immutable proposal that produced one exact compiled plan."""
+
+        row = self.connection.execute(
+            "SELECT record_json, record_hash FROM p7_plan_proposals "
+            "WHERE task_id=? AND request_hash=? AND compiled_plan_hash=?",
+            (task_id, request_hash, compiled_plan_hash),
+        ).fetchone()
+        return None if row is None else self._planning_from_row(row)
+
+    def list_planning_records(
+        self,
+        *,
+        task_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> tuple[PlanningRecord, ...]:
+        query = "SELECT record_json, record_hash FROM p7_plan_proposals WHERE 1=1"
+        values: list[object] = []
+        if task_id is not None:
+            query += " AND task_id=?"
+            values.append(task_id)
+        if conversation_id is not None:
+            query += " AND conversation_id=?"
+            values.append(conversation_id)
+        query += " ORDER BY created_at_utc, proposal_id"
+        rows = self.connection.execute(query, tuple(values)).fetchall()
+        return tuple(self._planning_from_row(row) for row in rows)
+
+    @staticmethod
+    def _planning_from_row(row: sqlite3.Row) -> PlanningRecord:
+        data = _load_json(row[0], what="planning record")
+        if not isinstance(data, dict):
+            raise StateIntegrityError("stored planning record is not an object")
+        if data.get("record_hash") != row[1]:
+            raise StateIntegrityError("planning record hash is inconsistent")
+        try:
+            return PlanningRecord.model_validate_json(_json(data), strict=True)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise StateIntegrityError("stored planning record is invalid") from error
 
     # Links, pending actions, handoffs, responses --------------------
     def ensure_task_link(

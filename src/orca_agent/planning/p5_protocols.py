@@ -225,6 +225,72 @@ P5_OPT_FREQ_SP_4CORE_2048 = _protocol(
     fixed_budget=True,
 )
 
+# P7 candidate planning binds every newly exposed workflow to an explicit
+# four-core/2048-MB registration.  These are additive protocol versions: the
+# historical one-core protocols and the existing complete-chain v3 hash are
+# intentionally untouched.
+P5_SP_INITIAL_4CORE_2048 = _protocol(
+    "p5.sp_initial.r2scan3c.4core2048.v1",
+    (P5NodeKind.SP,),
+    (P5GeometrySource.INITIAL,),
+    ((),),
+    version="1",
+    nprocs=4,
+    total_memory_mb=2048,
+    maxcore_mb=384,
+    parallel=True,
+    fixed_budget=True,
+)
+P5_OPT_ONLY_4CORE_2048 = _protocol(
+    "p5.opt_only.r2scan3c.4core2048.v1",
+    (P5NodeKind.OPT,),
+    (P5GeometrySource.INITIAL,),
+    ((),),
+    version="1",
+    nprocs=4,
+    total_memory_mb=2048,
+    maxcore_mb=384,
+    parallel=True,
+    fixed_budget=True,
+)
+P5_FREQ_FROM_OPT_4CORE_2048 = _protocol(
+    "p5.freq_from_opt.r2scan3c.4core2048.v1",
+    (P5NodeKind.FREQ,),
+    (P5GeometrySource.OPTIMIZED,),
+    ((),),
+    version="1",
+    source_from_opt=True,
+    nprocs=4,
+    total_memory_mb=2048,
+    maxcore_mb=384,
+    parallel=True,
+    fixed_budget=True,
+)
+P5_OPT_FREQ_4CORE_2048 = _protocol(
+    "p5.opt_freq.r2scan3c.4core2048.v1",
+    (P5NodeKind.OPT, P5NodeKind.FREQ),
+    (P5GeometrySource.INITIAL, P5GeometrySource.OPTIMIZED),
+    ((), (0,)),
+    version="1",
+    nprocs=4,
+    total_memory_mb=2048,
+    maxcore_mb=384,
+    parallel=True,
+    fixed_budget=True,
+)
+P5_OPT_SP_4CORE_2048 = _protocol(
+    "p5.opt_sp.r2scan3c.4core2048.v1",
+    (P5NodeKind.OPT, P5NodeKind.SP),
+    (P5GeometrySource.INITIAL, P5GeometrySource.OPTIMIZED),
+    ((), (0,)),
+    version="1",
+    nprocs=4,
+    total_memory_mb=2048,
+    maxcore_mb=384,
+    parallel=True,
+    fixed_budget=True,
+)
+
 P5_DEFAULT_PROTOCOL = P5_OPT_FREQ_SP_4CORE_2048
 
 P5_PROTOCOLS = (
@@ -235,6 +301,11 @@ P5_PROTOCOLS = (
     P5_OPT_FREQ_SP,
     P5_OPT_FREQ_SP_4CORE,
     P5_OPT_FREQ_SP_4CORE_2048,
+    P5_SP_INITIAL_4CORE_2048,
+    P5_OPT_ONLY_4CORE_2048,
+    P5_FREQ_FROM_OPT_4CORE_2048,
+    P5_OPT_FREQ_4CORE_2048,
+    P5_OPT_SP_4CORE_2048,
 )
 P5_PROTOCOLS_BY_ID = {item.protocol_id: item for item in P5_PROTOCOLS}
 
@@ -317,11 +388,16 @@ __all__ = [
     "P5_OPT_FREQ_SP_4CORE",
     "P5_OPT_FREQ_SP_4CORE_2048",
     "P5_DEFAULT_PROTOCOL",
+    "P5_FREQ_FROM_OPT_4CORE_2048",
     "P5_OPT_ONLY",
+    "P5_OPT_ONLY_4CORE_2048",
+    "P5_OPT_FREQ_4CORE_2048",
+    "P5_OPT_SP_4CORE_2048",
     "P5_PROTOCOLS",
     "P5_PROTOCOLS_BY_ID",
     "P5ProtocolSpec",
     "P5_SP_INITIAL",
+    "P5_SP_INITIAL_4CORE_2048",
     "expand_p5_execution_plan",
     "get_p5_protocol",
 ]

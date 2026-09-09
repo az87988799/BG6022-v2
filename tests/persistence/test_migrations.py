@@ -159,7 +159,7 @@ def test_default_migration_checksum_is_stable() -> None:
 
 
 def test_historical_migration_checksums_are_frozen() -> None:
-    assert tuple(migration.checksum for migration in DEFAULT_MIGRATIONS) == (
+    assert tuple(migration.checksum for migration in DEFAULT_MIGRATIONS[:9]) == (
         "6f1ff16b97b9e45c286097b1b8de8adeef5ac483c3e08bb02793a156943c9463",
         "3df844dc355db2dc9e8c95e96678233397bf947387f2bc74d358a574fd161a42",
         "21353d3f1dd37b5237b588056457cde33bd6138849266328bd08033a391dc998",
@@ -169,6 +169,9 @@ def test_historical_migration_checksums_are_frozen() -> None:
         "7de6bb1a17622f6ac5ce06de902ba6e65233132b291b377035e8c5f868fd8b1f",
         "56df4c46d9e87225f9124eefbe41fd312d5403bb232b6b7c3e65718a689900e5",
         "21fe9b817e5ea0b74e18bbaf28605f2e3c24dcde072b39bcae694d1a534ce4df",
+    )
+    assert DEFAULT_MIGRATIONS[9].checksum == (
+        "4062382f962ec459f78e9cf547032af6c8099d302e929d1fa328cebb994707d5"
     )
 
 

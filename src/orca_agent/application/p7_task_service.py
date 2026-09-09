@@ -33,6 +33,7 @@ from orca_agent.domain.p4 import IdentityDecision, IdentityProvider, P4Phase
 from orca_agent.domain.p5 import P5Phase
 from orca_agent.domain.p6 import P6Phase
 from orca_agent.domain.p7_conversation import MoleculeInputType
+from orca_agent.domain.p7_planning import PlanFeedback, PlanningRecord
 from orca_agent.domain.p7_task import (
     CalculationRequest,
     DeliveryRecord,
@@ -54,7 +55,7 @@ from orca_agent.orchestration.p4_commands import (
 )
 from orca_agent.orchestration.p4_versions import P4_ENGINE_VERSION, P4_SCHEMA_VERSION
 from orca_agent.orchestration.p6_commands import AssessP6Run, CancelP6Run
-from orca_agent.planning.p5_protocols import P5_DEFAULT_PROTOCOL
+from orca_agent.planning.p5_protocols import get_p5_protocol
 from orca_agent.planning.p7_catalog import CapabilityCatalog, build_capability_catalog
 from orca_agent.presentation.p7_results import P7ResultPresenter
 
@@ -142,6 +143,72 @@ class P7TaskService:
             uow.commit()
             return tasks
 
+    def trusted_opt_sources(
+        self, conversation_id: ConversationId | str
+    ) -> dict[str, dict[str, object]]:
+        """Return verified, session-local Opt sources for a follow-up plan.
+
+        The mapping is only a planning hint.  P5 repeats the authoritative
+        result, geometry, identity, and source-run checks before accepting the
+        new execution handoff.
+        """
+
+        conversation = str(conversation_id)
+        tasks = self.list_tasks(conversation)
+        try:
+            state = self.get_conversation_state(conversation)
+        except AttributeError:
+            state = None
+        active_task_id = None if state is None else state.active_task_id
+        sources: dict[str, dict[str, object]] = {}
+        for task in tasks:
+            if task.p5_run_id is None or task.p4_run_id is None:
+                continue
+            try:
+                view = self.p5.inspect(RunId(task.p5_run_id))
+            except Exception:
+                continue
+            if view.state.phase is not P5Phase.COMPLETED:
+                continue
+            result = next(
+                (
+                    item
+                    for item in reversed(view.results)
+                    if getattr(getattr(item, "primitive", None), "value", item.primitive) == "opt"
+                    and getattr(getattr(item, "parse_status", None), "value", None) == "complete"
+                    and getattr(item, "optimized_geometry_artifact_id", None) is not None
+                ),
+                None,
+            )
+            if result is None:
+                continue
+            value = {
+                "task_id": task.task_id,
+                "alias": task.alias,
+                "result_id": str(result.record_id),
+                "source_run_id": str(view.plan.source_run_id),
+                "source_p5_run_id": str(view.run_id),
+                "optimized_geometry_artifact_id": str(result.optimized_geometry_artifact_id),
+                "protocol_id": view.plan.protocol_id,
+                "protocol_hash": view.plan.protocol_hash,
+                "confirmed_molecule_hash": view.plan.confirmed_molecule_hash,
+                "completed": True,
+            }
+            sources[task.alias.casefold()] = value
+            sources[task.task_id.casefold()] = value
+            if active_task_id == task.task_id or len(tasks) == 1:
+                sources["current_task"] = value
+        return sources
+
+    def get_conversation_state(self, conversation_id: str):
+        """Small read helper kept local to avoid coupling planning to P7 conversation service."""
+
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            state = P7RecordRepository(uow.connection).get_conversation(conversation_id)
+            uow.commit()
+        return state
+
     def task_view(self, conversation_id: ConversationId | str, task_id: str) -> dict[str, object]:
         task = self.get_task(conversation_id, task_id)
         if task is None:
@@ -154,6 +221,13 @@ class P7TaskService:
             records = P7RecordRepository(uow.connection)
             pending = records.list_pending(task.conversation_id)
             delivery = records.get_delivery(task.task_id)
+            planning = records.get_planning_record_for_task(task.task_id, task.revision)
+            if planning is None and task.request is not None and task.plan is not None:
+                planning = records.get_planning_record_for_plan(
+                    task.task_id,
+                    task.request.request_hash,
+                    task.plan.plan_hash,
+                )
             uow.commit()
         result: dict[str, object] = {
             "task": task.model_dump(mode="json"),
@@ -161,6 +235,7 @@ class P7TaskService:
                 item.model_dump(mode="json") for item in pending if item.task_id == task.task_id
             ],
             "delivery": None if delivery is None else delivery.model_dump(mode="json"),
+            "planning_record": (None if planning is None else planning.model_dump(mode="json")),
         }
         if task.state is TaskPhase.PLAN_READY and not self.runtime_config.execution_ready:
             result["execution_blocked"] = {
@@ -222,10 +297,18 @@ class P7TaskService:
                 plan=normalized.plan,
                 validation=normalized.validation,
                 delivery_output_spec=normalized.request.output_spec,
+                p4_run_id=self._reused_p4_run_id(records, conversation, normalized.source_task_id),
                 created_at_utc=now,
                 updated_at_utc=now,
             )
             records.insert_task(task)
+            self._insert_planning_record(
+                records,
+                task=task,
+                normalized=normalized,
+                turn_id=turn_id,
+                now=now,
+            )
             records.ensure_task_link(
                 conversation_id=conversation,
                 task_id=task.task_id,
@@ -256,6 +339,80 @@ class P7TaskService:
                 )
             uow.commit()
         return self._view(task)
+
+    @staticmethod
+    def _reused_p4_run_id(
+        records: P7RecordRepository, conversation_id: str, source_task_id: str | None
+    ) -> str | None:
+        if source_task_id is None:
+            return None
+        source = records.get_task(conversation_id, source_task_id)
+        if source is None or source.p4_run_id is None:
+            return None
+        return source.p4_run_id
+
+    def _insert_planning_record(
+        self,
+        records: P7RecordRepository,
+        *,
+        task: TaskRecord,
+        normalized,
+        turn_id: str,
+        now: datetime,
+    ) -> PlanningRecord | None:
+        proposal = getattr(normalized, "proposal", None)
+        compilation = getattr(normalized, "compilation", None)
+        if proposal is None:
+            return None
+        # Legacy library callers retain their historical full-chain contract;
+        # only a v3 candidate compilation creates planning evidence.
+        if self.runtime_config.profile == "legacy" and compilation is None:
+            return None
+        validation = normalized.validation
+        request = normalized.request
+        record = PlanningRecord.create(
+            proposal_id=f"planproposal_{uuid.uuid4().hex}",
+            conversation_id=task.conversation_id,
+            task_id=task.task_id,
+            source_turn_id=turn_id,
+            task_revision=task.revision,
+            action=proposal.action,
+            original_goal=proposal.goal,
+            normalized_constraints={
+                "hard_constraints": list(request.hard_constraints),
+                "prohibited_requests": list(request.prohibited_requests),
+                "method": None if request.method is None else _as_json(request.method),
+                "environment": None
+                if request.environment is None
+                else _as_json(request.environment),
+                "charge": None if request.charge is None else _as_json(request.charge),
+                "multiplicity": None
+                if request.multiplicity is None
+                else _as_json(request.multiplicity),
+            },
+            candidate=proposal,
+            validation_status=validation.status,
+            validation_issues=tuple(
+                dict.fromkeys((*validation.issues, *validation.unsupported_requests))
+            ),
+            feedback=PlanFeedback(
+                unsatisfied_outputs=tuple(
+                    item.kind.value
+                    for item in request.output_spec.quantities
+                    if normalized.plan is None or item.kind not in normalized.plan.expected_outputs
+                ),
+                prohibited_requests=tuple(request.prohibited_requests),
+                remaining_budget={"real_concurrency": 1},
+            ),
+            request_hash=request.request_hash,
+            compiled_plan_hash=(None if normalized.plan is None else normalized.plan.plan_hash),
+            compiled_protocol_id=(None if normalized.plan is None else normalized.plan.protocol_id),
+            source_task_id=getattr(normalized, "source_task_id", None),
+            external_opt_result_id=getattr(normalized, "external_opt_result_id", None),
+            created_at_utc=now,
+        )
+        records.insert_planning_record(record)
+        return record
 
     @staticmethod
     def _unique_alias(
@@ -386,6 +543,46 @@ class P7TaskService:
                     raise InvalidTransitionError(
                         "the saved execution profile differs from the current P7 profile"
                     )
+                if pending_payload.get("plan_hash") != task.plan.plan_hash:
+                    raise InvalidTransitionError("plan approval does not match the current plan")
+                if pending_payload.get("validation_hash") != task.validation.validation_hash:
+                    raise InvalidTransitionError(
+                        "plan approval does not match the current validation"
+                    )
+                if (
+                    pending_payload.get("output_spec_hash")
+                    != task.request.output_spec.output_spec_hash
+                ):
+                    raise InvalidTransitionError(
+                        "plan approval does not match the current output specification"
+                    )
+                registered_protocol = get_p5_protocol(task.plan.protocol_id)
+                if task.plan.protocol_hash != registered_protocol.protocol_hash:
+                    raise StateIntegrityError("task plan protocol hash is not registered")
+                if (
+                    isinstance(expected_profile, dict)
+                    and expected_profile.get("protocol_hash") != registered_protocol.protocol_hash
+                ):
+                    raise InvalidTransitionError("plan approval protocol binding is stale")
+
+                # A Freq-only follow-up reuses the already confirmed P4
+                # source.  It must not create another identity run or ask the
+                # user to reconfirm the same molecule.
+                if task.p4_run_id is not None and records.get_handoff(task.task_id, "p4") is None:
+                    records.consume_pending(
+                        conversation_id=conversation, token=token, decision=decision, now=now
+                    )
+                    updated = self._task_update(
+                        task,
+                        state=TaskPhase.EXECUTION_PENDING,
+                        accepted_plan_hash=task.plan.plan_hash,
+                        accepted_output_spec_hash=task.request.output_spec.output_spec_hash,
+                        now=now,
+                    )
+                    if not records.update_task(updated, expected_revision=task.revision):
+                        raise RevisionConflictError("task changed while accepting reused plan")
+                    uow.commit()
+                    return self._view(self.get_task(conversation, updated.task_id) or updated)
                 p4_run_id = new_id(RunId)
                 p4_conversation_id = new_id(ConversationId)
                 command_id = new_id(CommandId)
@@ -530,11 +727,18 @@ class P7TaskService:
         }
 
     def _plan_execution_profile(self, protocol_id: str) -> dict[str, object]:
+        protocol = get_p5_protocol(protocol_id)
         return {
             "profile": self.runtime_config.public_dict(),
             "profile_hash": self.runtime_config.profile_hash,
-            "protocol_id": protocol_id,
-            "protocol_hash": P5_DEFAULT_PROTOCOL.protocol_hash,
+            "protocol_id": protocol.protocol_id,
+            "protocol_hash": protocol.protocol_hash,
+            "nprocs": protocol.nprocs,
+            "total_memory_mb": protocol.total_memory_mb,
+            "maxcore_mb": protocol.maxcore_mb,
+            "parallel": protocol.parallel,
+            "implicit_threads": protocol.implicit_threads,
+            "real_concurrency": 1,
         }
 
     def _submit_p4_handoff(self, task: TaskRecord, handoff: HandoffRecord) -> object:
@@ -1003,6 +1207,15 @@ class P7TaskService:
         now = _now(self.clock)
         existing = self._handoff(task, "p5")
         if existing is None:
+            if task.plan is None:
+                raise StateIntegrityError("P5 handoff has no approved task plan")
+            protocol = get_p5_protocol(task.plan.protocol_id)
+            if task.plan.protocol_hash != protocol.protocol_hash:
+                raise StateIntegrityError("task plan protocol hash is not registered")
+            planning_record = self._planning_record(task)
+            external_result_id = (
+                None if planning_record is None else planning_record.external_opt_result_id
+            )
             p5_run_id = new_id(RunId)
             command_id = new_id(CommandId)
             payload = {
@@ -1010,10 +1223,14 @@ class P7TaskService:
                 "command_id": str(command_id),
                 "run_id": str(p5_run_id),
                 "source_run_id": str(p4_view.run_id),
-                "protocol_id": P5_DEFAULT_PROTOCOL.protocol_id,
-                "external_opt_result_id": None,
+                "protocol_id": protocol.protocol_id,
+                "protocol_hash": protocol.protocol_hash,
+                "external_opt_result_id": external_result_id,
                 "wall_time_seconds": None,
                 "requested_at_utc": format_utc(now),
+                "planning_proposal_id": (
+                    None if planning_record is None else planning_record.proposal_id
+                ),
             }
             existing = HandoffRecord.create(
                 handoff_id=f"handoff_{uuid.uuid4().hex}",
@@ -1041,6 +1258,20 @@ class P7TaskService:
             task = updated
         return self._submit_p5_handoff(task, existing)
 
+    def _planning_record(self, task: TaskRecord) -> PlanningRecord | None:
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            record = records.get_planning_record_for_task(task.task_id, task.revision)
+            if record is None and task.request is not None and task.plan is not None:
+                record = records.get_planning_record_for_plan(
+                    task.task_id,
+                    task.request.request_hash,
+                    task.plan.plan_hash,
+                )
+            uow.commit()
+            return record
+
     def _submit_p5_handoff(
         self, task: TaskRecord, handoff: HandoffRecord
     ) -> tuple[int, dict[str, object]]:
@@ -1049,14 +1280,30 @@ class P7TaskService:
             raise StateIntegrityError("P5 handoff payload is invalid")
         if handoff.status == "linked":
             return 0, {"task_id": task.task_id, "step": "p5.already_linked"}
+        protocol_id = payload.get("protocol_id")
+        protocol_hash = payload.get("protocol_hash")
+        if not isinstance(protocol_id, str) or not isinstance(protocol_hash, str):
+            raise StateIntegrityError("P5 handoff has no complete protocol binding")
+        protocol = get_p5_protocol(protocol_id)
+        if task.plan is None or protocol.protocol_hash != protocol_hash:
+            raise StateIntegrityError("P5 handoff protocol binding is inconsistent")
+        if task.plan.protocol_id != protocol_id or task.plan.protocol_hash != protocol_hash:
+            raise StateIntegrityError("P5 handoff does not match the task plan")
+        external_result_id = payload.get("external_opt_result_id")
         self._mark_handoff_submitted(handoff)
         result = self.p5.prepare_execution(
             source_run_id=RunId(str(payload["source_run_id"])),
-            protocol_id=str(payload["protocol_id"]),
+            protocol_id=protocol_id,
             run_id=RunId(str(payload["run_id"])),
             command_id=CommandId(str(payload["command_id"])),
-            external_opt_result_id=None,
-            wall_time_seconds=None,
+            external_opt_result_id=(
+                None if external_result_id is None else WorkflowRecordId(str(external_result_id))
+            ),
+            wall_time_seconds=(
+                None
+                if payload.get("wall_time_seconds") is None
+                else int(payload["wall_time_seconds"])
+            ),
         )
         now = _now(self.clock)
         updated_handoff = handoff.model_copy(

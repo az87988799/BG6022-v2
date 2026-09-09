@@ -10,6 +10,7 @@ from pathlib import Path
 from orca_agent.application.errors import StateIntegrityError
 from orca_agent.domain.canonical import canonical_json_bytes
 from orca_agent.domain.ids import ReportManifestId, RunId, WorkflowRecordId, new_id
+from orca_agent.domain.json_types import FrozenList
 from orca_agent.domain.p6 import (
     ComparabilityAssessment,
     MethodContext,
@@ -262,6 +263,7 @@ class P6ReportRenderer:
                     evidence=evidence,
                     claims=claims,
                     comparisons=comparisons,
+                    include_scope_coverage=not _legacy_coverage(manifest.coverage),
                 )
                 if json_bytes != canonical_json_bytes(report_value) or md_bytes != _markdown_bytes(
                     report_value
@@ -594,6 +596,7 @@ def _report_value(
     evidence: tuple[P6EvidenceRecord, ...],
     claims: tuple[P6ClaimRecord, ...],
     comparisons: tuple[ComparabilityAssessment, ...],
+    include_scope_coverage: bool = True,
 ) -> dict[str, object]:
     method = next(
         (item.context for item in evidence if isinstance(item.context, MethodContext)), None
@@ -617,6 +620,20 @@ def _report_value(
         "free_energy_claims": 0,
         "global_minimum_claims": 0,
     }
+    if include_scope_coverage:
+        coverage.update(
+            {
+                "requested_primitives": FrozenList(
+                    dict.fromkeys(item.primitive for item in source.results)
+                ),
+                "unrequested_primitives": FrozenList(
+                    item
+                    for item in ("opt", "freq", "sp")
+                    if item not in {result.primitive for result in source.results}
+                ),
+                "minimum_reason": assessment.minimum_reason,
+            }
+        )
     return {
         "report_schema": "p6-report/v1",
         "renderer_version": P6_RENDERER_VERSION,
@@ -633,6 +650,15 @@ def _report_value(
         "coverage": coverage,
         "limitations": list(assessment.limitations),
     }
+
+
+def _legacy_coverage(coverage: object) -> bool:
+    """Recognize pre-scope reports so committed evidence remains verifiable."""
+
+    return not all(
+        key in coverage
+        for key in ("requested_primitives", "unrequested_primitives", "minimum_reason")
+    )
 
 
 def _markdown_bytes(report: dict[str, object]) -> bytes:
