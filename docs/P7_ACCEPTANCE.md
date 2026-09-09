@@ -35,8 +35,8 @@ implementation and explicitly accept it before P7 is marked complete.
 
 ## Offline verification record
 
-Implementation commit: the pushed closure commit on
-`codex/v2-p7-chat-entry-repair` (the exact hash is reported with the handoff).
+Implementation commit: `094f8c0ab6be02787f89edaf79ec7902f9c7dd06` on
+`codex/v2-p7-chat-entry-repair`.
 The commands actually run on the frozen working tree were:
 
 ```text
