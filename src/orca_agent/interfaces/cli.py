@@ -6,6 +6,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -230,6 +231,87 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--probe", action="store_true")
     doctor_parser.add_argument("--orca-executable", type=Path)
     doctor_parser.add_argument("--json", action="store_true")
+
+    # P7 conversation/task surface.  These names intentionally do not reuse
+    # the legacy run-oriented commands above.
+    agent_chat = subparsers.add_parser("agent-chat")
+    chat_target = agent_chat.add_mutually_exclusive_group(required=True)
+    chat_target.add_argument("--new-conversation", action="store_true")
+    chat_target.add_argument("--conversation")
+    agent_chat.add_argument(
+        "--planner", choices=("baseline", "fake", "deepseek_chat"), required=True
+    )
+    agent_chat.add_argument("--allow-llm", action="store_true")
+    agent_chat.add_argument("--fallback", choices=("none", "baseline"), default="none")
+    agent_chat.add_argument("--text")
+    agent_chat.add_argument("--json", action="store_true")
+
+    agent_message = subparsers.add_parser("agent-message")
+    agent_message.add_argument("--conversation", required=True)
+    agent_message.add_argument("--text", required=True)
+    agent_message.add_argument("--save-request", type=Path, required=True)
+    agent_message.add_argument(
+        "--planner", choices=("baseline", "fake", "deepseek_chat"), default="baseline"
+    )
+    agent_message.add_argument("--allow-llm", action="store_true")
+    agent_message.add_argument("--fallback", choices=("none", "baseline"), default="none")
+    agent_message.add_argument("--json", action="store_true")
+
+    agent_work = subparsers.add_parser("agent-work")
+    agent_work.add_argument("--conversation", required=True)
+    agent_work.add_argument("--max-effects", type=int, default=16)
+    agent_work.add_argument("--max-seconds", type=float, default=30.0)
+    agent_work.add_argument("--allow-llm", action="store_true")
+    agent_work.add_argument("--allow-real-orca", action="store_true")
+    agent_work.add_argument("--backend", choices=("fake", "local_orca"), default="fake")
+    agent_work.add_argument(
+        "--planner", choices=("baseline", "fake", "deepseek_chat"), default="baseline"
+    )
+    agent_work.add_argument("--fallback", choices=("none", "baseline"), default="none")
+    agent_work.add_argument("--watch", action="store_true")
+    agent_work.add_argument("--json", action="store_true")
+
+    agent_query = subparsers.add_parser("agent-query")
+    agent_query.add_argument("--conversation", required=True)
+    agent_query.add_argument("--task")
+    agent_query.add_argument("--request-json", type=Path, required=True)
+    agent_query.add_argument("--json", action="store_true")
+
+    agent_action = subparsers.add_parser("agent-action")
+    agent_action.add_argument("--conversation", required=True)
+    agent_action.add_argument("--token", required=True)
+    agent_action.add_argument("--decision", choices=("accept", "reject"), required=True)
+    agent_action.add_argument("--save-request", type=Path, required=True)
+    agent_action.add_argument("--json", action="store_true")
+
+    agent_cancel = subparsers.add_parser("agent-cancel-task")
+    agent_cancel.add_argument("--conversation", required=True)
+    agent_cancel.add_argument("--task", required=True)
+    agent_cancel.add_argument("--expected-revision", type=int, required=True)
+    agent_cancel.add_argument("--json", action="store_true")
+
+    agent_interrupt = subparsers.add_parser("agent-interrupt-turn")
+    agent_interrupt.add_argument("--conversation", required=True)
+    agent_interrupt.add_argument("--turn", required=True)
+    agent_interrupt.add_argument("--json", action="store_true")
+
+    agent_link = subparsers.add_parser("agent-link-result")
+    agent_link.add_argument("--conversation", required=True)
+    agent_link.add_argument("--workflow", choices=("p5", "p6"), required=True)
+    agent_link.add_argument("--run", required=True)
+    agent_link.add_argument("--json", action="store_true")
+
+    agent_export = subparsers.add_parser("agent-export")
+    agent_export.add_argument("--conversation", required=True)
+    agent_export.add_argument("--task")
+    agent_export.add_argument("--format", choices=("md", "json"), default="md")
+    agent_export.add_argument("--output", type=Path, required=True)
+    agent_export.add_argument("--json", action="store_true")
+
+    agent_verify = subparsers.add_parser("agent-verify")
+    agent_verify.add_argument("--conversation", required=True)
+    agent_verify.add_argument("--task")
+    agent_verify.add_argument("--json", action="store_true")
     return parser
 
 
@@ -237,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
+        if args.operation.startswith("agent-"):
+            return _handle_p7_cli(args)
         if args.operation == "doctor":
             from orca_agent.execution.orca_config import doctor
 
@@ -733,6 +817,197 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 3
+
+
+def _handle_p7_cli(args) -> int:
+    """Dispatch the explicit P7 CLI without changing legacy run commands."""
+
+    from orca_agent.bootstrap.p7_modules import build_p7_runtime
+    from orca_agent.domain.ids import ConversationId, RunId
+    from orca_agent.llm.ports import strict_json_loads
+    from orca_agent.orchestration.p7_commands import (
+        ActionCommand,
+        ActionDecision,
+        MessageCommand,
+    )
+
+    planner_name = getattr(args, "planner", "baseline")
+    allow_llm = bool(getattr(args, "allow_llm", False))
+    fallback = getattr(args, "fallback", "none")
+    backend_kind = getattr(args, "backend", "fake")
+    allow_real_orca = bool(getattr(args, "allow_real_orca", False))
+    runtime = build_p7_runtime(
+        args.state_root,
+        planner_name=planner_name,
+        allow_llm=allow_llm,
+        fallback=fallback,
+        backend_kind=backend_kind,
+        allow_real_orca=allow_real_orca,
+    )
+
+    if args.operation == "agent-chat":
+        if args.new_conversation:
+            state = runtime.conversation.new_conversation()
+            conversation_id = str(state["conversation_id"])
+        else:
+            conversation_id = str(ConversationId(args.conversation))
+            state = runtime.conversation.get_state(conversation_id).model_dump(mode="json")
+        if args.text is not None:
+            response = runtime.conversation.message(conversation_id, args.text)
+            return _emit(
+                {"conversation_id": conversation_id, "conversation": state, "response": response},
+                bool(response.get("accepted")),
+                args.json,
+            )
+        _emit(state, True, args.json)
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            text = line.strip()
+            if not text:
+                continue
+            if text.casefold() in {"exit", "quit", "退出"}:
+                break
+            response = runtime.conversation.message(conversation_id, text)
+            code = _emit(response, bool(response.get("accepted")), args.json)
+            if code != 0:
+                return code
+        return 0
+
+    if args.operation == "agent-message":
+        conversation_id = ConversationId(args.conversation)
+        command = MessageCommand.create(
+            conversation_id=conversation_id,
+            text=args.text,
+            requested_at_utc=runtime.conversation.clock.now_utc(),
+        )
+        _save_request(command, args.save_request)
+        response = runtime.conversation.message(conversation_id, command.text)
+        return _emit(
+            {
+                "command_id": str(command.command_id),
+                "request": command.model_dump(mode="json"),
+                "response": response,
+            },
+            bool(response.get("accepted")),
+            args.json,
+        )
+
+    if args.operation == "agent-work":
+        conversation_id = ConversationId(args.conversation)
+        if not args.watch:
+            result = runtime.task.progress(
+                conversation_id,
+                max_effects=args.max_effects,
+                max_seconds=args.max_seconds,
+                allow_real_orca=args.allow_real_orca,
+            )
+            return _emit(result, True, args.json)
+        started = time.monotonic()
+        effects = 0
+        batches: list[dict[str, object]] = []
+        while time.monotonic() - started < args.max_seconds:
+            remaining = args.max_seconds - (time.monotonic() - started)
+            result = runtime.task.progress(
+                conversation_id,
+                max_effects=max(args.max_effects - effects, 1),
+                max_seconds=min(1.0, max(remaining, 0.1)),
+                allow_real_orca=args.allow_real_orca,
+            )
+            effects += int(result.get("effects", 0))
+            batches.append(result)
+            tasks = result.get("tasks", [])
+            if not isinstance(tasks, list) or all(
+                isinstance(item, dict)
+                and item.get("task", {}).get("state")
+                in {"result_ready", "ended_without_result", "reconciliation_required"}
+                for item in tasks
+            ):
+                break
+            if result.get("effects", 0) == 0:
+                break
+        return _emit(
+            {"conversation_id": str(conversation_id), "effects": effects, "batches": batches},
+            True,
+            args.json,
+        )
+
+    if args.operation == "agent-query":
+        request = strict_json_loads(args.request_json.read_bytes())
+        if not isinstance(request, dict):
+            raise ValueError("query request JSON must be an object")
+        result = runtime.query.query(
+            ConversationId(args.conversation), task_id=args.task, request=request
+        )
+        return _emit(result, True, args.json)
+
+    if args.operation == "agent-action":
+        conversation_id = ConversationId(args.conversation)
+        command = ActionCommand.create(
+            conversation_id=conversation_id,
+            token=args.token,
+            decision=ActionDecision(args.decision),
+            requested_at_utc=runtime.conversation.clock.now_utc(),
+        )
+        _save_request(command, args.save_request)
+        result = runtime.task.accept_action(
+            conversation_id,
+            command.token,
+            decision=command.decision.value,
+        )
+        return _emit(
+            {
+                "command_id": str(command.command_id),
+                "request": command.model_dump(mode="json"),
+                "response": result,
+            },
+            True,
+            args.json,
+        )
+
+    if args.operation == "agent-cancel-task":
+        result = runtime.task.cancel_task(
+            ConversationId(args.conversation),
+            args.task,
+            expected_revision=args.expected_revision,
+        )
+        return _emit(result, True, args.json)
+
+    if args.operation == "agent-interrupt-turn":
+        result = runtime.conversation.interrupt_turn(ConversationId(args.conversation), args.turn)
+        return _emit(result, True, args.json)
+
+    if args.operation == "agent-link-result":
+        result = runtime.query.link_existing_result(
+            ConversationId(args.conversation),
+            workflow=args.workflow,
+            run_id=RunId(args.run),
+        )
+        return _emit(result, True, args.json)
+
+    if args.operation == "agent-export":
+        value = runtime.query.export(
+            ConversationId(args.conversation), task_id=args.task, format=args.format
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        if args.format == "json":
+            args.output.write_text(
+                json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        else:
+            if not isinstance(value, str):
+                raise ValueError("P7 Markdown export is not text")
+            args.output.write_text(value, encoding="utf-8")
+        return _emit(
+            {"valid": True, "path": str(args.output), "format": args.format}, True, args.json
+        )
+
+    if args.operation == "agent-verify":
+        result = runtime.query.verify(ConversationId(args.conversation), task_id=args.task)
+        return _emit(result, bool(result.get("valid")), args.json)
+
+    raise ValueError("unsupported P7 operation")
 
 
 def _p4_service(state_root: str | Path, *, allow_network: bool = False):

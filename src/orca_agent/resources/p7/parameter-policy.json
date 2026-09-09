@@ -1,0 +1,19 @@
+{
+  "policy_version": "p7-parameter-policy-v1",
+  "capability_id": "chem.ground_state_baseline.v1",
+  "scope": "ordinary neutral water and ethanol only",
+  "recommendation": {
+    "charge": 0,
+    "multiplicity": 1,
+    "environment": "gas",
+    "method": "r2SCAN-3c"
+  },
+  "structure_bindings": {
+    "water": {"canonical_smiles": "O", "cas": "7732-18-5", "cid": "962"},
+    "ethanol": {"canonical_smiles": "CCO", "cas": "64-17-5", "cid": "702"}
+  },
+  "special_rules": {
+    "oxygen": "O=O is not accepted by the neutral closed-shell singlet baseline",
+    "generic_default": "No generic 0/1 inference outside the registered recommendation cards"
+  }
+}

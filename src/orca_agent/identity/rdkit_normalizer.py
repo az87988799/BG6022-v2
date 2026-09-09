@@ -177,5 +177,20 @@ class RDKitNormalizer:
             checks=checks,
         )
 
+    def formal_charge(self, smiles: str) -> int:
+        """Read only the sanitized formal charge for a P7 precheck."""
+
+        if not isinstance(smiles, str) or not smiles.strip() or "\x00" in smiles:
+            raise IdentityNormalizationError("invalid_identity", "SMILES is empty or invalid")
+        try:
+            molecule = self._chem.MolFromSmiles(smiles.strip(), sanitize=True)
+        except Exception as error:
+            raise IdentityNormalizationError(
+                "invalid_identity", "SMILES could not be parsed"
+            ) from error
+        if molecule is None:
+            raise IdentityNormalizationError("invalid_identity", "SMILES could not be parsed")
+        return int(self._chem.GetFormalCharge(molecule))
+
 
 __all__ = ["IdentityNormalizationError", "NormalizedStructure", "RDKitNormalizer"]

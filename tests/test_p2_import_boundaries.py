@@ -19,6 +19,7 @@ ADAPTER_ALLOWLIST = {
     "execution/local_backend.py": {"subprocess"},
     "execution/local_runner.py": {"subprocess"},
     "execution/orca_config.py": {"subprocess"},
+    "llm/deepseek_chat.py": {"httpx"},
 }
 
 

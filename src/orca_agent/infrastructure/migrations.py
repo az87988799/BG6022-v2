@@ -1474,6 +1474,212 @@ P5_LOCAL_JOB_STATEMENTS = (
 )
 
 
+# P7 owns conversation/task projections instead of overloading the P2-P6
+# workflow snapshots.  The tables deliberately keep the durable JSON record
+# and its hash together: P7 can evolve its domain contracts without changing
+# the historical event/checksum contracts owned by earlier phases.
+P7_CONVERSATION_STATEMENTS = (
+    """
+    CREATE TABLE p7_conversations (
+        conversation_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL CHECK(schema_version = 6),
+        engine_version TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        status TEXT NOT NULL CHECK(status IN ('open', 'closed')),
+        model_calls INTEGER NOT NULL CHECK(model_calls >= 0),
+        model_call_budget INTEGER NOT NULL CHECK(model_call_budget >= 0),
+        current_turn_id TEXT,
+        active_task_id TEXT,
+        state_json TEXT NOT NULL,
+        state_hash TEXT NOT NULL CHECK(length(state_hash) = 64),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL
+    )
+    """.strip(),
+    """
+    CREATE TABLE p7_turns (
+        turn_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        sequence_no INTEGER NOT NULL CHECK(sequence_no >= 1),
+        status TEXT NOT NULL CHECK(status IN (
+            'received', 'interpreting', 'responding', 'completed',
+            'failed', 'outcome_unknown', 'cancelled'
+        )),
+        user_text TEXT NOT NULL,
+        context_json TEXT NOT NULL,
+        context_hash TEXT NOT NULL CHECK(length(context_hash) = 64),
+        interpretation_json TEXT,
+        interpretation_hash TEXT CHECK(
+            interpretation_hash IS NULL OR length(interpretation_hash) = 64
+        ),
+        response_json TEXT,
+        response_hash TEXT CHECK(response_hash IS NULL OR length(response_hash) = 64),
+        task_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE(conversation_id, sequence_no)
+    )
+    """.strip(),
+    "CREATE INDEX p7_turns_conversation_sequence ON p7_turns(conversation_id, sequence_no)",
+    """
+    CREATE TABLE p7_tasks (
+        task_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        alias TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        state TEXT NOT NULL CHECK(state IN (
+            'draft', 'needs_clarification', 'plan_ready', 'identity_pending',
+            'execution_pending', 'executing', 'assessing', 'result_ready',
+            'ended_without_result', 'reconciliation_required'
+        )),
+        stop_reason TEXT,
+        request_json TEXT,
+        request_hash TEXT CHECK(request_hash IS NULL OR length(request_hash) = 64),
+        plan_json TEXT,
+        plan_hash TEXT CHECK(plan_hash IS NULL OR length(plan_hash) = 64),
+        validation_json TEXT,
+        validation_hash TEXT CHECK(validation_hash IS NULL OR length(validation_hash) = 64),
+        accepted_plan_hash TEXT CHECK(
+            accepted_plan_hash IS NULL OR length(accepted_plan_hash) = 64
+        ),
+        accepted_output_spec_hash TEXT CHECK(
+            accepted_output_spec_hash IS NULL OR length(accepted_output_spec_hash) = 64
+        ),
+        delivery_output_spec_json TEXT,
+        delivery_output_spec_hash TEXT CHECK(
+            delivery_output_spec_hash IS NULL OR length(delivery_output_spec_hash) = 64
+        ),
+        p4_run_id TEXT,
+        p5_run_id TEXT,
+        p6_run_id TEXT,
+        clarification_count INTEGER NOT NULL CHECK(clarification_count >= 0),
+        no_progress_count INTEGER NOT NULL CHECK(no_progress_count >= 0),
+        current_delivery_id TEXT,
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE(conversation_id, alias)
+    )
+    """.strip(),
+    "CREATE INDEX p7_tasks_conversation_state ON p7_tasks(conversation_id, state, updated_at_utc)",
+    """
+    CREATE TABLE p7_task_links (
+        link_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        link_kind TEXT NOT NULL CHECK(link_kind IN ('active', 'historical', 'focus')),
+        created_at_utc TEXT NOT NULL,
+        UNIQUE(conversation_id, task_id, link_kind)
+    )
+    """.strip(),
+    """
+    CREATE TABLE p7_pending_actions (
+        token TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        task_id TEXT REFERENCES p7_tasks(task_id),
+        action_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        expected_revision INTEGER NOT NULL CHECK(expected_revision >= 1),
+        content_hash TEXT NOT NULL CHECK(length(content_hash) = 64),
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'consumed', 'rejected', 'stale')),
+        decision TEXT,
+        created_at_utc TEXT NOT NULL,
+        consumed_at_utc TEXT
+    )
+    """.strip(),
+    "CREATE INDEX p7_pending_actions_lookup ON p7_pending_actions(conversation_id, status)",
+    """
+    CREATE TABLE p7_responses (
+        response_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        turn_id TEXT NOT NULL REFERENCES p7_turns(turn_id),
+        subrequest_index INTEGER NOT NULL CHECK(subrequest_index >= 0),
+        intent TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        response_hash TEXT NOT NULL CHECK(length(response_hash) = 64),
+        delivery_id TEXT,
+        created_at_utc TEXT NOT NULL,
+        UNIQUE(turn_id, subrequest_index)
+    )
+    """.strip(),
+    """
+    CREATE TABLE p7_model_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL REFERENCES p7_turns(turn_id),
+        slot TEXT NOT NULL CHECK(slot IN ('interpret', 'explain', 'format_repair')),
+        generation INTEGER NOT NULL CHECK(generation >= 1),
+        status TEXT NOT NULL CHECK(
+            status IN ('reserved', 'started', 'receipted', 'published', 'unknown', 'cancelled')
+        ),
+        request_json TEXT NOT NULL,
+        request_hash TEXT NOT NULL CHECK(length(request_hash) = 64),
+        context_hash TEXT NOT NULL CHECK(length(context_hash) = 64),
+        lease_expires_at_utc TEXT NOT NULL,
+        started_at_utc TEXT,
+        receipt_id TEXT,
+        created_at_utc TEXT NOT NULL,
+        UNIQUE(turn_id, slot)
+    )
+    """.strip(),
+    "CREATE INDEX p7_model_attempts_turn ON p7_model_attempts(turn_id, slot)",
+    """
+    CREATE TABLE p7_model_receipts (
+        receipt_id TEXT PRIMARY KEY,
+        attempt_id TEXT NOT NULL REFERENCES p7_model_attempts(attempt_id),
+        provider TEXT NOT NULL,
+        model TEXT,
+        outcome TEXT NOT NULL,
+        response_bytes BLOB,
+        response_hash TEXT CHECK(response_hash IS NULL OR length(response_hash) = 64),
+        provider_request_id TEXT,
+        usage_json TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        received_at_utc TEXT NOT NULL,
+        UNIQUE(attempt_id)
+    )
+    """.strip(),
+    """
+    CREATE TABLE p7_handoffs (
+        handoff_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        target TEXT NOT NULL CHECK(target IN ('p4', 'p5', 'p6')),
+        command_id TEXT NOT NULL,
+        child_id TEXT NOT NULL,
+        expected_revision INTEGER NOT NULL CHECK(expected_revision >= 1),
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+        status TEXT NOT NULL CHECK(
+            status IN ('prepared', 'submitted', 'linked', 'reconciliation_required')
+        ),
+        target_run_id TEXT,
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE(task_id, target)
+    )
+    """.strip(),
+    "CREATE INDEX p7_handoffs_child ON p7_handoffs(target, child_id)",
+    """
+    CREATE TABLE p7_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        delivery_version INTEGER NOT NULL CHECK(delivery_version >= 1),
+        output_spec_json TEXT NOT NULL,
+        output_spec_hash TEXT NOT NULL CHECK(length(output_spec_hash) = 64),
+        source_json TEXT NOT NULL,
+        source_hash TEXT NOT NULL CHECK(length(source_hash) = 64),
+        fulfillment_json TEXT NOT NULL,
+        overall_status TEXT NOT NULL CHECK(
+            overall_status IN ('fulfilled', 'partial', 'pending', 'unmet')
+        ),
+        created_at_utc TEXT NOT NULL,
+        UNIQUE(task_id, delivery_version)
+    )
+    """.strip(),
+    "CREATE INDEX p7_deliveries_task ON p7_deliveries(task_id, delivery_version)",
+)
+
+
 DEFAULT_MIGRATIONS = (
     Migration(
         version=1,
@@ -1516,6 +1722,11 @@ DEFAULT_MIGRATIONS = (
         version=7,
         name="p5_local_execution_jobs",
         statements=P5_LOCAL_JOB_STATEMENTS,
+    ),
+    Migration(
+        version=8,
+        name="p7_conversation_task_result_delivery",
+        statements=P7_CONVERSATION_STATEMENTS,
     ),
 )
 

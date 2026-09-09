@@ -27,6 +27,10 @@ p5 = [
 p6 = [
     "numpy>=2.4,<3",
 ]
+p7 = [
+    "rdkit==2026.3.5",
+    "httpx==0.28.1",
+]
 
 [dependency-groups]
 dev = [
@@ -40,7 +44,7 @@ dev = [
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-orca_agent = ["py.typed", "fixtures/*.json"]
+orca_agent = ["py.typed", "fixtures/*.json", "resources/p7/*.json", "resources/p7/*.txt"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

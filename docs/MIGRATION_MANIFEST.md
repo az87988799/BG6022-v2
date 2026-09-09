@@ -30,11 +30,21 @@ Every record must contain these fields, without changing their meaning:
 P6 is a new derived workflow, not a legacy-code or legacy-state migration.
 It stores schema-5 typed records and owned artifacts in the existing V2
 versioned tables, while retaining P5 parser-v4 records as the source
-authority. No P5 history is rewritten, and no SQLite migration v8 is added.
+authority. No P5 history is rewritten. At the P6 acceptance point no SQLite
+migration v8 had been added; P7 later adds its own additive migration below.
 The P6 report manifest records the exact P5 source and derived artifact
 dependencies without creating a manifest self-hash cycle. Any future P6
 adaptation from legacy code must add an explicit record above with the fixed
 legacy commit and blob SHA.
+
+## P7 additive migration note
+
+P7 requires durable conversation, ordered turn, task, pending-action,
+model-attempt/receipt, handoff, and delivery records. Migration **8**
+(`p7_conversation_task_result_delivery`) adds only these new tables and
+indexes. It does not alter or rewrite P1-P6 tables, historical hashes, or
+existing workflow records. A database already at migration 7 is upgraded
+forward; a checksum mismatch remains a hard failure.
 
 Allowed `migration_mode` values are `copied`, `adapted`, and `rewritten`.
 Each entry must identify the exact legacy commit and blob SHA, list ported
