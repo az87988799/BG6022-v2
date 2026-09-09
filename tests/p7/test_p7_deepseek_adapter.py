@@ -67,3 +67,27 @@ def test_deepseek_request_uses_bounded_json_chat_contract() -> None:
 def test_deepseek_missing_configuration_is_non_network_error() -> None:
     response = DeepSeekChatAdapter(environ={}).interpret(_context())
     assert response.error_code == "configuration_missing"
+
+
+def test_deepseek_reads_project_env_without_overriding_process_values(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DEEPSEEK_API_KEY=file-key\nBG6022_P7_MODEL=file-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("BG6022_P7_MODEL", raising=False)
+
+    adapter = DeepSeekChatAdapter()
+
+    assert adapter.api_key == "file-key"
+    assert adapter.model == "file-model"
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "process-key")
+    monkeypatch.setenv("BG6022_P7_MODEL", "process-model")
+    preferred = DeepSeekChatAdapter()
+
+    assert preferred.api_key == "process-key"
+    assert preferred.model == "process-model"

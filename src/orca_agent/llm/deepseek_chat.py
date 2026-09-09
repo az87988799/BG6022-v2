@@ -6,6 +6,7 @@ import json
 import os
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from orca_agent.domain.p7_conversation import ContextSnapshot
 from orca_agent.llm.ports import ModelCallRequest, ModelCallResponse, ModelMessage
@@ -14,6 +15,7 @@ from orca_agent.orchestration.p7_versions import PROMPT_VERSION
 DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
 MAX_RESPONSE_BYTES = 256 * 1024
 HTTP_DEADLINE_SECONDS = 45.0
+_PROJECT_ENV_KEYS = frozenset({"DEEPSEEK_API_KEY", "BG6022_P7_MODEL"})
 
 
 class DeepSeekChatAdapter:
@@ -32,7 +34,7 @@ class DeepSeekChatAdapter:
         | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> None:
-        env = os.environ if environ is None else environ
+        env = _runtime_environment(environ)
         self.api_key = api_key if api_key is not None else env.get("DEEPSEEK_API_KEY")
         self.model = model if model is not None else env.get("BG6022_P7_MODEL")
         self.endpoint = endpoint
@@ -195,6 +197,43 @@ def _context_prompt(context: ContextSnapshot) -> str:
         "Interpret this user message under the supplied context. JSON output is required:\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
+
+
+def _runtime_environment(environ: Mapping[str, str] | None) -> Mapping[str, str]:
+    """Resolve explicit process variables plus an optional project ``.env``.
+
+    Tests and embedders can pass an explicit mapping to disable filesystem
+    lookup.  For normal CLI use, a project-root ``.env`` is convenient while
+    process variables remain authoritative when both are present.
+    """
+
+    if environ is not None:
+        return environ
+    values = dict(os.environ)
+    env_path = Path.cwd() / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return values
+    except OSError:
+        return values
+    for line in lines:
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        if entry.startswith("export "):
+            entry = entry[7:].lstrip()
+        key, separator, raw_value = entry.partition("=")
+        key = key.strip()
+        if not separator or key not in _PROJECT_ENV_KEYS:
+            continue
+        if values.get(key):
+            continue
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key] = value
+    return values
 
 
 __all__ = [

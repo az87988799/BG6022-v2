@@ -29,6 +29,18 @@ The work response exposes the P4 identity token. Accept it with
 `approve_execution` token in turn. The P5 fake protocol has three nodes; a
 plan/identity acceptance never substitutes for those three execution grants.
 
+For a local DeepSeek setup, copy the repository template before starting the
+CLI and fill in the two values:
+
+```powershell
+Copy-Item .env.example .env
+# edit .env: DEEPSEEK_API_KEY=... and BG6022_P7_MODEL=...
+```
+
+The P7 adapter reads `.env` from the current project directory. Process
+environment variables with the same names take precedence. The `.env` file is
+ignored by Git and must remain local.
+
 After the final bounded work call:
 
 ```powershell
@@ -44,5 +56,5 @@ python -m orca_agent --state-root $P7Root agent-verify `
 `agent-work --allow-real-orca` only enables the configured real backend. It does
 not auto-approve a P5 action and must not be used with an unknown ORCA
 configuration. DeepSeek requires `--planner deepseek_chat --allow-llm` and the
-environment variables named in the implementation plan; no key belongs in a
-request file or repository.
+environment variables named in the implementation plan, either from `.env` or
+the process environment; no key belongs in a request file or repository.
