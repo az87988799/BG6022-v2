@@ -30,9 +30,8 @@ implementation and explicitly accept it before P7 is marked complete.
 
 ## Offline verification record
 
-The implementation commit SHA will be recorded immediately after the code
-commit in the follow-up documentation commit. The commands actually run on
-the frozen working tree were:
+Implementation commit: `2ceda958905fd14bad3cbbe14894a02e885f2412`.
+The commands actually run on the frozen working tree were:
 
 ```text
 ruff check src tests                                      PASS
