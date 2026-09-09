@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from orca_agent.application.p7_task_service import P7TaskService
 from orca_agent.domain.ids import ConversationId, RunId
-from orca_agent.domain.p7_task import OutputKind, OutputQuantity, OutputSpec
+from orca_agent.domain.p7_task import (
+    DeliveryRecord,
+    OutputKind,
+    OutputQuantity,
+    OutputSpec,
+)
 from orca_agent.infrastructure.clock import Clock, SystemClock
 from orca_agent.infrastructure.p7_records import P7RecordRepository
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
 from orca_agent.llm.ports import strict_json_loads
 from orca_agent.presentation.p7_results import P7ResultPresenter
+
+
+class TaskSelectionAmbiguousError(ValueError):
+    """Raised when a context query cannot safely choose one task."""
+
+    def __init__(self, candidates) -> None:
+        self.candidates = tuple(candidates)
+        labels = ", ".join(f"{item.alias} ({item.task_id})" for item in self.candidates)
+        super().__init__(f"multiple tasks match; specify one of: {labels}")
 
 
 class P7QueryService:
@@ -49,15 +64,26 @@ class P7QueryService:
             turns = records.list_turns(conversation, limit=12)
             pending = records.list_pending(conversation)
             uow.commit()
-        selected = self._select_task(tasks, state.active_task_id, task_id, request)
         result: dict[str, object] = {
             "conversation_id": conversation,
             "conversation": state.model_dump(mode="json"),
             "tasks": [item.model_dump(mode="json") for item in tasks],
             "turns": [item.model_dump(mode="json") for item in turns],
             "pending_actions": [item.model_dump(mode="json") for item in pending],
-            "selected_task_id": None if selected is None else selected.task_id,
+            "selected_task_id": None,
         }
+        try:
+            selected = self._select_task(tasks, state.active_task_id, task_id, request)
+        except TaskSelectionAmbiguousError as error:
+            result["error"] = {
+                "code": "task_ambiguous",
+                "candidates": [
+                    {"task_id": item.task_id, "alias": item.alias, "state": item.state.value}
+                    for item in error.candidates
+                ],
+            }
+            return result
+        result["selected_task_id"] = None if selected is None else selected.task_id
         if selected is None:
             if task_id or request.get("task_id") or request.get("task_alias"):
                 result["error"] = {"code": "task_not_found_or_ambiguous"}
@@ -67,10 +93,12 @@ class P7QueryService:
         result["task_sources"] = {
             key: value for key, value in view.items() if key in {"p4", "p5", "p6"}
         }
+        result["task_status"] = selected.state.value
+        query_text = str(request.get("text", "")).strip()
+        if self._asks_for_method(query_text):
+            result["method"] = self._method_view(selected)
         delivery = view.get("delivery")
         if delivery is not None:
-            from orca_agent.domain.p7_task import DeliveryRecord
-
             delivery_model = DeliveryRecord.model_validate_json(
                 json.dumps(delivery, ensure_ascii=False), strict=True
             )
@@ -78,20 +106,25 @@ class P7QueryService:
                 request,
                 fallback=delivery_model.output_spec,
             )
-            if output_spec.output_spec_hash == delivery_model.output_spec.output_spec_hash:
-                result["delivery"] = self.presenter.render(delivery_model, format="json")
-            else:
-                # A display-only request is a new rendered view.  It never
-                # mutates the scientific DeliveryRecord or its approval.
-                rendered = self.presenter.render(delivery_model, format="json")
-                if not isinstance(rendered, dict):
-                    raise ValueError("P7 JSON presenter returned non-object output")
-                rendered["output_spec"] = output_spec.model_dump(mode="json")
-                rendered["rendered_output_spec_hash"] = output_spec.output_spec_hash
-                result["rendered_from_delivery_id"] = delivery_model.delivery_id
-                result["delivery"] = rendered
+            # The delivery is the immutable scientific record.  Any layout,
+            # precision, language, or quantity change is returned separately
+            # as a typed view with its own hash.
+            result["delivery"] = self.presenter.render(delivery_model, format="json")
+            p5_view = self._read_projection(self.task_service.p5, selected.p5_run_id)
+            p6_view = self._read_projection(self.task_service.p6, selected.p6_run_id)
+            rendered_view = self.presenter.build_rendered_view(
+                selected,
+                delivery_model,
+                output_spec=output_spec,
+                p5_view=p5_view,
+                p6_view=p6_view,
+                now=self.clock.now_utc(),
+            )
+            result["rendered_from_delivery_id"] = delivery_model.delivery_id
+            result["view"] = self.presenter.render_view(rendered_view, format="json")
         else:
             result["delivery"] = None
+            result["view"] = None
         return result
 
     def messages(self, conversation_id: ConversationId | str) -> tuple[dict[str, object], ...]:
@@ -185,12 +218,44 @@ class P7QueryService:
         delivery = result.get("delivery")
         if delivery is None:
             raise ValueError("selected task has no delivery")
-        from orca_agent.domain.p7_task import DeliveryRecord
-
         model = DeliveryRecord.model_validate_json(
             json.dumps(delivery, ensure_ascii=False), strict=True
         )
         return self.presenter.render(model, format=format)
+
+    @staticmethod
+    def _read_projection(service: object, run_id: str | None) -> object | None:
+        if not run_id:
+            return None
+        try:
+            return service.inspect(RunId(run_id))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _asks_for_method(text: str) -> bool:
+        lowered = text.casefold()
+        return any(
+            marker in lowered
+            for marker in ("采用什么方法", "使用了什么方法", "什么方法", "which method", "method")
+        )
+
+    @staticmethod
+    def _method_view(task) -> dict[str, object]:
+        request = task.request
+        plan = task.plan
+        requested = (
+            None
+            if request is None or request.method is None
+            else request.method.model_dump(mode="json")
+        )
+        return {
+            "requested": requested,
+            "profile_id": None if plan is None else plan.method_profile_id,
+            "protocol_id": None if plan is None else plan.protocol_id,
+            "environment": None if plan is None else plan.environment,
+            "source": "task.request_and_plan",
+        }
 
     @staticmethod
     def _strict_request(request: dict[str, object]) -> dict[str, object]:
@@ -216,8 +281,25 @@ class P7QueryService:
                 return None
             return matches[0]
         alias = request.get("task_alias")
+        if alias is None and request.get("text"):
+            alias = P7QueryService._alias_from_text(str(request["text"]))
         if alias is not None:
-            matches = tuple(item for item in tasks if item.alias == str(alias))
+            normalized = str(alias).strip().casefold()
+            if normalized in {
+                "当前任务",
+                "刚才那个",
+                "刚才的任务",
+                "上次",
+                "上一个任务",
+                "this task",
+                "that task",
+                "the current task",
+            }:
+                matches = tuple(item for item in tasks if item.task_id == active_task_id)
+                if not matches and len(tasks) == 1:
+                    matches = tasks
+            else:
+                matches = tuple(item for item in tasks if item.alias.casefold() == normalized)
             return matches[0] if len(matches) == 1 else None
         if active_task_id:
             matches = tuple(item for item in tasks if item.task_id == active_task_id)
@@ -227,13 +309,68 @@ class P7QueryService:
             return tasks[0]
         if len(tasks) == 0:
             return None
-        raise ValueError("multiple tasks match; specify task_id or task_alias")
+        raise TaskSelectionAmbiguousError(tasks)
+
+    @staticmethod
+    def _alias_from_text(text: str) -> str | None:
+        lowered = text.casefold()
+        if any(
+            marker in lowered
+            for marker in ("刚才", "上次", "当前任务", "this task", "that task")
+        ):
+            return "当前任务"
+        return None
 
     @staticmethod
     def _output_spec_from_request(
         request: dict[str, object], *, fallback: OutputSpec
     ) -> OutputSpec:
         value = request.get("output_spec")
+        if value is None and request.get("layout") is not None:
+            value = {"layout": request["layout"]}
+        if value is None and request.get("text"):
+            text = str(request["text"])
+            lowered = text.casefold()
+            status_markers = ("算完了吗", "完成了吗", "状态", "status")
+            value_markers = ("能量", "energy", "频率", "frequency", "结构", "geometry")
+            if any(marker in lowered for marker in status_markers) and not any(
+                marker in lowered for marker in value_markers
+            ):
+                value = {
+                    "quantities": [{"kind": OutputKind.EXECUTION_STATUS.value, "required": True}],
+                    "layout": "prose",
+                }
+            else:
+                quantities = []
+                if any(
+                    marker in lowered
+                    for marker in ("独立单点", "单点能量", "independent sp", "single point energy")
+                ):
+                    quantities.append(
+                        {
+                            "kind": OutputKind.INDEPENDENT_SP_ELECTRONIC_ENERGY.value,
+                            "required": True,
+                        }
+                    )
+                if any(marker in lowered for marker in ("优化结构", "optimized structure", "xyz")):
+                    quantities.append(
+                        {"kind": OutputKind.OPTIMIZED_GEOMETRY.value, "required": True}
+                    )
+                if any(marker in lowered for marker in ("频率", "vibrational", "frequency")):
+                    quantities.append(
+                        {"kind": OutputKind.VIBRATIONAL_FREQUENCIES.value, "required": True}
+                    )
+                if quantities:
+                    value = {"quantities": quantities}
+                precision = re.search(
+                    r"(?:小数|decimal|precision)\s*(?:位|places)?\s*[:：=]?\s*(\d+)",
+                    text,
+                    re.I,
+                )
+                if precision:
+                    value = {**(value or {}), "precision": int(precision.group(1))}
+                if "table" in lowered or "表格" in lowered:
+                    value = {**(value or {}), "layout": "table"}
         if value is None:
             return fallback
         if not isinstance(value, dict):
@@ -289,4 +426,4 @@ class P7QueryService:
         )
 
 
-__all__ = ["P7QueryService"]
+__all__ = ["P7QueryService", "TaskSelectionAmbiguousError"]

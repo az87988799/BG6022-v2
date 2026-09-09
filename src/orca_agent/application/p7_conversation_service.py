@@ -151,6 +151,8 @@ class P7ConversationService:
     def message(self, conversation_id: ConversationId | str, text: str) -> dict[str, object]:
         conversation = str(conversation_id)
         state, turn, context = self._receive_turn(conversation, text)
+        if not self._set_turn_status(conversation, turn.turn_id, TurnStatus.INTERPRETING):
+            return self._turn_cancelled_response(conversation, turn.turn_id)
         try:
             interpretation, source, model_error = self._interpret(context, turn_id=turn.turn_id)
             if interpretation is None:
@@ -164,6 +166,8 @@ class P7ConversationService:
                 interpretation = self._rewrite_acceptance(
                     conversation, interpretation, turn.turn_id
                 )
+            if not self._set_turn_status(conversation, turn.turn_id, TurnStatus.RESPONDING):
+                return self._turn_cancelled_response(conversation, turn.turn_id)
             implicit = self._unique_pending_action(conversation, text)
             if implicit is not None:
                 interpretation = TurnInterpretation(
@@ -194,6 +198,51 @@ class P7ConversationService:
                 source=ResponseSource.PROGRAM,
                 error_message=str(error),
             )
+
+    def _set_turn_status(
+        self, conversation: str, turn_id: str, status: TurnStatus
+    ) -> bool:
+        now = self.clock.now_utc()
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            state = records.get_conversation(conversation)
+            turn = records.get_turn(conversation, turn_id)
+            if state is None or turn is None or state.current_turn_id != turn_id:
+                uow.commit()
+                return False
+            if turn.status in {
+                TurnStatus.CANCELLED,
+                TurnStatus.COMPLETED,
+                TurnStatus.FAILED,
+                TurnStatus.OUTCOME_UNKNOWN,
+            }:
+                uow.commit()
+                return False
+            candidate = turn.model_copy(
+                update={"status": status, "updated_at_utc": now, "record_hash": "0" * 64}
+            )
+            updated = candidate.model_copy(
+                update={
+                    "record_hash": sha256_hex(
+                        candidate.model_dump(mode="json", exclude={"record_hash"})
+                    )
+                }
+            )
+            records.update_turn(updated)
+            uow.commit()
+            return True
+
+    @staticmethod
+    def _turn_cancelled_response(conversation: str, turn_id: str) -> dict[str, object]:
+        return {
+            "accepted": False,
+            "conversation_id": conversation,
+            "turn_id": turn_id,
+            "source": ResponseSource.PROGRAM.value,
+            "code": "turn_cancelled",
+            "text": "本轮已中断；迟到的模型响应不会创建任务或覆盖新一轮。",
+        }
 
     def _receive_turn(
         self, conversation: str, text: str
@@ -428,7 +477,15 @@ class P7ConversationService:
             uow.begin()
             records = P7RecordRepository(uow.connection)
             records.insert_model_receipt(receipt_values)
-            records.update_model_attempt(attempt_id, status="receipted", receipt_id=receipt_id)
+            current_turn = records.get_turn(str(context.conversation_id), turn_id)
+            attempt_status = (
+                "cancelled"
+                if current_turn is None or current_turn.status is TurnStatus.CANCELLED
+                else "receipted"
+            )
+            records.update_model_attempt(
+                attempt_id, status=attempt_status, receipt_id=receipt_id
+            )
             current = records.get_conversation(str(context.conversation_id))
             if current is not None:
                 updated = _state_with(
@@ -438,7 +495,10 @@ class P7ConversationService:
                 )
                 records.update_conversation(updated, expected_revision=current.revision)
             uow.commit()
-        return self._validate_model_response(response, context, turn_id)
+        validated = self._validate_model_response(response, context, turn_id)
+        if validated[0] is not None or validated[2] != "invalid_model_output":
+            return validated
+        return self._format_repair(planner, context, turn_id, response)
 
     def _validate_model_response(
         self,
@@ -474,6 +534,131 @@ class P7ConversationService:
             )
         source = ResponseSource.DEEPSEEK if response.provider == "deepseek" else ResponseSource.FAKE
         return interpretation.model_copy(update={"source": source}), source, None
+
+    def _format_repair(
+        self,
+        planner: object,
+        context: ContextSnapshot,
+        turn_id: str,
+        invalid_response: ModelCallResponse,
+    ) -> tuple[TurnInterpretation | None, ResponseSource, str | None]:
+        repair = getattr(planner, "format_repair", None)
+        source = (
+            ResponseSource.DEEPSEEK
+            if invalid_response.provider == "deepseek"
+            else ResponseSource.FAKE
+        )
+        if not callable(repair):
+            return None, source, "invalid_model_output"
+        raw_content = invalid_response.content or ""
+        request_payload = {
+            "adapter_id": getattr(planner, "adapter_id", "unknown"),
+            "model": getattr(planner, "model", None),
+            "context_hash": context.snapshot_hash,
+            "prompt_version": PROMPT_VERSION,
+            "turn_id": turn_id,
+            "original_response_hash": sha256_hex(raw_content),
+        }
+        attempt_id = str(new_id(AttemptId))
+        now = self.clock.now_utc()
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            prior = records.get_model_attempt(turn_id, "format_repair")
+            if prior is not None:
+                receipt = records.get_model_receipt(str(prior["attempt_id"]))
+                if receipt is not None:
+                    uow.commit()
+                    return self._validate_model_response(
+                        self._response_from_receipt(receipt), context, turn_id
+                    )
+                if prior["status"] in {"started", "reserved"}:
+                    records.update_model_attempt(str(prior["attempt_id"]), status="unknown")
+                    uow.commit()
+                    return None, source, "outcome_unknown"
+            records.insert_model_attempt(
+                {
+                    "attempt_id": attempt_id,
+                    "turn_id": turn_id,
+                    "slot": "format_repair",
+                    "generation": 1,
+                    "status": "started",
+                    "request": request_payload,
+                    "request_hash": sha256_hex(request_payload),
+                    "context_hash": context.snapshot_hash,
+                    "lease_expires_at_utc": format_utc(
+                        now + timedelta(seconds=_MODEL_LEASE_SECONDS)
+                    ),
+                    "started_at_utc": format_utc(now),
+                    "created_at_utc": format_utc(now),
+                }
+            )
+            uow.commit()
+        try:
+            response = repair(context, invalid_response)
+        except Exception as error:
+            response = ModelCallResponse(
+                provider=getattr(planner, "adapter_id", "planner"),
+                model=getattr(planner, "model", None),
+                error_code="format_repair_error",
+                error_message=str(error)[:512],
+            )
+        if isinstance(response, TurnInterpretation):
+            encoded = json.dumps(response.model_dump(mode="json"), ensure_ascii=False)
+            response = ModelCallResponse(
+                provider=getattr(planner, "adapter_id", "planner"),
+                model=getattr(planner, "model", None),
+                content=encoded,
+                raw_bytes=encoded.encode("utf-8"),
+            )
+        if not isinstance(response, ModelCallResponse):
+            response = ModelCallResponse(
+                provider=getattr(planner, "adapter_id", "planner"),
+                model=getattr(planner, "model", None),
+                error_code="invalid_format_repair_response",
+                error_message="format_repair returned an unsupported response object",
+            )
+        raw = response.raw_bytes or (response.content.encode("utf-8") if response.content else None)
+        receipt_id = f"modelreceipt_{uuid.uuid4().hex}"
+        receipt_values = {
+            "receipt_id": receipt_id,
+            "attempt_id": attempt_id,
+            "provider": response.provider,
+            "model": response.model,
+            "outcome": "success" if response.error_code is None and response.content else "error",
+            "response_bytes": raw,
+            "response_hash": None
+            if raw is None
+            else sha256_hex(raw.decode("utf-8", errors="replace")),
+            "provider_request_id": response.provider_request_id,
+            "usage": thaw_json(response.usage),
+            "error_code": response.error_code,
+            "error_message": response.error_message,
+            "received_at_utc": format_utc(self.clock.now_utc()),
+        }
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            records.insert_model_receipt(receipt_values)
+            current_turn = records.get_turn(str(context.conversation_id), turn_id)
+            attempt_status = (
+                "cancelled"
+                if current_turn is None or current_turn.status is TurnStatus.CANCELLED
+                else "receipted"
+            )
+            records.update_model_attempt(
+                attempt_id, status=attempt_status, receipt_id=receipt_id
+            )
+            current = records.get_conversation(str(context.conversation_id))
+            if current is not None:
+                updated = _state_with(
+                    current,
+                    model_calls=current.model_calls + 1,
+                    updated_at_utc=self.clock.now_utc(),
+                )
+                records.update_conversation(updated, expected_revision=current.revision)
+            uow.commit()
+        return self._validate_model_response(response, context, turn_id)
 
     @staticmethod
     def _response_from_receipt(receipt: dict[str, object]) -> ModelCallResponse:
@@ -543,6 +728,7 @@ class P7ConversationService:
                         task_id=None,
                         request={
                             "kind": "result",
+                            "text": item.query,
                             "task_alias": item.task_alias,
                             "output_spec": thaw_json(item.output_spec)
                             if item.output_spec
@@ -818,7 +1004,22 @@ class P7ConversationService:
     def _resolve_task(self, conversation: str, alias: str | None) -> TaskRecord | None:
         tasks = self.task_service.list_tasks(conversation)
         if alias:
-            matches = tuple(item for item in tasks if item.alias == alias)
+            normalized = alias.strip().casefold()
+            if normalized in {
+                "当前任务",
+                "刚才那个",
+                "刚才的任务",
+                "上次",
+                "上一个任务",
+                "this task",
+                "that task",
+            }:
+                state = self.get_state(conversation)
+                matches = tuple(item for item in tasks if item.task_id == state.active_task_id)
+                if not matches and len(tasks) == 1:
+                    matches = tasks
+            else:
+                matches = tuple(item for item in tasks if item.alias.casefold() == normalized)
             return matches[0] if len(matches) == 1 else None
         if len(tasks) == 1:
             return tasks[0]
@@ -845,11 +1046,27 @@ class P7ConversationService:
 
     @staticmethod
     def _query_text(query: dict[str, object]) -> str:
+        error = query.get("error")
+        if isinstance(error, dict) and error.get("code") == "task_ambiguous":
+            candidates = error.get("candidates", [])
+            labels = ", ".join(
+                str(item.get("alias", item.get("task_id", "")))
+                for item in candidates
+                if isinstance(item, dict)
+            )
+            return f"无法唯一定位当前查询对象，请指定任务：{labels}。"
+        method = query.get("method")
+        if isinstance(method, dict):
+            profile = method.get("profile_id") or method.get("requested")
+            return f"当前任务采用的方法：{profile or '尚未确定'}。"
         delivery = query.get("delivery")
         if delivery is None:
-            return "当前任务还没有可交付结果；已保留真实执行状态。"
+            status = query.get("task_status", "unknown")
+            return f"当前任务真实状态：{status}；还没有可交付结果。"
         overall = delivery.get("overall_status") if isinstance(delivery, dict) else None
-        return f"已读取当前任务的结果交付包，整体状态：{overall}。"
+        view = query.get("view")
+        view_status = view.get("overall_status") if isinstance(view, dict) else overall
+        return f"已读取当前任务的结果交付包，展示状态：{view_status}；原始交付状态：{overall}。"
 
     @staticmethod
     def _is_recommendation_acceptance(text: str) -> bool:
@@ -910,6 +1127,12 @@ class P7ConversationService:
             current_turn = records.get_turn(conversation, turn.turn_id)
             if state is None or current_turn is None:
                 raise ValueError("turn disappeared before completion")
+            if (
+                state.current_turn_id != turn.turn_id
+                or current_turn.status is not TurnStatus.RESPONDING
+            ):
+                uow.commit()
+                return self._turn_cancelled_response(conversation, turn.turn_id)
             for index, item in enumerate(responses):
                 if not isinstance(item, dict):
                     continue
@@ -982,6 +1205,9 @@ class P7ConversationService:
             current = records.get_turn(conversation, turn.turn_id)
             if state is None or current is None:
                 raise ValueError("turn disappeared before failure publication")
+            if state.current_turn_id != turn.turn_id or current.status is TurnStatus.CANCELLED:
+                uow.commit()
+                return self._turn_cancelled_response(conversation, turn.turn_id)
             failed = TurnRecord.create(
                 turn_id=current.turn_id,
                 conversation_id=ConversationId(conversation),
@@ -1038,6 +1264,21 @@ class P7ConversationService:
             }:
                 uow.commit()
                 return {"accepted": True, "replayed": True, "turn_id": turn_id}
+            if state.current_turn_id != turn_id:
+                uow.commit()
+                return {
+                    "accepted": False,
+                    "turn_id": turn_id,
+                    "code": "turn_not_current",
+                }
+            if turn.status is TurnStatus.RESPONDING:
+                uow.commit()
+                return {
+                    "accepted": False,
+                    "turn_id": turn_id,
+                    "code": "turn_already_dispatching",
+                    "text": "本轮已进入分派阶段，不能在此时取消。",
+                }
             cancelled = TurnRecord.create(
                 turn_id=turn.turn_id,
                 conversation_id=ConversationId(conversation),

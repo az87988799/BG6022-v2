@@ -10,7 +10,6 @@ from pathlib import Path
 
 from orca_agent.domain.p7_conversation import ContextSnapshot
 from orca_agent.llm.ports import ModelCallRequest, ModelCallResponse, ModelMessage
-from orca_agent.orchestration.p7_versions import PROMPT_VERSION
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -69,6 +68,52 @@ class DeepSeekChatAdapter:
             stream=False,
             thinking_enabled=False,
         )
+        return self._send(request)
+
+    def format_repair(
+        self, context: ContextSnapshot, invalid_response: ModelCallResponse
+    ) -> ModelCallResponse:
+        """Ask the provider once to repair JSON shape, never scientific content."""
+
+        if not self.api_key:
+            return ModelCallResponse(
+                provider="deepseek",
+                model=self.model,
+                error_code="configuration_missing",
+                error_message="DEEPSEEK_API_KEY is not configured",
+            )
+        if not self.model:
+            return ModelCallResponse(
+                provider="deepseek",
+                error_code="configuration_missing",
+                error_message="BG6022_P7_MODEL is not configured",
+            )
+        original = (invalid_response.content or "")[:16_384]
+        request = ModelCallRequest.create(
+            adapter_id=self.adapter_id,
+            model=self.model,
+            messages=(
+                ModelMessage(role="system", content=_system_prompt()),
+                ModelMessage(
+                    role="user",
+                    content=(
+                        "Repair the following invalid model output to the published P7 JSON "
+                        "contract. Preserve only user-intent meaning; do not add IDs, approvals, "
+                        "results, or scientific values. Return JSON only.\n"
+                        + original
+                        + "\nContext:\n"
+                        + _context_prompt(context)
+                    ),
+                ),
+            ),
+            response_format={"type": "json_object"},
+            max_tokens=2048,
+            stream=False,
+            thinking_enabled=False,
+        )
+        return self._send(request)
+
+    def _send(self, request: ModelCallRequest) -> ModelCallResponse:
         self.last_request = request
         body = {
             "model": request.model,
@@ -179,16 +224,9 @@ class DeepSeekChatAdapter:
 
 
 def _system_prompt() -> str:
-    return (
-        f"You are BG6022 P7 intake planner, prompt version {PROMPT_VERSION}. "
-        "Return one JSON object only with schema_version 'p7.turn.v1', prompt_version "
-        "'p7.intake-plan.v1', and an ordered subrequests array of at most four items. "
-        "Each subrequest intent must be one of chemical_calculation, chemistry_qa, "
-        "general_qa, context_query. Preserve explicit constraints and unsupported "
-        "requests. Never invent IDs, grants, file paths, results, approvals, or citations. "
-        "A query or question must not become a calculation. A calculation must not start "
-        "execution; the application owns validation and approvals."
-    )
+    prompt = _read_p7_resource("intake.prompt.txt")
+    schema = _read_p7_resource("intake.schema.json")
+    return f"{prompt}\n\nPublished JSON Schema:\n{schema}"
 
 
 def _context_prompt(context: ContextSnapshot) -> str:
@@ -197,6 +235,11 @@ def _context_prompt(context: ContextSnapshot) -> str:
         "Interpret this user message under the supplied context. JSON output is required:\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
+
+
+def _read_p7_resource(name: str) -> str:
+    resource = Path(__file__).resolve().parents[1] / "resources" / "p7" / name
+    return resource.read_text(encoding="utf-8")
 
 
 def _runtime_environment(environ: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -210,9 +253,9 @@ def _runtime_environment(environ: Mapping[str, str] | None) -> Mapping[str, str]
     if environ is not None:
         return environ
     values = dict(os.environ)
-    env_path = Path.cwd() / ".env"
+    env_path = _project_env_path()
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
     except FileNotFoundError:
         return values
     except OSError:
@@ -234,6 +277,16 @@ def _runtime_environment(environ: Mapping[str, str] | None) -> Mapping[str, str]
             value = value[1:-1]
         values[key] = value
     return values
+
+
+def _project_env_path() -> Path:
+    current = Path.cwd() / ".env"
+    if current.is_file():
+        return current
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent / ".env"
+    return current
 
 
 __all__ = [

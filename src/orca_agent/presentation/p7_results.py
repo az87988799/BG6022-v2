@@ -23,6 +23,7 @@ from orca_agent.domain.p7_task import (
     OutputKind,
     OutputSpec,
     OverallDeliveryStatus,
+    RenderedResultView,
     TaskRecord,
 )
 from orca_agent.infrastructure.clock import SystemClock, format_utc
@@ -95,19 +96,12 @@ class P7ResultPresenter:
         )
         p5_results = tuple(getattr(p5_view, "results", ())) if p5_view is not None else ()
         p6_results = () if p6_view is None else tuple(p6_view.source_snapshot.results)
-        fulfillments = tuple(
-            self._fulfill(
-                quantity.kind,
-                quantity.required,
-                quantity.source_selector,
-                quantity.unit,
-                p5_view=p5_view,
-                p5_results=p5_results,
-                p6_view=p6_view,
-                p6_results=p6_results,
-                precision=spec.precision,
-            )
-            for quantity in spec.quantities
+        fulfillments = self._fulfillments_for_spec(
+            spec,
+            p5_view=p5_view,
+            p6_view=p6_view,
+            p5_results=p5_results,
+            p6_results=p6_results,
         )
         p5_state = None if p5_view is None else getattr(p5_view, "state", None)
         p6_state = None if p6_view is None else p6_view.state
@@ -137,6 +131,123 @@ class P7ResultPresenter:
             overall_status=_overall_status(fulfillments),
             created_at_utc=now or SystemClock().now_utc(),
         )
+
+    def build_rendered_view(
+        self,
+        task: TaskRecord,
+        delivery: DeliveryRecord,
+        *,
+        output_spec: OutputSpec,
+        p5_view: object | None = None,
+        p6_view: P6RunView | None = None,
+        now: datetime | None = None,
+    ) -> RenderedResultView:
+        """Build a new display projection without changing ``delivery``."""
+
+        p5_results = tuple(getattr(p5_view, "results", ())) if p5_view is not None else ()
+        p6_results = () if p6_view is None else tuple(p6_view.source_snapshot.results)
+        fulfillments = self._fulfillments_for_spec(
+            output_spec,
+            p5_view=p5_view,
+            p6_view=p6_view,
+            p5_results=p5_results,
+            p6_results=p6_results,
+            fallback=delivery.fulfillment,
+        )
+        created = now or SystemClock().now_utc()
+        view_id = f"view_{uuid.uuid4().hex}"
+        rendered_text = self._rendered_text(
+            task_id=task.task_id,
+            source_delivery_id=delivery.delivery_id,
+            view_id=view_id,
+            output_spec=output_spec,
+            fulfillment=fulfillments,
+            overall_status=_overall_status(fulfillments),
+        )
+        return RenderedResultView.create(
+            view_id=view_id,
+            task_id=task.task_id,
+            source_delivery_id=delivery.delivery_id,
+            source_delivery_hash=delivery.delivery_hash,
+            output_spec=output_spec,
+            fulfillment=fulfillments,
+            overall_status=_overall_status(fulfillments),
+            rendered_text=rendered_text,
+            created_at_utc=created,
+        )
+
+    def _fulfillments_for_spec(
+        self,
+        spec: OutputSpec,
+        *,
+        p5_view: object | None,
+        p6_view: P6RunView | None,
+        p5_results: tuple[P5ResultRecord, ...],
+        p6_results: tuple[P6SourceResultRef, ...],
+        fallback: tuple[Fulfillment, ...] | None = None,
+    ) -> tuple[Fulfillment, ...]:
+        if p5_view is None and p6_view is None and fallback is not None:
+            original = {item.kind: item for item in fallback}
+            return tuple(
+                original.get(
+                    quantity.kind,
+                    Fulfillment(
+                        kind=quantity.kind,
+                        required=quantity.required,
+                        status=FulfillmentStatus.NOT_AVAILABLE,
+                        reason="已交付结果的来源投影当前不可读",
+                    ),
+                ).model_copy(
+                    update={
+                        "required": quantity.required,
+                        "unit": quantity.unit or original.get(quantity.kind, None).unit
+                        if quantity.kind in original
+                        else None,
+                    }
+                )
+                for quantity in spec.quantities
+            )
+        return tuple(
+            self._fulfill(
+                quantity.kind,
+                quantity.required,
+                quantity.source_selector,
+                quantity.unit,
+                p5_view=p5_view,
+                p5_results=p5_results,
+                p6_view=p6_view,
+                p6_results=p6_results,
+                precision=spec.precision,
+            )
+            for quantity in spec.quantities
+        )
+
+    @staticmethod
+    def _rendered_text(
+        *,
+        task_id: str,
+        source_delivery_id: str,
+        view_id: str,
+        output_spec: OutputSpec,
+        fulfillment: tuple[Fulfillment, ...],
+        overall_status: OverallDeliveryStatus,
+    ) -> str:
+        lines = [
+            "P7 结果展示",
+            f"任务: {task_id}",
+            f"来源交付: {source_delivery_id}",
+            f"展示视图: {view_id}",
+            f"状态: {overall_status.value}",
+        ]
+        for item in fulfillment:
+            lines.append(
+                f"- {item.kind.value}: {item.status.value}; "
+                f"值={_text_value(item.value, precision=output_spec.precision)}; "
+                f"单位={item.unit or '—'}; 来源={item.source_selector or '—'}"
+            )
+            if item.reason:
+                lines.append(f"  说明: {item.reason}")
+        return "\n".join(lines)
 
     def _fulfill(
         self,
@@ -464,6 +575,15 @@ class P7ResultPresenter:
         if notes:
             lines.extend(["", "## Notes", "", *[f"- {note}" for note in notes]])
         return "\n".join(lines) + "\n"
+
+    def render_view(
+        self, view: RenderedResultView, *, format: str = "json"
+    ) -> dict[str, object] | str:
+        if format == "json":
+            return view.model_dump(mode="json")
+        if format == "md":
+            return view.rendered_text + "\n"
+        raise ValueError("P7 result view format must be json or md")
 
 
 __all__ = ["P7ResultPresenter", "P7_PRESENTATION_VERSION"]

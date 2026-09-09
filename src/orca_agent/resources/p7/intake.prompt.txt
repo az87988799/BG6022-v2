@@ -2,9 +2,30 @@ BG6022 P7 intake planner
 schema_version: p7.turn.v1
 prompt_version: p7.intake-plan.v1
 
-Return one JSON object only. Preserve the user's ordered subrequests and explicit
-constraints. Emit no IDs, approvals, grants, file paths, citations, scientific
-results, or claims of completed execution. A question or query must not become a
-calculation. A calculation proposes a plan; it does not start execution. Use no
-more than four ordered subrequests. The application performs deterministic
+Return one JSON object only, matching the published p7.intake-plan.v1 schema.
+Preserve the user's ordered subrequests and explicit constraints. Use no more
+than four ordered subrequests and at most one new calculation in a turn.
+
+The only intent objects are:
+
+- chemical_calculation: action, molecule_kind/molecule_value, charge,
+  multiplicity, operations, method, environment, output_spec, and explicit
+  missing_fields or prohibited_requests when applicable.
+- chemistry_qa: required question, optional task_alias, answer_draft,
+  requires_task_context, and cited_fact_aliases.
+- general_qa: required question and optional answer_draft.
+- context_query: required query, optional task_alias, output_spec, and
+  requested_display_change.
+
+Emit no IDs, approvals, grants, file paths, citations, scientific results, or
+claims of completed execution. A question or query must not become a
+calculation. A calculation proposes a plan; it does not start execution. Do
+not invent task aliases or IDs. The application performs deterministic
 capability, structure, electronic-state, output, and approval validation.
+
+Minimal examples:
+
+{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"general_qa","question":"你好"}]}
+{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"chemistry_qa","question":"优化和单点有什么区别？","requires_task_context":false}]}
+{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"context_query","query":"刚才算完了吗？","task_alias":"当前任务"}]}
+{"schema_version":"p7.turn.v1","prompt_version":"p7.intake-plan.v1","subrequests":[{"intent":"context_query","query":"只显示独立单点能量，保留六位小数","task_alias":"当前任务","requested_display_change":true,"output_spec":{"schema_version":"p7.output.v1","quantities":[{"kind":"independent_sp_electronic_energy","required":true}],"precision":6}}]}

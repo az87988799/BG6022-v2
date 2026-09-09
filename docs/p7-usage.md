@@ -1,5 +1,41 @@
 # P7 local usage
 
+## Direct terminal entry
+
+From `E:\BG6022-v2`, copy `.env.example` to the repository root as `.env` and
+fill in `DEEPSEEK_API_KEY` and `BG6022_P7_MODEL`. The real key stays local and
+is never written to a request file or committed.
+
+Double-click `start_chat.cmd`, or run:
+
+```powershell
+.venv\Scripts\python.exe scripts\start_chat.py
+```
+
+The launcher uses the fixed state root `.tmp\p7\chat`, resumes the last valid
+conversation, and keeps a single OS-level lock. It does not install packages,
+pull code, enable real ORCA, or approve a plan/identity/P5 node. The default
+planner is the configured DeepSeek model with the fake calculation backend;
+use `--planner baseline` for an entirely offline smoke run.
+
+Inside the window, ordinary Chinese or English text is sent to the shared
+`P7ChatDriver`. Use `/help`, `/status`, `/tasks`, `/new`, `/resume <id>`,
+`/accept <token>`, `/reject <token>`, and `/exit`. Every approval is explicit;
+the driver only performs bounded worker progress while idle and after input.
+Default output is human-readable. Add `--json` when a JSON-lines terminal
+protocol is needed.
+
+The same driver is used by the explicit CLI entry:
+
+```powershell
+.venv\Scripts\python.exe -m orca_agent --state-root .tmp\p7\chat agent-chat `
+  --new-conversation --planner baseline
+```
+
+For a display-only query, the immutable `delivery` in the response is the
+original scientific DeliveryRecord. A changed layout/precision/quantity is
+returned in `view` as a separately hashed RenderedResultView.
+
 The P7 interface is deliberately separate from the legacy `start`, `prepare`,
 and `worker` commands. Run from the repository root with the project Python
 environment active.

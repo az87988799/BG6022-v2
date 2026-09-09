@@ -242,7 +242,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--planner", choices=("baseline", "fake", "deepseek_chat"), required=True
     )
     agent_chat.add_argument("--allow-llm", action="store_true")
+    agent_chat.add_argument("--allow-real-orca", action="store_true")
+    agent_chat.add_argument("--backend", choices=("fake", "local_orca"), default="fake")
     agent_chat.add_argument("--fallback", choices=("none", "baseline"), default="none")
+    agent_chat.add_argument("--max-effects", type=int, default=8)
+    agent_chat.add_argument("--max-seconds", type=float, default=1.5)
     agent_chat.add_argument("--text")
     agent_chat.add_argument("--json", action="store_true")
 
@@ -846,34 +850,24 @@ def _handle_p7_cli(args) -> int:
     )
 
     if args.operation == "agent-chat":
+        from orca_agent.interfaces.p7_chat import P7ChatDriver
+
         if args.new_conversation:
-            state = runtime.conversation.new_conversation()
-            conversation_id = str(state["conversation_id"])
+            conversation_id = str(runtime.conversation.new_conversation()["conversation_id"])
         else:
             conversation_id = str(ConversationId(args.conversation))
-            state = runtime.conversation.get_state(conversation_id).model_dump(mode="json")
+            runtime.conversation.get_state(conversation_id)
+        driver = P7ChatDriver(
+            runtime,
+            conversation_id,
+            max_effects=args.max_effects,
+            max_seconds=args.max_seconds,
+            json_output=args.json,
+        )
         if args.text is not None:
-            response = runtime.conversation.message(conversation_id, args.text)
-            return _emit(
-                {"conversation_id": conversation_id, "conversation": state, "response": response},
-                bool(response.get("accepted")),
-                args.json,
-            )
-        _emit(state, True, args.json)
-        while True:
-            line = sys.stdin.readline()
-            if not line:
-                break
-            text = line.strip()
-            if not text:
-                continue
-            if text.casefold() in {"exit", "quit", "退出"}:
-                break
-            response = runtime.conversation.message(conversation_id, text)
-            code = _emit(response, bool(response.get("accepted")), args.json)
-            if code != 0:
-                return code
-        return 0
+            result = driver.handle_text(args.text)
+            return 0 if result.get("accepted", True) else 2
+        return driver.run()
 
     if args.operation == "agent-message":
         conversation_id = ConversationId(args.conversation)

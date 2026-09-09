@@ -478,16 +478,20 @@ class P7RecordRepository:
         return PendingActionRecord.model_validate_json(_json(values), strict=True)
 
     def list_pending(
-        self, conversation_id: str, *, status: str = "pending"
+        self, conversation_id: str, *, status: str | None = "pending"
     ) -> tuple[PendingActionRecord, ...]:
-        rows = self.connection.execute(
+        query = (
             "SELECT token, conversation_id, task_id, action_type, target_id, "
             "expected_revision, content_hash, payload_json, status, decision, "
             "created_at_utc, consumed_at_utc "
-            "FROM p7_pending_actions WHERE conversation_id=? AND status=? "
-            "ORDER BY created_at_utc, token",
-            (str(conversation_id), status),
-        ).fetchall()
+            "FROM p7_pending_actions WHERE conversation_id=?"
+        )
+        parameters: tuple[object, ...] = (str(conversation_id),)
+        if status is not None:
+            query += " AND status=?"
+            parameters += (status,)
+        query += " ORDER BY created_at_utc, token"
+        rows = self.connection.execute(query, parameters).fetchall()
         return tuple(self.get_pending(conversation_id, str(row[0])) for row in rows)  # type: ignore[return-value]
 
     def consume_pending(

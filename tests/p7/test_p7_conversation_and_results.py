@@ -89,7 +89,10 @@ def test_full_fake_chain_delivery_query_and_display_change(tmp_path) -> None:
         task_id=task_id,
         request={"kind": "result", "output_spec": {"layout": "table"}},
     )
-    assert query["delivery"]["output_spec"]["layout"] == "table"
+    assert query["delivery"]["output_spec"]["layout"] == "prose"
+    assert query["view"]["output_spec"]["layout"] == "table"
+    assert query["view"]["source_delivery_id"] == delivery["delivery_id"]
+    assert query["view"]["source_delivery_hash"] == original_hash
     assert query["delivery"]["delivery_hash"] == original_hash
     assert runtime.query.verify(conversation_id, task_id=task_id)["valid"] is True
 

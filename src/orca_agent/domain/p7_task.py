@@ -487,6 +487,56 @@ class DeliveryRecord(P7Model):
         return cls(**values)
 
 
+class RenderedResultView(P7Model):
+    """A display projection derived from, but distinct from, a delivery.
+
+    A user may change layout, precision, language, or selected quantities after
+    execution.  Those changes are presentation state only and must never
+    mutate the immutable scientific DeliveryRecord.
+    """
+
+    schema_version: Literal["p7.rendered-result-view.v1"] = "p7.rendered-result-view.v1"
+    view_id: str
+    task_id: str
+    source_delivery_id: str
+    source_delivery_hash: str
+    output_spec: OutputSpec
+    fulfillment: tuple[Fulfillment, ...] = Field(min_length=1, max_length=16)
+    overall_status: OverallDeliveryStatus
+    rendered_text: str
+    created_at_utc: datetime
+    view_hash: str
+
+    _hashes = field_validator("source_delivery_hash", "view_hash")(_hash)
+
+    @field_validator("view_id", "task_id", "source_delivery_id")
+    @classmethod
+    def _view_ids(cls, value: str, info: object) -> str:
+        return _text(value, getattr(info, "field_name", "view id"), maximum=256)
+
+    @field_validator("rendered_text")
+    @classmethod
+    def _rendered_text(cls, value: str) -> str:
+        return _text(value, "rendered_text", maximum=65536)
+
+    @field_validator("created_at_utc")
+    @classmethod
+    def _view_time(cls, value: datetime) -> datetime:
+        return ensure_utc(value)
+
+    @model_validator(mode="after")
+    def _view_invariants(self) -> RenderedResultView:
+        verify_sha256(self.model_dump(mode="json", exclude={"view_hash"}), self.view_hash)
+        if len({item.kind for item in self.fulfillment}) != len(self.fulfillment):
+            raise ValueError("rendered fulfillment kinds must be unique")
+        return self
+
+    @classmethod
+    def create(cls, **values: object) -> RenderedResultView:
+        values["view_hash"] = _make_hash(cls, values, "view_hash")
+        return cls(**values)
+
+
 class _DeliverySourceHash(P7Model):
     source: FrozenJsonObject
     source_hash: str = "0" * 64
@@ -673,6 +723,7 @@ __all__ = [
     "OutputQuantity",
     "OutputSpec",
     "OverallDeliveryStatus",
+    "RenderedResultView",
     "PendingActionRecord",
     "ParameterValue",
     "HandoffRecord",

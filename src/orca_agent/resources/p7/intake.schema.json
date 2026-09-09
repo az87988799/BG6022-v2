@@ -7,34 +7,127 @@
   "properties": {
     "schema_version": {"const": "p7.turn.v1"},
     "prompt_version": {"const": "p7.intake-plan.v1"},
+    "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "source": {
+      "enum": ["program", "baseline", "fake", "deepseek_chat", "user"]
+    },
     "subrequests": {
       "type": "array",
       "minItems": 1,
       "maxItems": 4,
-      "items": {
-        "type": "object",
-        "required": ["intent"],
-        "properties": {
-          "intent": {
-            "enum": ["chemical_calculation", "chemistry_qa", "general_qa", "context_query"]
-          },
-          "action": {"enum": ["plan_new", "revise_draft", "request_execution", "cancel_task"]},
-          "molecule_kind": {"enum": ["name", "cas", "cid", "smiles", null]},
-          "molecule_value": {"type": ["string", "null"]},
-          "charge": {"type": ["integer", "null"]},
-          "multiplicity": {"type": ["integer", "null"]},
-          "operations": {"type": "array", "items": {"type": "string"}},
-          "method": {"type": ["string", "null"]},
-          "environment": {"type": ["string", "null"]},
-          "hard_constraints": {"type": "array", "items": {"type": "string"}},
-          "prohibited_requests": {"type": "array", "items": {"type": "string"}},
-          "output_spec": {"type": "object"},
-          "task_alias": {"type": ["string", "null"]},
-          "question": {"type": ["string", "null"]},
-          "query": {"type": ["string", "null"]}
+      "items": {"$ref": "#/$defs/subrequest"}
+    }
+  },
+  "$defs": {
+    "outputQuantity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "opt_final_electronic_energy",
+            "independent_sp_electronic_energy",
+            "vibrational_frequencies",
+            "local_minimum_support",
+            "optimized_geometry",
+            "execution_status",
+            "scientific_status",
+            "report",
+            "existing_energy_difference"
+          ]
         },
-        "additionalProperties": false
+        "required": {"type": "boolean"},
+        "source_selector": {"type": ["string", "null"]},
+        "unit": {"type": ["string", "null"]},
+        "label": {"type": ["string", "null"]}
+      },
+      "required": ["kind"]
+    },
+    "outputSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "quantities"],
+      "properties": {
+        "schema_version": {"const": "p7.output.v1"},
+        "quantities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/outputQuantity"}
+        },
+        "language": {"enum": ["zh", "en"]},
+        "style": {"enum": ["concise", "detailed"]},
+        "layout": {"enum": ["prose", "table", "json"]},
+        "units": {"type": "object"},
+        "precision": {"type": ["integer", "null"], "minimum": 0, "maximum": 12},
+        "artifacts": {"type": "array", "items": {"type": "string"}},
+        "include_evidence": {"type": "boolean"}
       }
+    },
+    "calculation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent"],
+      "properties": {
+        "intent": {"const": "chemical_calculation"},
+        "action": {"enum": ["plan_new", "revise_draft", "request_execution", "cancel_task"]},
+        "molecule_kind": {"enum": ["name", "cas", "cid", "smiles", null]},
+        "molecule_value": {"type": ["string", "null"]},
+        "task_alias": {"type": ["string", "null"]},
+        "operations": {"type": "array", "items": {"type": "string"}},
+        "charge": {"type": ["integer", "null"]},
+        "multiplicity": {"type": ["integer", "null"]},
+        "method": {"type": ["string", "null"]},
+        "environment": {"type": ["string", "null"]},
+        "hard_constraints": {"type": "array", "items": {"type": "string"}},
+        "prohibited_requests": {"type": "array", "items": {"type": "string"}},
+        "output_spec": {"$ref": "#/$defs/outputSpec"},
+        "missing_fields": {"type": "array", "items": {"type": "string"}},
+        "requested_execution": {"type": "boolean"}
+      }
+    },
+    "chemistryQA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "question"],
+      "properties": {
+        "intent": {"const": "chemistry_qa"},
+        "question": {"type": "string", "minLength": 1},
+        "task_alias": {"type": ["string", "null"]},
+        "answer_draft": {"type": ["string", "null"]},
+        "requires_task_context": {"type": "boolean"},
+        "cited_fact_aliases": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "generalQA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "question"],
+      "properties": {
+        "intent": {"const": "general_qa"},
+        "question": {"type": "string", "minLength": 1},
+        "answer_draft": {"type": ["string", "null"]}
+      }
+    },
+    "contextQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent", "query"],
+      "properties": {
+        "intent": {"const": "context_query"},
+        "query": {"type": "string", "minLength": 1},
+        "task_alias": {"type": ["string", "null"]},
+        "output_spec": {"$ref": "#/$defs/outputSpec"},
+        "requested_display_change": {"type": "boolean"}
+      }
+    },
+    "subrequest": {
+      "oneOf": [
+        {"$ref": "#/$defs/calculation"},
+        {"$ref": "#/$defs/chemistryQA"},
+        {"$ref": "#/$defs/generalQA"},
+        {"$ref": "#/$defs/contextQuery"}
+      ]
     }
   }
 }

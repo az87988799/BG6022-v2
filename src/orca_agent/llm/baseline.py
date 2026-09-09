@@ -72,6 +72,37 @@ def _extract_task_alias(text: str) -> str | None:
     return None
 
 
+def _context_query_like(text: str) -> bool:
+    if _extract_molecule(text)[0] is not None and _has_any(
+        text, ("计算", "calculate", "compute", "算一下", "run")
+    ):
+        return False
+    return _has_any(
+        text,
+        (
+            "刚才",
+            "上次",
+            "当前任务",
+            "this task",
+            "that task",
+            "算完了吗",
+            "完成了吗",
+            "采用什么方法",
+            "使用了什么方法",
+            "what method",
+            "只显示",
+            "仅显示",
+            "保留",
+            "小数",
+            "单位",
+            "改成",
+            "查询",
+            "show result",
+            "status",
+        ),
+    )
+
+
 def _extract_int(text: str, pattern: re.Pattern[str]) -> int | None:
     match = pattern.search(text)
     return None if match is None else int(match.group(1))
@@ -121,6 +152,30 @@ def _output_spec(text: str) -> dict[str, object]:
     if precision:
         output["precision"] = int(precision.group(1))
     return output
+
+
+def _query_output_spec(text: str) -> dict[str, object]:
+    if _has_any(text, ("算完了吗", "完成了吗", "状态", "status")) and not _has_any(
+        text, ("能量", "energy", "频率", "frequency", "结构", "geometry")
+    ):
+        return {
+            "quantities": [{"kind": "execution_status", "required": True}],
+            "layout": "prose",
+        }
+    return _output_spec(text) if _has_any(
+        text,
+        (
+            "只显示",
+            "仅显示",
+            "独立单点",
+            "单点能量",
+            "优化结构",
+            "频率",
+            "小数",
+            "单位",
+            "table",
+        ),
+    ) else {}
 
 
 def _operations(text: str) -> tuple[str, ...]:
@@ -208,6 +263,17 @@ class BaselinePlanner:
             subrequests.append(_calculation(second))
         elif _has_any(stripped, ("取消", "cancel", "停止任务", "终止任务")):
             subrequests.append(_calculation(stripped, action=CalculationAction.CANCEL_TASK))
+        elif _context_query_like(stripped):
+            subrequests.append(
+                ContextQueryIntent(
+                    query=stripped,
+                    task_alias=_extract_task_alias(stripped),
+                    output_spec=_query_output_spec(stripped),
+                    requested_display_change=_has_any(
+                        stripped, ("只显示", "仅显示", "改成", "显示", "单位", "小数")
+                    ),
+                )
+            )
         elif _question_like(stripped) and _has_any(
             stripped, ("优化", "单点", "频率", "振动", "电荷", "多重度", "r2scan", "orca", "method")
         ):
@@ -217,32 +283,6 @@ class BaselinePlanner:
                     task_alias=_extract_task_alias(stripped),
                     answer_draft=self._chemistry_answer(stripped),
                     requires_task_context=_has_any(stripped, ("本次", "这次", "刚才", "结果")),
-                )
-            )
-        elif _has_any(
-            stripped,
-            (
-                "刚才",
-                "上次",
-                "算完了吗",
-                "状态",
-                "结果",
-                "改成表格",
-                "查询",
-                "show result",
-                "status",
-            ),
-        ) and not _has_any(stripped, ("优化", "optimize", "计算", "calculate", "算水", "算乙醇")):
-            subrequests.append(
-                ContextQueryIntent(
-                    query=stripped,
-                    task_alias=_extract_task_alias(stripped),
-                    output_spec={"layout": "table"}
-                    if _has_any(stripped, ("表格", "table"))
-                    else {},
-                    requested_display_change=_has_any(
-                        stripped, ("改成", "显示", "表格", "table", "单位", "小数")
-                    ),
                 )
             )
         elif _has_any(

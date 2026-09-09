@@ -2,7 +2,7 @@
 
 Clean, independently versioned repository for the BG6022 V2 rebuild.
 
-## Current phase: V2-P6 (review repairs; acceptance gates pending)
+## Current phase: V2-P7 (repair candidate; Owner acceptance pending)
 
 P5 local ORCA implementation has been Owner-accepted and merged to `main`;
 the actual post-merge main CI passed. See
@@ -15,6 +15,12 @@ See [P6 acceptance](docs/P6_ACCEPTANCE.md) and
 [ADR-0007](docs/adr/ADR-0007-p6-offline-science-report.md). Real execution
 requires explicit bounded approval; offline fixtures and parser replay do not
 replace real acceptance.
+
+P7 adds a guarded natural-language conversation surface, deterministic task
+planning, P4/P5/P6 handoffs, immutable delivery records, separately hashed
+display views, and a direct terminal launcher. Use
+[P7 usage](docs/p7-usage.md) for the interactive entry point. P7 remains an
+implementation candidate until the Owner accepts the pushed commit.
 
 ## V2-P0–P3 foundation
 

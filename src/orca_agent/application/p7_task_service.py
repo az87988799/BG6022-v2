@@ -296,6 +296,8 @@ class P7TaskService:
             if pending.status != "pending":
                 if pending.decision == decision:
                     uow.commit()
+                    if decision == "accept":
+                        return self._replay_accepted_action(conversation, pending)
                     return {"accepted": True, "replayed": True, "token": token}
                 raise InvalidTransitionError("action token is already decided")
             from orca_agent.domain.hashing import verify_sha256
@@ -396,6 +398,53 @@ class P7TaskService:
             }
         raise InvalidTransitionError(f"unsupported pending action type: {pending.action_type}")
 
+    def _replay_accepted_action(
+        self, conversation: str, pending: PendingActionRecord
+    ) -> dict[str, object]:
+        """Coordinate a previously accepted decision with its original command.
+
+        A consumed token records the user's decision, not proof that the
+        downstream command reached its durable receipt.  Replaying the token
+        therefore reuses its frozen payload and command ID instead of creating
+        a new approval or asking the user to approve the same action again.
+        """
+
+        task = None if pending.task_id is None else self.get_task(conversation, pending.task_id)
+        if task is None:
+            if pending.task_id is not None:
+                raise StateIntegrityError("accepted action refers to a missing task")
+            return {"accepted": True, "replayed": True, "token": pending.token}
+        view = self._view(task)
+        if task.state in {
+            TaskPhase.ENDED_WITHOUT_RESULT,
+            TaskPhase.RESULT_READY,
+            TaskPhase.RECONCILIATION_REQUIRED,
+        }:
+            return view | {"accepted": True, "replayed": True, "token": pending.token}
+        payload = thaw_json(pending.payload)
+        if not isinstance(payload, dict):
+            raise StateIntegrityError("accepted action payload is not an object")
+        downstream: object | None = None
+        if pending.action_type == "accept_plan":
+            handoff = self._handoff(task, "p4")
+            if handoff is not None and handoff.status in {"prepared", "submitted"}:
+                downstream = self._submit_p4_handoff(task, handoff)
+        elif pending.action_type == "confirm_identity":
+            downstream = self._confirm_identity(task, payload, _now(self.clock))
+        elif pending.action_type == "approve_execution":
+            downstream = self._approve_execution(task, payload, _now(self.clock))
+        else:
+            raise InvalidTransitionError(
+                f"cannot replay accepted action type: {pending.action_type}"
+            )
+        refreshed = self.get_task(conversation, task.task_id) or task
+        return self._view(refreshed) | {
+            "accepted": True,
+            "replayed": True,
+            "token": pending.token,
+            "downstream": None if downstream is None else _as_json(downstream),
+        }
+
     def _p4_payload(
         self,
         task: TaskRecord,
@@ -439,6 +488,7 @@ class P7TaskService:
         command = StartPlanningRun.model_validate_json(
             json.dumps(payload, ensure_ascii=False), strict=True
         )
+        self._mark_handoff_submitted(handoff)
         result = self.p4.start(command)
         now = _now(self.clock)
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
@@ -493,7 +543,9 @@ class P7TaskService:
         )
         result = self.p4.confirm(command)
         if result.accepted:
-            self._refresh_task_state(task.task_id, TaskPhase.EXECUTION_PENDING)
+            current = self.get_task(task.conversation_id, task.task_id)
+            if current is not None and current.state is TaskPhase.IDENTITY_PENDING:
+                self._refresh_task_state(task.task_id, TaskPhase.EXECUTION_PENDING)
         return result
 
     def _approve_execution(
@@ -511,8 +563,26 @@ class P7TaskService:
             command_id=CommandId(str(payload["command_id"])),
         )
         if result.accepted:
-            self._refresh_task_state(task.task_id, TaskPhase.EXECUTING)
+            current = self.get_task(task.conversation_id, task.task_id)
+            if current is not None and current.state is TaskPhase.EXECUTION_PENDING:
+                self._refresh_task_state(task.task_id, TaskPhase.EXECUTING)
         return result
+
+    def _mark_handoff_submitted(self, handoff: HandoffRecord) -> None:
+        """Persist the send boundary before invoking a downstream service."""
+
+        if handoff.status == "submitted":
+            return
+        now = _now(self.clock)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            current = records.get_handoff(handoff.task_id, handoff.target)
+            if current is not None and current.status in {"prepared", "submitted"}:
+                records.update_handoff(
+                    current.model_copy(update={"status": "submitted", "updated_at_utc": now})
+                )
+            uow.commit()
 
     def _refresh_task_state(self, task_id: str, state: TaskPhase) -> TaskRecord:
         now = _now(self.clock)
@@ -589,11 +659,15 @@ class P7TaskService:
             TaskPhase.RECONCILIATION_REQUIRED,
         }:
             return 0, None
+        p4_handoff = self._handoff(task, "p4")
+        if p4_handoff is not None and p4_handoff.status in {"prepared", "submitted"}:
+            result = self._submit_p4_handoff(task, p4_handoff)
+            return 1, {
+                "task_id": task.task_id,
+                "step": "p4.start.reconciled",
+                "accepted": result.accepted,
+            }
         if task.p4_run_id is None:
-            handoff = self._handoff(task, "p4")
-            if handoff is not None and handoff.status == "prepared":
-                result = self._submit_p4_handoff(task, handoff)
-                return 1, {"task_id": task.task_id, "step": "p4.start", "accepted": result.accepted}
             return 0, {"task_id": task.task_id, "step": "waiting_for_plan_acceptance"}
 
         p4_view = self.p4.inspect(RunId(task.p4_run_id))
@@ -605,6 +679,11 @@ class P7TaskService:
                 "reports": [_as_json(item) for item in reports],
             }
         if p4_view.state.phase is P4Phase.AWAITING_IDENTITY:
+            replay = self._replay_accepted_decision(
+                task, action_type="confirm_identity", target_id=str(p4_view.run_id)
+            )
+            if replay is not None:
+                return replay
             token = self._ensure_identity_action(task, p4_view)
             if token is None:
                 return 1, {
@@ -626,10 +705,20 @@ class P7TaskService:
 
         if task.p5_run_id is None:
             return 0, {"task_id": task.task_id, "step": "waiting_for_p5"}
+        p5_handoff = self._handoff(task, "p5")
+        if p5_handoff is not None and p5_handoff.status in {"prepared", "submitted"}:
+            return self._submit_p5_handoff(task, p5_handoff)
         p5_view = self.p5.inspect(RunId(task.p5_run_id))
         if p5_view.state.phase is P5Phase.AWAITING_EXECUTION_APPROVAL:
             self._refresh_task_state_if_needed(task, TaskPhase.EXECUTION_PENDING)
             latest = self.get_task(task.conversation_id, task.task_id) or task
+            replay = self._replay_accepted_decision(
+                latest,
+                action_type="approve_execution",
+                target_id=str(p5_view.action.action_id) if p5_view.action is not None else None,
+            )
+            if replay is not None:
+                return replay
             token = self._ensure_approval_action(latest, p5_view)
             return 0, {"task_id": task.task_id, "step": "execution_pending", "token": token}
         if p5_view.state.phase in {
@@ -659,6 +748,9 @@ class P7TaskService:
 
         if task.p6_run_id is None:
             return 0, {"task_id": task.task_id, "step": "waiting_for_p6"}
+        p6_handoff = self._handoff(task, "p6")
+        if p6_handoff is not None and p6_handoff.status in {"prepared", "submitted"}:
+            return self._submit_p6_handoff(task, p6_handoff)
         p6_view = self.p6.inspect(RunId(task.p6_run_id))
         if p6_view.state.phase in {P6Phase.ASSESSMENT_PENDING, P6Phase.REPORT_PENDING}:
             reports = self.p6.create_worker().run_once(run_id=p6_view.run_id, limit=1)
@@ -682,6 +774,46 @@ class P7TaskService:
             value = P7RecordRepository(uow.connection).get_handoff(task.task_id, target)
             uow.commit()
             return value
+
+    def _replay_accepted_decision(
+        self, task: TaskRecord, *, action_type: str, target_id: str | None
+    ) -> tuple[int, dict[str, object]] | None:
+        """Retry one accepted decision before creating a replacement token."""
+
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            actions = tuple(
+                item
+                for item in records.list_pending(task.conversation_id, status=None)
+                if item.task_id == task.task_id
+                and item.action_type == action_type
+                and item.status == "consumed"
+                and item.decision == "accept"
+                and (target_id is None or item.target_id == target_id)
+            )
+            uow.commit()
+        if not actions:
+            return None
+        action = actions[-1]
+        payload = thaw_json(action.payload)
+        if not isinstance(payload, dict):
+            raise StateIntegrityError("accepted decision payload is not an object")
+        if action_type == "confirm_identity":
+            result = self._confirm_identity(task, payload, _now(self.clock))
+            step = "p4.confirm.reconciled"
+        elif action_type == "approve_execution":
+            result = self._approve_execution(task, payload, _now(self.clock))
+            step = "p5.approve.reconciled"
+        else:
+            raise InvalidTransitionError(f"unsupported accepted decision: {action_type}")
+        return 1, {
+            "task_id": task.task_id,
+            "step": step,
+            "token": action.token,
+            "accepted": bool(getattr(result, "accepted", False)),
+            "code": str(getattr(result, "code", "unknown")),
+        }
 
     def _ensure_identity_action(self, task: TaskRecord, view) -> str | None:
         now = _now(self.clock)
@@ -799,9 +931,17 @@ class P7TaskService:
                     raise RevisionConflictError("task changed before P5 handoff")
                 uow.commit()
             task = updated
-        payload = thaw_json(existing.payload)
+        return self._submit_p5_handoff(task, existing)
+
+    def _submit_p5_handoff(
+        self, task: TaskRecord, handoff: HandoffRecord
+    ) -> tuple[int, dict[str, object]]:
+        payload = thaw_json(handoff.payload)
         if not isinstance(payload, dict):
             raise StateIntegrityError("P5 handoff payload is invalid")
+        if handoff.status == "linked":
+            return 0, {"task_id": task.task_id, "step": "p5.already_linked"}
+        self._mark_handoff_submitted(handoff)
         result = self.p5.prepare_execution(
             source_run_id=RunId(str(payload["source_run_id"])),
             protocol_id=str(payload["protocol_id"]),
@@ -810,7 +950,8 @@ class P7TaskService:
             external_opt_result_id=None,
             wall_time_seconds=None,
         )
-        updated_handoff = existing.model_copy(
+        now = _now(self.clock)
+        updated_handoff = handoff.model_copy(
             update={
                 "status": "linked" if result.accepted else "reconciliation_required",
                 "target_run_id": str(payload["run_id"]) if result.accepted else None,
@@ -823,13 +964,13 @@ class P7TaskService:
             records.update_handoff(updated_handoff)
             current = records.get_task(task.conversation_id, task.task_id)
             if current is not None and not result.accepted:
-                ended = self._task_update(
+                reconciled = self._task_update(
                     current,
-                    state=TaskPhase.ENDED_WITHOUT_RESULT,
+                    state=TaskPhase.RECONCILIATION_REQUIRED,
                     stop_reason=StopReason.FAILED,
                     now=now,
                 )
-                records.update_task(ended, expected_revision=current.revision)
+                records.update_task(reconciled, expected_revision=current.revision)
             uow.commit()
         return 1, {
             "task_id": task.task_id,
@@ -924,14 +1065,23 @@ class P7TaskService:
                     raise RevisionConflictError("task changed before P6 handoff")
                 uow.commit()
             task = updated
-        payload = thaw_json(existing.payload)
+        return self._submit_p6_handoff(task, existing)
+
+    def _submit_p6_handoff(
+        self, task: TaskRecord, handoff: HandoffRecord
+    ) -> tuple[int, dict[str, object]]:
+        payload = thaw_json(handoff.payload)
         if not isinstance(payload, dict):
             raise StateIntegrityError("P6 handoff payload is invalid")
+        if handoff.status == "linked":
+            return 0, {"task_id": task.task_id, "step": "p6.already_linked"}
         command = AssessP6Run.model_validate_json(
             json.dumps(payload, ensure_ascii=False), strict=True
         )
+        self._mark_handoff_submitted(handoff)
         result = self.p6.assess(command)
-        updated_handoff = existing.model_copy(
+        now = _now(self.clock)
+        updated_handoff = handoff.model_copy(
             update={
                 "status": "linked" if result.accepted else "reconciliation_required",
                 "target_run_id": str(command.run_id) if result.accepted else None,
@@ -942,6 +1092,15 @@ class P7TaskService:
             uow.begin()
             records = P7RecordRepository(uow.connection)
             records.update_handoff(updated_handoff)
+            current = records.get_task(task.conversation_id, task.task_id)
+            if current is not None and not result.accepted:
+                reconciled = self._task_update(
+                    current,
+                    state=TaskPhase.RECONCILIATION_REQUIRED,
+                    stop_reason=StopReason.FAILED,
+                    now=now,
+                )
+                records.update_task(reconciled, expected_revision=current.revision)
             uow.commit()
         return 1, {
             "task_id": task.task_id,

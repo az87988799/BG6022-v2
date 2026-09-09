@@ -9,10 +9,13 @@ implementation and explicitly accept it before P7 is marked complete.
 ## Baseline and scope
 
 - Accepted main baseline: `c64f547956f9ede2c0db02757199d1e2c0dc86f0`.
-- Implementation branch: `codex/v2-p7-conversation-planning-results`.
-- Scope: P7 conversation, constrained planning, P4/P5/P6 handoffs, P6-to-
-  Delivery result closure, deterministic query/export/verify, DeepSeek adapter,
-  explicit `agent-*` CLI, resources, tests, and docs.
+- Implementation branch: `codex/v2-p7-chat-entry-repair`.
+- Scope: repair the P7 conversation boundary and restart/reconciliation paths;
+  preserve accepted P4/P5/P6 handoff identities after response loss; fence late
+  cancelled responses; enforce the published DeepSeek resource contract and
+  one bounded format repair; keep immutable Delivery records separate from
+  rendered result views; provide the shared terminal chat driver and fixed
+  `start_chat.cmd` entry point; and update tests/docs.
 - No new real ORCA calculation or live DeepSeek evaluation is implied by this
   branch.
 
@@ -20,8 +23,8 @@ implementation and explicitly accept it before P7 is marked complete.
 
 | Gate | Status | Evidence / limitation |
 |---|---|---|
-| implementation | READY FOR OWNER REVIEW | P7 contracts, migration 8, services, CLI, and docs are present on the implementation branch. |
-| offline_ci | PASS | `ruff check src tests`; `python -m compileall -q src tests`; P7 suite `14 passed`; import/migration/P7 focused set `28 passed`; full offline suite `629 passed, 1 skipped` with `tests/test_offline.py` excluded because the local environment does not provide `pytest-socket`; wheel build and P7 resource inclusion verified. |
+| implementation | READY FOR OWNER REVIEW | Repair services, immutable view model, shared terminal driver, fixed startup entry point, resources, tests, and docs are present on the repair branch. |
+| offline_ci | PASS | `ruff check src tests scripts`; `python -m compileall -q src tests scripts`; P7 suite `22 passed`; full offline suite `637 passed, 1 skipped` with `tests/test_offline.py` excluded because the local environment does not provide `pytest-socket`; wheel/resource inclusion verified. |
 | live_llm | NOT RUN | Requires an explicitly configured `DEEPSEEK_API_KEY`, model, and evaluation budget. |
 | real_identity | NOT RUN | Offline P7 evidence uses the existing fake PubChem adapter; no network identity query is claimed. |
 | real_result_query | NOT RUN | P7 fake-chain query is covered; historical P6 archive verification remains prior evidence and is not silently relabeled as a P7 live gate. |
@@ -30,32 +33,36 @@ implementation and explicitly accept it before P7 is marked complete.
 
 ## Offline verification record
 
-Implementation commit: `2ceda958905fd14bad3cbbe14894a02e885f2412`.
+Implementation commit: the pushed repair commit on
+`codex/v2-p7-chat-entry-repair` (the exact hash is reported with the handoff).
 The commands actually run on the frozen working tree were:
 
 ```text
-ruff check src tests                                      PASS
-python -m compileall -q src tests                         PASS
-pytest -o addopts='' -q tests/p7                         14 passed
-pytest -o addopts='' -q tests/test_import_boundaries.py \
-  tests/test_p2_import_boundaries.py tests/persistence/test_migrations.py \
-  tests/p7/test_p7_conversation_and_results.py            28 passed
+ruff check src tests scripts                             PASS
+python -m compileall -q src tests scripts                 PASS
+pytest -o addopts='' -q tests/p7                         22 passed
 python -m pytest -o addopts='' -q --ignore=tests/test_offline.py
-                                                           629 passed, 1 skipped
+                                                           637 passed, 1 skipped
 python -m build --wheel --no-isolation                       PASS
 ```
 
 The wheel contains all three P7 resources under
-`orca_agent/resources/p7/`. The required P7 smoke path is:
+`orca_agent/resources/p7/`. The required repair smoke path is:
 
-1. Natural-language calculation request → constrained Opt/Freq/independent SP
-   plan.
-2. Explicit plan token → P4 identity pending.
-3. Explicit identity token → P5 node approval pending.
-4. Three separate P5 node tokens → fake P5 completion.
-5. Automatic P6 assessment handoff → immutable Delivery.
-6. Same-conversation query, display-only formatting change, export, and
-   integrity verification without recalculation.
+1. Response loss after an accepted P4 handoff reuses the same command ID and
+   does not duplicate the downstream request.
+2. Response loss after an accepted identity action replays the original
+   payload and does not mint a second action.
+3. A cancelled turn cannot publish a late model response or create a task.
+4. Invalid model output gets at most one durable format-repair attempt.
+5. Current-task and display-only queries retain the task and preserve the
+   original query text without creating a new task.
+6. The shared terminal driver requires an explicit action token and keeps the
+   direct entry point on the fake backend unless real ORCA is explicitly
+   enabled.
+7. The existing fake P4/P5/P6 chain still closes to immutable Delivery,
+   separate rendered view, export, and integrity verification without
+   recalculation.
 
 The fake source is labelled as fake in P5 records and is not scientific real-run
 evidence. Unsupported requests (SP-only, Gibbs/ZPE, solvent, TS/IRC, oxygen
