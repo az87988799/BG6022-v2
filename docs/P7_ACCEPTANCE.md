@@ -10,6 +10,7 @@ implementation and explicitly accept it before P7 is marked complete.
 
 - Implementation baseline: `d728ee8a2a6aa488fbfc8aaa98ac33cb7555ba07`.
 - Implementation branch: `codex/v2-p7-chat-entry-repair`.
+- Implementation commit: `9f5f5222a72427909386c16879bace94215feef5`.
 - Scope: implement the plan's current PubChem/SMILES → RDKit ETKDGv3 → ORCA
   preparation route while keeping v4 and legacy records readable; freeze a
   versioned preparation snapshot and one final confirmation; preserve exact
@@ -34,8 +35,10 @@ implementation and explicitly accept it before P7 is marked complete.
 
 ## Offline verification record
 
-The implementation commit and pushed remote hash are filled in at commit/push
-time. The final verification record is:
+The implementation commit above contains the code and plan-aligned tests. This
+acceptance record is updated in a separate documentation commit so the
+implementation hash is not self-referential. The final pushed branch contains
+both commits. The final verification record is:
 
 ```text
 ruff check src tests                                      PASS
