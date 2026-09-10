@@ -566,6 +566,11 @@ class TaskRecord(P7Model):
     clarification_count: int = Field(default=0, ge=0)
     no_progress_count: int = Field(default=0, ge=0)
     current_delivery_id: str | None = None
+    # v5 preparation is additive to the v4 task projection.  Zero means the
+    # task has not entered the snapshot-based preparation route.
+    preparation_generation: int = Field(default=0, ge=0)
+    prepared_calculation_id: str | None = None
+    final_authorization_id: str | None = None
     created_at_utc: datetime
     updated_at_utc: datetime
 
@@ -579,7 +584,14 @@ class TaskRecord(P7Model):
     def _task_text(cls, value: str, info: object) -> str:
         return _text(value, getattr(info, "field_name", "task"), maximum=256)
 
-    @field_validator("p4_run_id", "p5_run_id", "p6_run_id", "current_delivery_id")
+    @field_validator(
+        "p4_run_id",
+        "p5_run_id",
+        "p6_run_id",
+        "current_delivery_id",
+        "prepared_calculation_id",
+        "final_authorization_id",
+    )
     @classmethod
     def _optional_task_id(cls, value: str | None, info: object) -> str | None:
         return (
@@ -599,6 +611,10 @@ class TaskRecord(P7Model):
             raise ValueError("plan_ready task requires a validated plan")
         if self.accepted_plan_hash is not None and self.plan is None:
             raise ValueError("accepted plan hash requires a plan")
+        if self.prepared_calculation_id is not None and self.preparation_generation < 1:
+            raise ValueError("a prepared calculation requires a positive generation")
+        if self.final_authorization_id is not None and self.prepared_calculation_id is None:
+            raise ValueError("final authorization requires a prepared calculation")
         return self
 
 

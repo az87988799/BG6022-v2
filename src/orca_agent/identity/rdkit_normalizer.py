@@ -18,6 +18,25 @@ class IdentityNormalizationError(ValueError):
 
 
 @dataclass(frozen=True)
+class StructureInspection:
+    """Structure facts independent from a requested q/M pair."""
+
+    source_smiles: str
+    canonical_isomeric_smiles: str
+    molecular_formula: str
+    formal_charge: int
+    electron_count: int
+    fragment_count: int
+    radical_electron_count: int
+    stereo_status: str
+    isotope_labels: tuple[int, ...]
+    rdkit_version: str
+    normalization_strategy: str
+    structure_hash: str
+    checks: dict[str, object]
+
+
+@dataclass(frozen=True)
 class NormalizedStructure:
     source_smiles: str
     canonical_isomeric_smiles: str
@@ -56,7 +75,9 @@ class RDKitNormalizer:
                 "P4 identity normalization requires the p4 optional dependencies"
             ) from error
 
-    def normalize(self, smiles: str, *, charge: int, multiplicity: int) -> NormalizedStructure:
+    def inspect_structure(self, smiles: str) -> StructureInspection:
+        """Parse and canonicalize a SMILES without requiring q/M first."""
+
         if not isinstance(smiles, str) or not smiles.strip() or "\x00" in smiles:
             raise IdentityNormalizationError("invalid_identity", "SMILES is empty or invalid")
         source = smiles.strip()
@@ -66,10 +87,6 @@ class RDKitNormalizer:
             )
         if len(source) > self.max_input_chars:
             raise IdentityNormalizationError("identity_result_limit_exceeded", "SMILES is too long")
-        if type(charge) is not int or type(multiplicity) is not int or multiplicity < 1:
-            raise IdentityNormalizationError(
-                "invalid_identity", "charge or multiplicity is invalid"
-            )
         try:
             molecule = self._chem.MolFromSmiles(source, sanitize=True)
         except Exception as error:  # RDKit may expose implementation exceptions.
@@ -91,11 +108,6 @@ class RDKitNormalizer:
             )
 
         actual_charge = int(self._chem.GetFormalCharge(molecule))
-        if actual_charge != charge:
-            raise IdentityNormalizationError(
-                "invalid_identity", "molecular charge does not match input"
-            )
-
         fragments = self._chem.GetMolFrags(molecule, asMols=False, sanitizeFrags=False)
         fragment_count = len(fragments)
         radical_electrons = sum(atom.GetNumRadicalElectrons() for atom in molecule.GetAtoms())
@@ -118,17 +130,7 @@ class RDKitNormalizer:
         atomic_electron_sum = sum(
             atom.GetAtomicNum() for atom in self._chem.AddHs(molecule).GetAtoms()
         )
-        electron_count = atomic_electron_sum - charge
-        spin_parity_valid = (
-            electron_count >= 0
-            and (electron_count - (multiplicity - 1)) >= 0
-            and ((electron_count - (multiplicity - 1)) % 2 == 0)
-        )
-        if not spin_parity_valid:
-            raise IdentityNormalizationError(
-                "invalid_identity", "charge and multiplicity parity is invalid"
-            )
-
+        electron_count = atomic_electron_sum - actual_charge
         canonical = self._chem.MolToSmiles(molecule, canonical=True, isomericSmiles=True)
         formula = self._descriptors.CalcMolFormula(molecule)
         rdkit_version = str(self._rd_base.rdkitVersion)
@@ -145,8 +147,6 @@ class RDKitNormalizer:
             "max_non_h_atoms": self.max_non_h_atoms,
             "charge_matches": True,
             "electron_count": electron_count,
-            "multiplicity": multiplicity,
-            "spin_parity_valid": spin_parity_valid,
             "protocol_range_supported": not unsupported_elements
             and fragment_count == 1
             and radical_electrons == 0
@@ -162,11 +162,12 @@ class RDKitNormalizer:
                 "rdkit_version": rdkit_version,
             }
         )
-        return NormalizedStructure(
+        return StructureInspection(
             source_smiles=source,
             canonical_isomeric_smiles=canonical,
             molecular_formula=formula,
             formal_charge=actual_charge,
+            electron_count=electron_count,
             fragment_count=fragment_count,
             radical_electron_count=radical_electrons,
             stereo_status=stereo_status,
@@ -177,20 +178,55 @@ class RDKitNormalizer:
             checks=checks,
         )
 
+    def normalize(self, smiles: str, *, charge: int, multiplicity: int) -> NormalizedStructure:
+        """Compatibility wrapper adding q/M validation to inspection facts."""
+
+        if type(charge) is not int or type(multiplicity) is not int or multiplicity < 1:
+            raise IdentityNormalizationError(
+                "invalid_identity", "charge or multiplicity is invalid"
+            )
+        inspection = self.inspect_structure(smiles)
+        if inspection.formal_charge != charge:
+            raise IdentityNormalizationError(
+                "invalid_identity", "molecular charge does not match input"
+            )
+        spin_parity_valid = (
+            inspection.electron_count >= 0
+            and (inspection.electron_count - (multiplicity - 1)) >= 0
+            and ((inspection.electron_count - (multiplicity - 1)) % 2 == 0)
+        )
+        if not spin_parity_valid:
+            raise IdentityNormalizationError(
+                "invalid_identity", "charge and multiplicity parity is invalid"
+            )
+        return NormalizedStructure(
+            source_smiles=inspection.source_smiles,
+            canonical_isomeric_smiles=inspection.canonical_isomeric_smiles,
+            molecular_formula=inspection.molecular_formula,
+            formal_charge=inspection.formal_charge,
+            fragment_count=inspection.fragment_count,
+            radical_electron_count=inspection.radical_electron_count,
+            stereo_status=inspection.stereo_status,
+            isotope_labels=inspection.isotope_labels,
+            rdkit_version=inspection.rdkit_version,
+            normalization_strategy=inspection.normalization_strategy,
+            structure_hash=inspection.structure_hash,
+            checks={
+                **inspection.checks,
+                "multiplicity": multiplicity,
+                "spin_parity_valid": spin_parity_valid,
+            },
+        )
+
     def formal_charge(self, smiles: str) -> int:
         """Read only the sanitized formal charge for a P7 precheck."""
 
-        if not isinstance(smiles, str) or not smiles.strip() or "\x00" in smiles:
-            raise IdentityNormalizationError("invalid_identity", "SMILES is empty or invalid")
-        try:
-            molecule = self._chem.MolFromSmiles(smiles.strip(), sanitize=True)
-        except Exception as error:
-            raise IdentityNormalizationError(
-                "invalid_identity", "SMILES could not be parsed"
-            ) from error
-        if molecule is None:
-            raise IdentityNormalizationError("invalid_identity", "SMILES could not be parsed")
-        return int(self._chem.GetFormalCharge(molecule))
+        return self.inspect_structure(smiles).formal_charge
 
 
-__all__ = ["IdentityNormalizationError", "NormalizedStructure", "RDKitNormalizer"]
+__all__ = [
+    "IdentityNormalizationError",
+    "NormalizedStructure",
+    "RDKitNormalizer",
+    "StructureInspection",
+]

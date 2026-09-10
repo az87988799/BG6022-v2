@@ -11,8 +11,8 @@ from pydantic import Field, field_validator
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.json_types import FrozenJsonObject, freeze_json_object
 from orca_agent.domain.p7_conversation import ContextSnapshot, P7Model, TurnInterpretation
-from orca_agent.domain.p7_intake import TurnInterpretationV4
-from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4
+from orca_agent.domain.p7_intake import TurnInterpretationV4, TurnInterpretationV5
+from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4, TURN_SCHEMA_V5
 
 
 class ModelMessage(P7Model):
@@ -124,7 +124,7 @@ class PlannerPort(Protocol):
 
     def interpret(
         self, context: ContextSnapshot
-    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4:
+    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4 | TurnInterpretationV5:
         """Return a raw model response or an already validated interpretation."""
 
 
@@ -136,14 +136,15 @@ class CallablePlanner:
     def __init__(
         self,
         callback: Callable[
-            [ContextSnapshot], ModelCallResponse | TurnInterpretation | TurnInterpretationV4
+            [ContextSnapshot],
+            ModelCallResponse | TurnInterpretation | TurnInterpretationV4 | TurnInterpretationV5,
         ],
     ) -> None:
         self._callback = callback
 
     def interpret(
         self, context: ContextSnapshot
-    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4:
+    ) -> ModelCallResponse | TurnInterpretation | TurnInterpretationV4 | TurnInterpretationV5:
         return self._callback(context)
 
 
@@ -167,10 +168,14 @@ def strict_json_loads(value: str | bytes) -> object:
     )
 
 
-def validate_interpretation(value: object) -> TurnInterpretation | TurnInterpretationV4:
+def validate_interpretation(
+    value: object,
+) -> TurnInterpretation | TurnInterpretationV4 | TurnInterpretationV5:
     if isinstance(value, TurnInterpretation):
         return value
     if isinstance(value, TurnInterpretationV4):
+        return value
+    if isinstance(value, TurnInterpretationV5):
         return value
     if isinstance(value, bytes):
         raw = strict_json_loads(value)
@@ -190,6 +195,13 @@ def validate_interpretation(value: object) -> TurnInterpretation | TurnInterpret
             else json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
         )
         return TurnInterpretationV4.model_validate_json(encoded, strict=True)
+    if isinstance(raw, Mapping) and raw.get("schema_version") == TURN_SCHEMA_V5:
+        encoded = (
+            value
+            if isinstance(value, (str, bytes))
+            else json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        )
+        return TurnInterpretationV5.model_validate_json(encoded, strict=True)
     if isinstance(value, bytes):
         return TurnInterpretation.model_validate_json(value, strict=True)
     if isinstance(value, str):

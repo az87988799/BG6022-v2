@@ -53,6 +53,7 @@ from orca_agent.domain.p4 import (
     ResponseEnvelope,
 )
 from orca_agent.domain.p5 import (
+    GeometryOriginRecord,
     GeometryRecord,
     P5ActionRecord,
     P5ApprovalGrant,
@@ -105,6 +106,7 @@ _RECORD_CONTRACTS: dict[str, tuple[type[BaseModel], int, str]] = {
     "p5.execution_context": (P5ExecutionContext, 4, "p5-local-orca-v1"),
     "p5.execution_plan": (P5ExecutionPlan, 4, "p5-local-orca-v1"),
     "p5.geometry": (GeometryRecord, 4, "p5-local-orca-v1"),
+    "p5.geometry_origin": (GeometryOriginRecord, 4, "p5-local-orca-v1"),
     "p5.execution_binding": (P5ExecutionBinding, 4, "p5-local-orca-v1"),
     "p5.action": (P5ActionRecord, 4, "p5-local-orca-v1"),
     "p5.approval_grant": (P5ApprovalGrant, 4, "p5-local-orca-v1"),
@@ -141,6 +143,76 @@ def _parse_model(value: str, model_type: type[ModelT], *, what: str) -> ModelT:
 
 def _record_hash(value: BaseModel) -> str:
     return sha256_hex(value)
+
+
+_LEGACY_P5_OPTIONAL_FIELDS: dict[type[BaseModel], frozenset[str]] = {
+    # These fields were added to the schema-4 P5 records for the v5
+    # preparation/authorization chain.  A v4 record with the fields absent
+    # remains readable, but the stored legacy JSON and hash must still verify.
+    P5ExecutionBinding: frozenset(
+        {
+            "geometry_record_id",
+            "geometry_record_hash",
+            "geometry_draft_hash",
+            "preparation_snapshot_id",
+            "preparation_snapshot_hash",
+            "parent_authorization_id",
+            "parent_authorization_hash",
+            "parent_authorization_credential",
+        }
+    ),
+    P5ApprovalGrant: frozenset(
+        {
+            "parent_authorization_id",
+            "parent_authorization_hash",
+            "parent_authorization_credential",
+        }
+    ),
+    P5ExecutionContext: frozenset(
+        {
+            "preparation_snapshot_id",
+            "preparation_snapshot_hash",
+            "geometry_draft_hash",
+            "parent_authorization_id",
+            "parent_authorization_hash",
+            "parent_authorization_credential",
+        }
+    ),
+}
+
+
+def _stored_record_shape(record: BaseModel, stored_json: str, payload: object) -> tuple[bool, bool]:
+    """Return (valid, is_legacy_shape) for one canonical stored record."""
+
+    if _model_json(record) == stored_json:
+        return True, False
+    if type(record) not in _LEGACY_P5_OPTIONAL_FIELDS or not isinstance(payload, dict):
+        return False, False
+    model_payload = record.model_dump(mode="json")
+    stored_keys = set(payload)
+    model_keys = set(model_payload)
+    missing = model_keys - stored_keys
+    if (
+        not missing
+        or stored_keys - model_keys
+        or not missing <= _LEGACY_P5_OPTIONAL_FIELDS[type(record)]
+        or any(field in record.model_fields_set for field in missing)
+        or any(model_payload[field] != payload[field] for field in stored_keys)
+        or json_text(payload) != stored_json
+    ):
+        return False, False
+    return True, True
+
+
+def _validate_stored_record(record: BaseModel, stored_json: str, stored_hash: str) -> None:
+    payload = json_value(stored_json, what="P3 record")
+    valid, legacy_shape = _stored_record_shape(record, stored_json, payload)
+    if not valid:
+        raise StateIntegrityError("stored workflow record is not canonical JSON")
+    if sha256_hex(payload) != stored_hash:
+        raise StateIntegrityError("stored workflow record hash does not match")
+    if not legacy_shape and _record_hash(record) != stored_hash:
+        raise StateIntegrityError("stored workflow record hash does not match")
 
 
 class P3RecordRepository:
@@ -272,11 +344,7 @@ class P3RecordRepository:
             if stored_schema != schema_version or str(rows[2]) != engine_version:
                 raise StateIntegrityError("stored workflow record version is unsupported")
             record = _parse_model(str(rows[3]), expected_model, what="P3 record")
-            if _model_json(record) != str(rows[3]):
-                raise StateIntegrityError("stored P3 record is not canonical JSON")
-            stored_hash = str(rows[4])
-            if _record_hash(record) != stored_hash:
-                raise StateIntegrityError("stored P3 record hash does not match")
+            _validate_stored_record(record, str(rows[3]), str(rows[4]))
             if getattr(record, "run_id", run_id) != run_id:
                 raise StateIntegrityError("stored P3 record belongs to another run")
             _verify_source_event(self.connection, rows[5], run_id)
@@ -307,14 +375,10 @@ class P3RecordRepository:
                 stored_schema = stored_int(row[2], what="P3 record schema_version", minimum=1)
                 if stored_schema != expected_schema or str(row[3]) != expected_engine:
                     raise StateIntegrityError("stored P3 record version is unsupported")
-                payload = json_value(str(row[4]), what="P3 record")
                 record = _parse_model(str(row[4]), model_type, what="P3 record")
-                if _model_json(record) != str(row[4]):
-                    raise StateIntegrityError("stored workflow record is not canonical JSON")
                 if _HASH_PATTERN.fullmatch(str(row[5])) is None:
                     raise StateIntegrityError("stored workflow record hash is invalid")
-                if sha256_hex(record) != str(row[5]) or sha256_hex(payload) != str(row[5]):
-                    raise StateIntegrityError("stored P3 record hash does not match")
+                _validate_stored_record(record, str(row[4]), str(row[5]))
                 _verify_source_event(self.connection, row[6], run_id)
                 parse_utc(str(row[7]))
                 values.append((record_id, record_type, record))
@@ -410,8 +474,7 @@ class P4RecordRepository(P3RecordRepository):
             ):
                 raise StateIntegrityError("P4 record owner or version is invalid")
             parsed = _parse_model(str(row[5]), expected_model, what="P4 record")
-            if _model_json(parsed) != str(row[5]) or _record_hash(parsed) != str(row[6]):
-                raise StateIntegrityError("P4 record hash does not match")
+            _validate_stored_record(parsed, str(row[5]), str(row[6]))
             _verify_source_event(self.connection, row[7], run_id)
             return parsed
         except StateIntegrityError:
@@ -527,8 +590,7 @@ class P5RecordRepository(P3RecordRepository):
         ):
             raise StateIntegrityError("P5 record owner or version is invalid")
         parsed = _parse_model(str(row[5]), expected_model, what="P5 record")
-        if _model_json(parsed) != str(row[5]) or _record_hash(parsed) != str(row[6]):
-            raise StateIntegrityError("P5 record hash does not match")
+        _validate_stored_record(parsed, str(row[5]), str(row[6]))
         _verify_source_event(self.connection, row[7], run_id)
         return parsed
 

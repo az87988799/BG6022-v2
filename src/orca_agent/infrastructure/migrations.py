@@ -1767,6 +1767,84 @@ P7_PLANNING_STATEMENTS = (
     """.strip(),
 )
 
+# P7 preparation is an additive snapshot layer.  It is intentionally
+# separate from the historical p7_handoffs table: one task may be prepared
+# more than once while its draft changes, and each generation must retain its
+# own immutable identity/geometry/preview binding.
+P7_PREPARATION_STATEMENTS = (
+    "ALTER TABLE p7_tasks ADD COLUMN preparation_generation INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE p7_tasks ADD COLUMN prepared_calculation_id TEXT",
+    "ALTER TABLE p7_tasks ADD COLUMN final_authorization_id TEXT",
+    """
+    CREATE TABLE p7_prepared_calculations (
+        prepared_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        conversation_id TEXT NOT NULL REFERENCES p7_conversations(conversation_id),
+        preparation_generation INTEGER NOT NULL CHECK(preparation_generation >= 1),
+        task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        status TEXT NOT NULL CHECK(status IN (
+            'preparing', 'ready', 'needs_clarification', 'failed',
+            'cancelled', 'expired'
+        )),
+        snapshot_json TEXT NOT NULL,
+        snapshot_hash TEXT NOT NULL CHECK(length(snapshot_hash) = 64),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE(task_id, preparation_generation)
+    )
+    """.strip(),
+    (
+        "CREATE INDEX p7_prepared_calculations_task ON "
+        "p7_prepared_calculations(task_id, preparation_generation)"
+    ),
+    """
+    CREATE TABLE p7_preparation_handoffs (
+        handoff_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        preparation_generation INTEGER NOT NULL CHECK(preparation_generation >= 1),
+        target TEXT NOT NULL CHECK(target IN ('identity', 'geometry', 'preview')),
+        command_id TEXT NOT NULL,
+        child_id TEXT NOT NULL,
+        expected_revision INTEGER NOT NULL CHECK(expected_revision >= 1),
+        payload_json TEXT NOT NULL,
+        payload_hash TEXT NOT NULL CHECK(length(payload_hash) = 64),
+        status TEXT NOT NULL CHECK(
+            status IN ('prepared', 'submitted', 'linked', 'stale', 'failed')
+        ),
+        created_at_utc TEXT NOT NULL,
+        updated_at_utc TEXT NOT NULL,
+        UNIQUE(task_id, preparation_generation, target)
+    )
+    """.strip(),
+    (
+        "CREATE INDEX p7_preparation_handoffs_lookup ON "
+        "p7_preparation_handoffs(task_id, preparation_generation, target)"
+    ),
+)
+
+P7_AUTHORIZATION_STATEMENTS = (
+    """
+    CREATE TABLE p7_execution_authorizations (
+        authorization_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES p7_tasks(task_id),
+        prepared_calculation_id TEXT NOT NULL REFERENCES p7_prepared_calculations(prepared_id),
+        task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+        preparation_generation INTEGER NOT NULL CHECK(preparation_generation >= 1),
+        snapshot_hash TEXT NOT NULL CHECK(length(snapshot_hash) = 64),
+        authorization_json TEXT NOT NULL,
+        authorization_hash TEXT NOT NULL CHECK(length(authorization_hash) = 64),
+        status TEXT NOT NULL CHECK(status IN ('issued', 'consumed', 'revoked')),
+        issued_at_utc TEXT NOT NULL,
+        expires_at_utc TEXT NOT NULL,
+        UNIQUE(prepared_calculation_id)
+    )
+    """.strip(),
+    (
+        "CREATE INDEX p7_execution_authorizations_task ON "
+        "p7_execution_authorizations(task_id, preparation_generation)"
+    ),
+)
+
 
 DEFAULT_MIGRATIONS = (
     Migration(
@@ -1825,6 +1903,16 @@ DEFAULT_MIGRATIONS = (
         version=10,
         name="p7_immutable_planning_records",
         statements=P7_PLANNING_STATEMENTS,
+    ),
+    Migration(
+        version=11,
+        name="p7_preparation_snapshots_and_generation_handoffs",
+        statements=P7_PREPARATION_STATEMENTS,
+    ),
+    Migration(
+        version=12,
+        name="p7_parent_execution_authorizations",
+        statements=P7_AUTHORIZATION_STATEMENTS,
     ),
 )
 
@@ -1953,6 +2041,8 @@ __all__ = [
     "P5_LOCAL_JOB_STATEMENTS",
     "P7_EXECUTION_RESOURCE_STATEMENTS",
     "P7_PLANNING_STATEMENTS",
+    "P7_PREPARATION_STATEMENTS",
+    "P7_AUTHORIZATION_STATEMENTS",
     "apply_migrations",
     "migrate_database",
     "migration_checksum",

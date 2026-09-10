@@ -121,7 +121,7 @@ class P7ChatDriver:
                 "code": "explicit_token_required",
                 "text": (
                     "请使用 /accept <token>，或明确输入"
-                    "“确认草稿并准备/确认身份/确认并开始本次 Opt 计算”。"
+                    "“确认草稿并准备/确认身份/确认并开始已准备好的计算”。"
                 ),
             }
         try:
@@ -555,6 +555,10 @@ class P7ChatDriver:
         state = task.get("state")
         if state == "reconciliation_required":
             return "下游 P5 启动状态未知；请使用 /reconcile。"
+        if state == "waiting_for_final_confirmation":
+            return "身份、几何和首个 ORCA 输入已冻结；等待唯一一次最终确认。"
+        if state == "preparation_blocked":
+            return "P7 准备阶段被阻塞；请查看准备快照中的具体原因。"
         if state == "execution_pending":
             return "等待用户逐项批准 P5 执行节点。"
         blocked = task.get("execution_blocked")
@@ -582,6 +586,7 @@ class P7ChatDriver:
         labels = {
             "accept_plan": "请明确确认草稿并准备",
             "confirm_identity": "请确认唯一分子身份候选",
+            "confirm_execution": "请进行唯一一次最终确认并开始已准备好的计算",
             "approve_execution": "请明确确认并开始本次计算（当前 P5 节点）",
         }
         return labels.get(str(action.get("action_type")), "请明确处理这个待办")

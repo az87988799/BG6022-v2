@@ -30,35 +30,51 @@ packages, pull code, or silently approve a plan, identity, or P5 node. If the
 real ORCA profile is not ready, planning may still be inspected but no
 executable approval token is issued.
 
-## Default draft and confirmations
+## Current v5 flow: automatic preparation and one final confirmation
 
-For example, `优化水分子` creates a complete editable draft with:
+The `real` and `deepseek_fake` profiles use the current v5 intake contract.
+For a complete request such as `优化水分子`, the program automatically:
 
-- method `r2SCAN-3c`;
-- gas phase;
-- charge `0`, multiplicity `1` (the versioned water/ethanol policy
-  recommendation);
-- the `Opt` operation only, with optimized geometry and final Opt energy;
-- the registered P5 resources: 4 cores, 2048 MB total memory, and 384 MB
-  MaxCore.
+- resolves the molecule identity (name/CAS/CID through PubChem; an explicit
+  SMILES follows the local RDKit validation path);
+- applies the registered defaults: `r2SCAN-3c`, gas phase, charge `0`,
+  multiplicity `1`, and the P5 budget of 4 cores, 2048 MB total memory,
+  384 MB MaxCore;
+- generates exactly one RDKit ETKDGv3 starting conformer with seed `6022`,
+  one generation thread, and bounded `maxAttempts=20`;
+- freezes the identity, geometry bytes/hashes, selected operations, output
+  specification, and the first ORCA input preview.
+
+Preparation only creates auditable P4 candidates and a read-only ORCA preview;
+it never starts ORCA or silently approves identity. A unique, ready snapshot
+returns exactly one pending `confirm_execution` action. Accept it with
+`/accept <token>` or the exact phrase `确认并开始`; this is the only user
+confirmation in the normal v5 flow. A multi-step plan receives one parent
+authorization and its approved downstream nodes derive their own credentials;
+there is no repeated per-node confirmation.
+
+If identity is ambiguous, preparation stops with a concrete clarification and
+no executable action. If the real ORCA profile is not ready, the snapshot can
+still be inspected, but no executable confirmation is issued. If the user
+explicitly selects a completed historical Opt, the follow-up task retains the
+original P4 source and exact Opt result/XYZ reference; it does not query a new
+identity or replace the source with a fresh RDKit geometry. A missing or
+untrusted history reference fails preparation instead of falling back.
 
 `Freq` and independent `SP` are not silently added. Request them explicitly;
-they become separate operations in the draft. Omitted method/environment
-values are completed by the program policy, while values repeated by a model
-without a current-message evidence quote do not overwrite the existing draft.
-The molecule policy uses exact registered aliases and structures: the generic
-word `酒精` is not automatically treated as ethanol, and `苯在水溶液中` keeps
-benzene as the target and treats water as the solvent environment.
+they become registered operations in the same frozen plan. Omitted
+method/environment values are completed by the program policy, while values
+repeated by a model without current-message evidence do not overwrite the
+existing draft. The molecule policy uses exact registered aliases and
+structures: the generic word `酒精` is not automatically treated as ethanol,
+and `苯在水溶液中` keeps benzene as the target and treats water as the solvent
+environment.
 
-Use these explicit confirmation phrases in the terminal:
-
-- `确认草稿并准备` — accept the scientific draft and prepare P4 identity;
-- `确认这个分子` — confirm the unique identity candidate;
-- `确认并开始本次 Opt 计算` (or `确认并开始本次计算`) — approve the current
-  P5 node only.
-
-Each phrase is matched to one current pending action. If there is no matching
-token, the program does not create a blank task or start a calculation.
+The explicit phrases `确认草稿并准备`, `确认这个分子`, and
+`确认并开始本次 Opt 计算` remain readable for older v4 tasks and CLI
+compatibility. They are not additional confirmation steps for a new v5 task;
+each phrase is matched only to an existing pending action, and no token means
+no task creation or execution.
 
 For local testing, profiles are explicit:
 
@@ -75,7 +91,11 @@ Inside the window, ordinary Chinese or English text is sent to the shared
 progress while idle and after input. Default output is human-readable. Add
 `--json` when a JSON-lines terminal protocol is needed.
 
-The same driver is used by the explicit CLI entry:
+The same driver is used by the explicit CLI entry. The following example is
+the deterministic v4/legacy-compatibility sequence: it deliberately exposes
+the historical plan and identity tokens. The current v5 real/deepseek_fake
+route instead prepares the snapshot during `agent-message` and exposes only
+the final `confirm_execution` token.
 
 ```powershell
 .venv\Scripts\python.exe -m orca_agent --state-root .tmp\p7\chat agent-chat `

@@ -16,6 +16,7 @@ from orca_agent.application.errors import (
 from orca_agent.application.p4_service import P4ApplicationService
 from orca_agent.application.p5_service import P5ApplicationService
 from orca_agent.application.p6_service import P6ApplicationService
+from orca_agent.application.p7_preparation_service import P7PreparationService
 from orca_agent.application.p7_runtime_config import P7RuntimeConfig
 from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.ids import (
@@ -30,10 +31,15 @@ from orca_agent.domain.ids import (
 )
 from orca_agent.domain.json_types import thaw_json
 from orca_agent.domain.p4 import IdentityDecision, IdentityProvider, P4Phase
-from orca_agent.domain.p5 import P5Phase
+from orca_agent.domain.p5 import GeometryRecord, P5Phase
 from orca_agent.domain.p6 import P6Phase
 from orca_agent.domain.p7_conversation import MoleculeInputType
 from orca_agent.domain.p7_planning import PlanFeedback, PlanningRecord
+from orca_agent.domain.p7_preparation import (
+    PreparationHandoff,
+    PreparationStatus,
+    PreparedCalculation,
+)
 from orca_agent.domain.p7_task import (
     CalculationRequest,
     DeliveryRecord,
@@ -45,6 +51,8 @@ from orca_agent.domain.p7_task import (
     TaskRecord,
     ValidationStatus,
 )
+from orca_agent.domain.workflow_authorization import WorkflowExecutionAuthorization
+from orca_agent.identity.geometry import bind_initial_geometry
 from orca_agent.infrastructure.clock import Clock, SystemClock, format_utc, parse_utc
 from orca_agent.infrastructure.p7_records import P7RecordRepository
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
@@ -112,6 +120,12 @@ class P7TaskService:
             clock=self.clock,
             fake_adapter=_fake_pubchem(),
             allow_network=allow_network,
+        )
+        self.preparation = P7PreparationService(
+            self.state_root,
+            p4_service=self.p4,
+            runtime_config=self.runtime_config,
+            clock=self.clock,
         )
         self.p5 = p5_service or P5ApplicationService(
             self.state_root,
@@ -230,7 +244,18 @@ class P7TaskService:
                     task.request.request_hash,
                     task.plan.plan_hash,
                 )
+            preparation = records.get_prepared_for_task(
+                task.task_id,
+                task.preparation_generation if task.preparation_generation > 0 else None,
+            )
+            authorization = (
+                None
+                if task.final_authorization_id is None
+                else records.get_execution_authorization(task.final_authorization_id)
+            )
             uow.commit()
+        if task.final_authorization_id is not None and authorization is None:
+            raise StateIntegrityError("task final authorization record is missing")
         result: dict[str, object] = {
             "task": task.model_dump(mode="json"),
             "pending_actions": [
@@ -238,6 +263,10 @@ class P7TaskService:
             ],
             "delivery": None if delivery is None else delivery.model_dump(mode="json"),
             "planning_record": (None if planning is None else planning.model_dump(mode="json")),
+            "preparation": (None if preparation is None else preparation.model_dump(mode="json")),
+            "execution_authorization": (
+                None if authorization is None else authorization.model_dump(mode="json")
+            ),
         }
         if task.state is TaskPhase.PLAN_READY and not self.runtime_config.execution_ready:
             result["execution_blocked"] = {
@@ -288,6 +317,7 @@ class P7TaskService:
         alias: str | None,
         normalized,
         turn_id: str,
+        preparation_route: bool = False,
     ) -> dict[str, object]:
         if normalized.request is None or normalized.validation is None:
             raise ValueError("normalized P7 plan is incomplete")
@@ -332,7 +362,11 @@ class P7TaskService:
                 link_kind="active",
                 now=now,
             )
-            if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
+            if (
+                state is TaskPhase.PLAN_READY
+                and self.runtime_config.execution_ready
+                and not preparation_route
+            ):
                 execution_profile = self._plan_execution_profile(normalized.plan.protocol_id)
                 self._insert_pending(
                     records,
@@ -357,6 +391,7 @@ class P7TaskService:
         normalized,
         turn_id: str,
         expected_revision: int,
+        preparation_route: bool = False,
     ) -> dict[str, object]:
         """Apply one validated sparse draft revision atomically."""
 
@@ -376,7 +411,6 @@ class P7TaskService:
                 current.state
                 not in {TaskPhase.NEEDS_CLARIFICATION, TaskPhase.DRAFT, TaskPhase.PLAN_READY}
                 or current.accepted_plan_hash is not None
-                or current.p4_run_id is not None
                 or current.p5_run_id is not None
             ):
                 raise InvalidTransitionError("task draft is no longer editable")
@@ -399,6 +433,8 @@ class P7TaskService:
                     "p4_run_id": None,
                     "p5_run_id": None,
                     "p6_run_id": None,
+                    "prepared_calculation_id": None,
+                    "final_authorization_id": None,
                     "current_delivery_id": None,
                     "updated_at_utc": now,
                 }
@@ -413,7 +449,11 @@ class P7TaskService:
                 turn_id=turn_id,
                 now=now,
             )
-            if state is TaskPhase.PLAN_READY and self.runtime_config.execution_ready:
+            if (
+                state is TaskPhase.PLAN_READY
+                and self.runtime_config.execution_ready
+                and not preparation_route
+            ):
                 execution_profile = self._plan_execution_profile(normalized.plan.protocol_id)
                 self._insert_pending(
                     records,
@@ -429,6 +469,627 @@ class P7TaskService:
                 )
             uow.commit()
         return self._view(updated)
+
+    def prepare_v5(self, conversation_id: ConversationId | str, task_id: str) -> dict[str, object]:
+        """Run the additive P7 preparation stage for one task generation.
+
+        Preparation is deliberately outside the draft-creation transaction:
+        provider lookup and RDKit are bounded external work, while the
+        resulting snapshot and the final confirmation token are committed
+        together afterward.
+        """
+
+        conversation = str(conversation_id)
+        task = self.get_task(conversation, task_id)
+        if task is None:
+            raise ValueError("task was not found in this conversation")
+        if task.request is None or task.validation is None or task.plan is None:
+            raise InvalidTransitionError("task is not ready for P7 preparation")
+        existing_snapshot = self._prepared_snapshot_for_task(task)
+        if existing_snapshot is not None:
+            if (
+                existing_snapshot.task_revision != task.revision
+                or existing_snapshot.request_hash != task.request.request_hash
+                or existing_snapshot.plan_hash != task.plan.plan_hash
+            ):
+                raise StateIntegrityError(
+                    "existing preparation snapshot does not match the current task revision"
+                )
+            # Preparation is an immutable, versioned boundary.  A replay
+            # after a crash must reuse its persisted P4/RDKit/input facts and
+            # only repair missing handoff/token projections.
+            self._ensure_preparation_handoffs(existing_snapshot)
+            self._ensure_preparation_confirmation(task, existing_snapshot)
+            current = self.get_task(conversation, task_id) or task
+            return self._view(current)
+        generation = task.preparation_generation + 1
+        planning = self._planning_record(task)
+        source_task = (
+            None
+            if planning is None or planning.source_task_id is None
+            else self.get_task(conversation, planning.source_task_id)
+        )
+        source_required = planning is not None and (
+            planning.source_task_id is not None or planning.external_opt_result_id is not None
+        )
+        source_reference = (
+            None if planning is None else planning.source_task_id or planning.external_opt_result_id
+        )
+        source_geometry = None
+        source_geometry_bytes = None
+        source_result_id = None if planning is None else planning.external_opt_result_id
+        if source_required:
+            if source_task is not None:
+                source = self._source_opt_geometry(source_task)
+                if source is not None:
+                    source_geometry, source_geometry_bytes = source
+            snapshot = self.preparation.prepare(
+                task,
+                generation=generation,
+                source_task=source_task,
+                source_geometry=source_geometry,
+                source_geometry_bytes=source_geometry_bytes,
+                source_required=True,
+                source_reference=source_reference,
+                source_result_id=source_result_id,
+            )
+        elif source_task is not None:
+            source = self._source_opt_geometry(source_task)
+            if source is not None:
+                source_geometry, source_geometry_bytes = source
+            snapshot = self.preparation.prepare(
+                task,
+                generation=generation,
+                source_task=source_task,
+                source_geometry=source_geometry,
+                source_geometry_bytes=source_geometry_bytes,
+                source_result_id=source_result_id,
+            )
+        else:
+            snapshot = self.preparation.prepare(task, generation=generation)
+
+        p4_run_id = thaw_json(snapshot.dependencies).get("p4_run_id")
+        if p4_run_id is not None and not isinstance(p4_run_id, str):
+            raise StateIntegrityError("preparation snapshot P4 dependency is invalid")
+        next_state = (
+            TaskPhase.PLAN_READY
+            if snapshot.status is PreparationStatus.READY
+            else TaskPhase.NEEDS_CLARIFICATION
+        )
+        now = _now(self.clock)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            existing = records.get_prepared_for_task(task.task_id, generation)
+            if existing is not None:
+                uow.commit()
+                self._ensure_preparation_handoffs(existing)
+                return self._view(self.get_task(conversation, task_id) or task)
+            records.insert_prepared_calculation(snapshot)
+            current = records.get_task(conversation, task.task_id)
+            if current is None:
+                raise StateIntegrityError("task disappeared during P7 preparation")
+            updated = current.model_copy(
+                update={
+                    "state": next_state,
+                    "preparation_generation": generation,
+                    "prepared_calculation_id": snapshot.prepared_id,
+                    "p4_run_id": p4_run_id or current.p4_run_id,
+                    "updated_at_utc": now,
+                }
+            )
+            if not records.update_task(updated, expected_revision=current.revision):
+                raise RevisionConflictError("task changed during P7 preparation")
+            self._insert_preparation_handoffs(records, snapshot, now=now)
+            if snapshot.status is PreparationStatus.READY and self.runtime_config.execution_ready:
+                self._insert_pending(
+                    records,
+                    conversation_id=conversation,
+                    task_id=updated.task_id,
+                    action_type="confirm_execution",
+                    target_id=snapshot.prepared_id,
+                    expected_revision=updated.revision,
+                    payload=self._final_confirmation_payload(updated, snapshot),
+                    now=now,
+                )
+            uow.commit()
+        return self._view(self.get_task(conversation, task_id) or updated)
+
+    def _ensure_preparation_confirmation(
+        self, task: TaskRecord, snapshot: PreparedCalculation
+    ) -> None:
+        if (
+            snapshot.status is not PreparationStatus.READY
+            or not self.runtime_config.execution_ready
+        ):
+            return
+        now = _now(self.clock)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            current = records.get_task(task.conversation_id, task.task_id)
+            if current is None:
+                raise StateIntegrityError(
+                    "task disappeared while restoring preparation confirmation"
+                )
+            if current.prepared_calculation_id != snapshot.prepared_id:
+                raise StateIntegrityError("preparation confirmation is bound to another snapshot")
+            if current.final_authorization_id is None:
+                self._insert_pending(
+                    records,
+                    conversation_id=current.conversation_id,
+                    task_id=current.task_id,
+                    action_type="confirm_execution",
+                    target_id=snapshot.prepared_id,
+                    expected_revision=current.revision,
+                    payload=self._final_confirmation_payload(current, snapshot),
+                    now=now,
+                )
+            uow.commit()
+
+    def _ensure_preparation_handoffs(self, snapshot: PreparedCalculation) -> None:
+        now = _now(self.clock)
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            self._insert_preparation_handoffs(P7RecordRepository(uow.connection), snapshot, now=now)
+            uow.commit()
+
+    @staticmethod
+    def _insert_preparation_handoffs(
+        records: P7RecordRepository, snapshot: PreparedCalculation, *, now: datetime
+    ) -> None:
+        dependencies = thaw_json(snapshot.dependencies)
+        if not isinstance(dependencies, dict):
+            raise StateIntegrityError("preparation dependencies are invalid")
+        p4_run_id = dependencies.get("p4_run_id")
+        p4_command_id = dependencies.get("p4_command_id")
+        if p4_run_id is not None and not isinstance(p4_run_id, str):
+            raise StateIntegrityError("preparation P4 run binding is invalid")
+        if p4_command_id is not None and not isinstance(p4_command_id, str):
+            raise StateIntegrityError("preparation P4 command binding is invalid")
+
+        def insert(
+            target: str,
+            *,
+            command_id: str,
+            child_id: str,
+            payload: dict[str, object],
+            status: str,
+        ) -> None:
+            if (
+                records.get_preparation_handoff(
+                    snapshot.task_id, snapshot.preparation_generation, target
+                )
+                is not None
+            ):
+                return
+            records.insert_preparation_handoff(
+                PreparationHandoff.create(
+                    handoff_id=f"p7prep_handoff_{uuid.uuid4().hex}",
+                    task_id=snapshot.task_id,
+                    preparation_generation=snapshot.preparation_generation,
+                    target=target,
+                    command_id=command_id,
+                    child_id=child_id,
+                    expected_revision=snapshot.task_revision,
+                    payload=payload,
+                    status=status,
+                    created_at_utc=now,
+                    updated_at_utc=now,
+                )
+            )
+
+        identity_status = "linked" if p4_run_id is not None else "failed"
+        insert(
+            "identity",
+            command_id=p4_command_id or f"p7prep_identity_{snapshot.prepared_id}",
+            child_id=p4_run_id or snapshot.prepared_id,
+            payload={
+                "prepared_id": snapshot.prepared_id,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "p4_run_id": p4_run_id,
+                "p4_command_id": p4_command_id,
+                "identity_snapshot_hash": sha256_hex(snapshot.identity_snapshot),
+            },
+            status=identity_status,
+        )
+        if snapshot.status is not PreparationStatus.READY:
+            return
+        draft = thaw_json(snapshot.geometry_draft or {})
+        draft_hash = (
+            draft.get("draft_hash")
+            if snapshot.geometry_source == "rdkit_initial" and isinstance(draft, dict)
+            else None
+        )
+        insert(
+            "geometry",
+            command_id=f"p7prep_geometry_{snapshot.prepared_id}",
+            child_id=snapshot.prepared_id,
+            payload={
+                "prepared_id": snapshot.prepared_id,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "geometry_source": snapshot.geometry_source,
+                "geometry_hash": snapshot.geometry_hash,
+                "xyz_bytes_sha256": snapshot.xyz_bytes_sha256,
+                "draft_hash": draft_hash,
+            },
+            status="linked",
+        )
+        if snapshot.first_input_hash is not None:
+            preview = thaw_json(snapshot.first_input_preview or {})
+            insert(
+                "preview",
+                command_id=f"p7prep_preview_{snapshot.prepared_id}",
+                child_id=snapshot.prepared_id,
+                payload={
+                    "prepared_id": snapshot.prepared_id,
+                    "snapshot_hash": snapshot.snapshot_hash,
+                    "first_input_hash": snapshot.first_input_hash,
+                    "input_sha256": preview.get("input_sha256")
+                    if isinstance(preview, dict)
+                    else None,
+                    "manifest_hash": preview.get("manifest_hash")
+                    if isinstance(preview, dict)
+                    else None,
+                },
+                status="linked",
+            )
+
+    def prepared_calculation(
+        self, conversation_id: ConversationId | str, task_id: str
+    ) -> PreparedCalculation | None:
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            value = P7RecordRepository(uow.connection).get_prepared_for_task(task_id)
+            uow.commit()
+            return value
+
+    def _source_opt_geometry(self, source_task: TaskRecord) -> tuple[GeometryRecord, bytes] | None:
+        if source_task.p5_run_id is None or source_task.p4_run_id is None:
+            return None
+        view = self.p5.inspect(RunId(source_task.p5_run_id))
+        if view.state.phase is not P5Phase.COMPLETED:
+            return None
+        completed_opt = next(
+            (
+                item
+                for item in reversed(view.results)
+                if item.primitive.value == "opt"
+                and item.parse_status.value == "complete"
+                and item.optimized_geometry_artifact_id is not None
+            ),
+            None,
+        )
+        if completed_opt is None:
+            return None
+        # P5 appends the optimized GeometryRecord in the same source run and
+        # keeps the atom/identity binding immutable.  Select the newest
+        # non-initial geometry only after verifying the source run is complete.
+        if len(view.geometry) < 2:
+            return None
+        geometry = view.geometry[-1]
+        if geometry.run_id != view.run_id:
+            raise StateIntegrityError("source Opt geometry run binding is invalid")
+        source = self.p4.inspect(RunId(source_task.p4_run_id))
+        exact_geometry, exact_bytes, source_result = self.p5.load_optimized_geometry_source(
+            WorkflowRecordId(str(completed_opt.record_id)),
+            source=source,
+            run_id=RunId(source_task.p5_run_id),
+        )
+        if source_result.record_id != completed_opt.record_id:
+            raise StateIntegrityError("source Opt result binding changed during preparation")
+        if exact_geometry.geometry_hash != geometry.geometry_hash:
+            raise StateIntegrityError("source Opt geometry hash changed during preparation")
+        return exact_geometry, exact_bytes
+
+    def _final_confirmation_payload(
+        self, task: TaskRecord, snapshot: PreparedCalculation
+    ) -> dict[str, object]:
+        return {
+            "confirmation_type": "p7.final_execution_confirmation.v1",
+            "prepared_id": snapshot.prepared_id,
+            "task_id": task.task_id,
+            "task_revision": snapshot.task_revision,
+            "preparation_generation": snapshot.preparation_generation,
+            "snapshot_hash": snapshot.snapshot_hash,
+            "confirmation_hash": snapshot.confirmation_hash,
+            "binding": snapshot.confirmation_binding(),
+            "identity": thaw_json(snapshot.identity_snapshot),
+            "parameters": thaw_json(snapshot.parameter_snapshot),
+            "plan": thaw_json(snapshot.plan_snapshot or {}),
+            "first_input_preview": thaw_json(snapshot.first_input_preview or {}),
+            "readiness": thaw_json(snapshot.readiness),
+            "execution_readiness": {
+                "ready": self.runtime_config.execution_ready,
+                "profile": self.runtime_config.profile,
+                "reasons": list(self.runtime_config.execution_readiness_reasons),
+            },
+        }
+
+    def _prepared_snapshot_for_task(self, task: TaskRecord) -> PreparedCalculation | None:
+        if task.prepared_calculation_id is None:
+            return None
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            snapshot = P7RecordRepository(uow.connection).get_prepared_calculation(
+                task.prepared_calculation_id
+            )
+            uow.commit()
+        if snapshot is not None and snapshot.task_id != task.task_id:
+            raise StateIntegrityError("prepared calculation is bound to another task")
+        return snapshot
+
+    def _validated_prepared_snapshot(
+        self, task: TaskRecord, payload: dict[str, object]
+    ) -> PreparedCalculation:
+        if payload.get("confirmation_type") != "p7.final_execution_confirmation.v1":
+            raise StateIntegrityError("final confirmation type is invalid")
+        prepared_id = payload.get("prepared_id")
+        if not isinstance(prepared_id, str) or prepared_id != task.prepared_calculation_id:
+            raise InvalidTransitionError(
+                "final confirmation does not match the current preparation"
+            )
+        snapshot = self._prepared_snapshot_for_task(task)
+        if snapshot is None or snapshot.prepared_id != prepared_id:
+            raise StateIntegrityError("final confirmation preparation snapshot is missing")
+        if snapshot.status is not PreparationStatus.READY:
+            raise InvalidTransitionError("final confirmation requires a ready preparation snapshot")
+        if task.revision < snapshot.task_revision:
+            raise RevisionConflictError("final confirmation refers to a future task revision")
+        if task.request is None or task.validation is None or task.plan is None:
+            raise StateIntegrityError("final confirmation task projection is incomplete")
+        if (
+            task.request.request_hash != snapshot.request_hash
+            or task.validation.validation_hash != snapshot.validation_hash
+            or task.plan.plan_hash != snapshot.plan_hash
+        ):
+            raise InvalidTransitionError("final confirmation is stale for the current draft")
+        if payload.get("task_id") != task.task_id:
+            raise InvalidTransitionError("final confirmation task binding is invalid")
+        if payload.get("task_revision") != snapshot.task_revision:
+            raise InvalidTransitionError("final confirmation revision binding is invalid")
+        if payload.get("preparation_generation") != snapshot.preparation_generation:
+            raise InvalidTransitionError("final confirmation generation binding is invalid")
+        if payload.get("snapshot_hash") != snapshot.snapshot_hash:
+            raise InvalidTransitionError("final confirmation snapshot hash is invalid")
+        if payload.get("confirmation_hash") != snapshot.confirmation_hash:
+            raise InvalidTransitionError("final confirmation content hash is invalid")
+        binding = thaw_json(payload.get("binding"))
+        if binding != snapshot.confirmation_binding():
+            raise InvalidTransitionError("final confirmation immutable binding is invalid")
+        if (
+            snapshot.confirmation_expires_at_utc is None
+            or _now(self.clock) >= snapshot.confirmation_expires_at_utc
+        ):
+            raise InvalidTransitionError("final confirmation has expired")
+        return snapshot
+
+    def _persist_final_authorization(
+        self, task: TaskRecord, snapshot: PreparedCalculation, now: datetime
+    ) -> str:
+        authorization_id = f"p7auth_{sha256_hex(snapshot.confirmation_binding())}"
+        authorization = self._build_execution_authorization(
+            task, snapshot, authorization_id=authorization_id, now=now
+        )
+        current = self.get_task(task.conversation_id, task.task_id)
+        if current is None:
+            raise StateIntegrityError("task disappeared while recording final authorization")
+        if (
+            current.final_authorization_id is not None
+            and current.final_authorization_id != authorization_id
+        ):
+            raise InvalidTransitionError("task already has a different final authorization")
+        if current.final_authorization_id is not None:
+            with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+                uow.begin()
+                existing = P7RecordRepository(uow.connection).get_execution_authorization(
+                    authorization_id
+                )
+                uow.commit()
+            if existing is None:
+                raise StateIntegrityError("task final authorization record is missing")
+            return authorization_id
+        # The preparation snapshot binds the original draft revision.  The
+        # authorization marker is an orthogonal projection update and must not
+        # increment that revision before the derived P4/P5 handoffs are made.
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            records = P7RecordRepository(uow.connection)
+            latest = records.get_task(task.conversation_id, task.task_id)
+            if latest is None:
+                raise StateIntegrityError("task disappeared while recording final authorization")
+            existing = records.get_execution_authorization(authorization_id)
+            if existing is not None:
+                if (
+                    existing.task_id != latest.task_id
+                    or existing.prepared_calculation_id != snapshot.prepared_id
+                    or existing.prepared_snapshot_hash != snapshot.snapshot_hash
+                    or existing.status == "revoked"
+                ):
+                    raise StateIntegrityError(
+                        "existing final authorization is bound to another snapshot"
+                    )
+            else:
+                records.insert_execution_authorization(authorization)
+            if latest.final_authorization_id is None:
+                authorized = latest.model_copy(
+                    update={"final_authorization_id": authorization_id, "updated_at_utc": now}
+                )
+                if not records.update_task(authorized, expected_revision=latest.revision):
+                    raise RevisionConflictError("task changed while recording final authorization")
+            elif latest.final_authorization_id != authorization_id:
+                raise InvalidTransitionError("task already has a different final authorization")
+            uow.commit()
+        return authorization_id
+
+    def _build_execution_authorization(
+        self,
+        task: TaskRecord,
+        snapshot: PreparedCalculation,
+        *,
+        authorization_id: str,
+        now: datetime,
+    ) -> WorkflowExecutionAuthorization:
+        if task.plan is None:
+            raise StateIntegrityError("execution authorization has no task plan")
+        nodes = [item.model_dump(mode="json") for item in task.plan.nodes]
+        node_credentials = {
+            item.node_id: sha256_hex(
+                {
+                    "authorization_id": authorization_id,
+                    "prepared_snapshot_hash": snapshot.snapshot_hash,
+                    "node_id": item.node_id,
+                    "node": item.model_dump(mode="json"),
+                }
+            )
+            for item in task.plan.nodes
+        }
+        return WorkflowExecutionAuthorization.create(
+            authorization_id=authorization_id,
+            task_id=task.task_id,
+            prepared_calculation_id=snapshot.prepared_id,
+            task_revision=snapshot.task_revision,
+            preparation_generation=snapshot.preparation_generation,
+            prepared_snapshot_hash=snapshot.snapshot_hash,
+            request_hash=snapshot.request_hash,
+            validation_hash=snapshot.validation_hash or task.validation.validation_hash,
+            plan_hash=snapshot.plan_hash or task.plan.plan_hash,
+            geometry_hash=snapshot.geometry_hash or sha256_hex({"geometry": "absent"}),
+            xyz_bytes_sha256=snapshot.xyz_bytes_sha256 or sha256_hex({"xyz": "absent"}),
+            first_input_hash=snapshot.first_input_hash,
+            allowed_nodes={"nodes": nodes, "protocol_id": task.plan.protocol_id},
+            budget=thaw_json(task.plan.resources),
+            geometry_policy={
+                "source": snapshot.geometry_source,
+                "geometry_hash": snapshot.geometry_hash,
+                "xyz_bytes_sha256": snapshot.xyz_bytes_sha256,
+                "draft_hash": thaw_json(snapshot.geometry_draft or {}).get("draft_hash")
+                if snapshot.geometry_source == "rdkit_initial"
+                and isinstance(thaw_json(snapshot.geometry_draft or {}), dict)
+                else None,
+            },
+            node_credentials=node_credentials,
+            issued_at_utc=now,
+            expires_at_utc=snapshot.confirmation_expires_at_utc or now,
+        )
+
+    def _execution_authorization_for_task(
+        self, task: TaskRecord, snapshot: PreparedCalculation | None = None
+    ) -> WorkflowExecutionAuthorization | None:
+        if task.final_authorization_id is None:
+            return None
+        with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
+            uow.begin()
+            authorization = P7RecordRepository(uow.connection).get_execution_authorization(
+                task.final_authorization_id
+            )
+            uow.commit()
+        if authorization is None:
+            raise StateIntegrityError("task final authorization record is missing")
+        if authorization.task_id != task.task_id:
+            raise StateIntegrityError("final authorization task binding is invalid")
+        if snapshot is not None and (
+            authorization.prepared_calculation_id != snapshot.prepared_id
+            or authorization.prepared_snapshot_hash != snapshot.snapshot_hash
+        ):
+            raise StateIntegrityError("final authorization snapshot binding is invalid")
+        return authorization
+
+    @staticmethod
+    def _assert_prepared_identity(snapshot: PreparedCalculation, candidate: object) -> None:
+        expected = thaw_json(snapshot.identity_snapshot)
+        geometry = thaw_json(snapshot.geometry_draft or {})
+        if not isinstance(expected, dict) or not isinstance(geometry, dict):
+            raise StateIntegrityError("preparation identity/geometry snapshot is invalid")
+        expected_candidate = expected.get("candidate")
+        if not isinstance(expected_candidate, dict) or not isinstance(candidate, dict):
+            raise StateIntegrityError("preparation has no immutable identity candidate")
+        for field in (
+            "candidate_id",
+            "candidate_hash",
+            "canonical_isomeric_smiles",
+            "molecular_formula",
+            "formal_charge",
+        ):
+            if field in expected_candidate and candidate.get(field) != expected_candidate.get(
+                field
+            ):
+                raise StateIntegrityError(
+                    "P4 candidate differs from the prepared identity snapshot"
+                )
+        if candidate.get("canonical_isomeric_smiles") != geometry.get("canonical_isomeric_smiles"):
+            raise StateIntegrityError("P4 candidate differs from the frozen geometry structure")
+        if candidate.get("molecular_formula") != geometry.get("molecular_formula"):
+            raise StateIntegrityError("P4 candidate differs from the frozen geometry formula")
+        if candidate.get("formal_charge") != geometry.get("formal_charge"):
+            raise StateIntegrityError("P4 candidate differs from the frozen geometry charge")
+
+    def _authorize_prepared_execution(
+        self, task: TaskRecord, payload: dict[str, object], now: datetime
+    ) -> dict[str, object]:
+        """Consume the sole user confirmation and derive all downstream grants."""
+
+        snapshot = self._validated_prepared_snapshot(task, payload)
+        current = self.get_task(task.conversation_id, task.task_id) or task
+        p4_effect: object | None = None
+        p4_view = self.p4.inspect(RunId(current.p4_run_id or "")) if current.p4_run_id else None
+        if p4_view is None:
+            raise StateIntegrityError("prepared execution has no P4 identity run")
+        if p4_view.state.phase is P4Phase.RESOLVING_IDENTITY:
+            reports = self.p4.create_worker().run_once(limit=1)
+            p4_effect = {"step": "p4.worker", "reports": [_as_json(item) for item in reports]}
+            p4_view = self.p4.inspect(p4_view.run_id)
+        if p4_view.state.phase is P4Phase.AWAITING_IDENTITY:
+            identity_payload = self._identity_confirmation_payload(
+                current, p4_view, snapshot=snapshot
+            )
+            p4_result = self._confirm_identity(current, identity_payload, now)
+            p4_effect = _as_json(p4_result)
+            if not getattr(p4_result, "accepted", False):
+                return {
+                    "status": "identity_confirmation_rejected",
+                    "p4": p4_effect,
+                }
+            p4_view = self.p4.inspect(p4_view.run_id)
+        if p4_view.state.phase in {P4Phase.FAILED, P4Phase.CANCELLED}:
+            self._finish_without_science(current, reason=StopReason.FAILED)
+            return {
+                "status": "p4_terminal",
+                "p4": _as_json(p4_view),
+            }
+        if p4_view.state.phase is not P4Phase.PLAN_READY:
+            # A final confirmation cannot become a durable parent grant until
+            # the P4 identity is actually resolved.  The consumed token is
+            # replayable, so a later worker/reconcile pass can continue it.
+            return {
+                "status": "identity_pending",
+                "p4": p4_effect or _as_json(p4_view),
+            }
+        if p4_view.confirmed_molecule is None:
+            raise StateIntegrityError("prepared execution P4 plan has no confirmed molecule")
+        self._assert_prepared_identity(snapshot, p4_view.confirmed_molecule.model_dump(mode="json"))
+        # Do not mark the task authorized before the exact P4 identity has
+        # passed the frozen-snapshot check.  Otherwise a mismatching or
+        # rejected identity could leave behind an apparently valid parent
+        # authorization that later replay might use.
+        authorization_id = self._persist_final_authorization(task, snapshot, now)
+        p5_effect: object | None = None
+        latest = self.get_task(current.conversation_id, current.task_id) or current
+        if p4_view.state.phase is P4Phase.PLAN_READY and latest.p5_run_id is None:
+            _count, p5_effect = self._ensure_p5(latest, p4_view)
+            latest = self.get_task(current.conversation_id, current.task_id) or latest
+        if latest.p5_run_id is not None:
+            p5_view = self.p5.inspect(RunId(latest.p5_run_id))
+            if p5_view.state.phase is P5Phase.AWAITING_EXECUTION_APPROVAL:
+                approval_payload = self._approval_payload(latest, p5_view)
+                p5_result = self._approve_execution(latest, approval_payload, now)
+                p5_effect = _as_json(p5_result)
+        return {
+            "authorization_id": authorization_id,
+            "status": "authorized",
+            "p4": p4_effect,
+            "p5": p5_effect,
+        }
 
     @staticmethod
     def _reused_p4_run_id(
@@ -479,9 +1140,7 @@ class P7TaskService:
                 "multiplicity": None
                 if request.multiplicity is None
                 else _as_json(request.multiplicity),
-                "draft_semantics_version": getattr(
-                    normalized, "draft_semantics_version", "legacy"
-                ),
+                "draft_semantics_version": getattr(normalized, "draft_semantics_version", "legacy"),
                 "draft_changes": list(getattr(normalized, "draft_changes", ())),
                 "identity_notes": list(getattr(normalized, "identity_notes", ())),
                 "raw_molecule_fragment": getattr(normalized, "raw_molecule_fragment", None),
@@ -653,6 +1312,23 @@ class P7TaskService:
             if task is None and pending.task_id is not None:
                 raise StateIntegrityError("pending action refers to a missing task")
 
+            # A real-profile final confirmation must not be consumed while
+            # the configured ORCA executable/version is still unavailable.
+            # Keeping the token pending lets the operator fix the runtime and
+            # retry the same immutable confirmation card.
+            if (
+                decision == "accept"
+                and pending.action_type == "confirm_execution"
+                and not self.runtime_config.execution_ready
+            ):
+                uow.commit()
+                return self._view(task) | {
+                    "accepted": False,
+                    "token": token,
+                    "code": "execution_not_ready",
+                    "reasons": list(self.runtime_config.execution_readiness_reasons),
+                }
+
             if decision == "reject":
                 records.consume_pending(
                     conversation_id=conversation,
@@ -713,9 +1389,7 @@ class P7TaskService:
                 planning_record_id = pending_payload.get("planning_record_id")
                 planning_record_hash = pending_payload.get("planning_record_hash")
                 if planning_record_id is not None or planning_record_hash is not None:
-                    record = records.get_planning_record_for_task(
-                        task.task_id, task.revision
-                    )
+                    record = records.get_planning_record_for_task(task.task_id, task.revision)
                     if (
                         record is None
                         or record.proposal_id != planning_record_id
@@ -734,13 +1408,9 @@ class P7TaskService:
                     expected_policy_version = pending_payload.get("policy_version")
                     if isinstance(policy_snapshot, dict):
                         if policy_snapshot.get("content_hash") != expected_policy_hash:
-                            raise InvalidTransitionError(
-                                "plan approval policy snapshot is stale"
-                            )
+                            raise InvalidTransitionError("plan approval policy snapshot is stale")
                         if policy_snapshot.get("policy_version") != expected_policy_version:
-                            raise InvalidTransitionError(
-                                "plan approval policy version is stale"
-                            )
+                            raise InvalidTransitionError("plan approval policy version is stale")
                 registered_protocol = get_p5_protocol(task.plan.protocol_id)
                 if task.plan.protocol_hash != registered_protocol.protocol_hash:
                     raise StateIntegrityError("task plan protocol hash is not registered")
@@ -822,6 +1492,12 @@ class P7TaskService:
             return self._view(self.get_task(conversation, task.task_id) or task) | {
                 "downstream": _as_json(result)
             }
+        if pending.action_type == "confirm_execution":
+            result = self._authorize_prepared_execution(task, payload, now)
+            return self._view(self.get_task(conversation, task.task_id) or task) | {
+                "accepted": True,
+                "downstream": _as_json(result),
+            }
         raise InvalidTransitionError(f"unsupported pending action type: {pending.action_type}")
 
     def _replay_accepted_action(
@@ -859,6 +1535,8 @@ class P7TaskService:
             downstream = self._confirm_identity(task, payload, _now(self.clock))
         elif pending.action_type == "approve_execution":
             downstream = self._approve_execution(task, payload, _now(self.clock))
+        elif pending.action_type == "confirm_execution":
+            downstream = self._authorize_prepared_execution(task, payload, _now(self.clock))
         else:
             raise InvalidTransitionError(
                 f"cannot replay accepted action type: {pending.action_type}"
@@ -1129,6 +1807,25 @@ class P7TaskService:
                 "step": "waiting_for_clarification",
                 "state": task.state.value,
             }
+        if task.prepared_calculation_id is not None:
+            snapshot = self._prepared_snapshot_for_task(task)
+            if snapshot is None:
+                raise StateIntegrityError("task preparation snapshot is missing")
+            if snapshot.status is not PreparationStatus.READY:
+                if task.final_authorization_id is not None:
+                    raise StateIntegrityError("non-ready preparation has a final authorization")
+                return 0, {
+                    "task_id": task.task_id,
+                    "step": "preparation_blocked",
+                    "status": snapshot.status.value,
+                    "reason": snapshot.error_message or snapshot.error_code,
+                }
+            if task.final_authorization_id is None:
+                return 0, {
+                    "task_id": task.task_id,
+                    "step": "waiting_for_final_confirmation",
+                    "prepared_calculation_id": task.prepared_calculation_id,
+                }
         p4_handoff = self._handoff(task, "p4")
         if p4_handoff is not None and p4_handoff.status in {"prepared", "submitted"}:
             result = self._submit_p4_handoff(task, p4_handoff)
@@ -1153,6 +1850,18 @@ class P7TaskService:
                 "reports": [_as_json(item) for item in reports],
             }
         if p4_view.state.phase is P4Phase.AWAITING_IDENTITY:
+            if task.prepared_calculation_id is not None and task.final_authorization_id is not None:
+                snapshot = self._prepared_snapshot_for_task(task)
+                if snapshot is None:
+                    raise StateIntegrityError("authorized prepared task has no snapshot")
+                result = self._authorize_prepared_execution(
+                    task, self._final_confirmation_payload(task, snapshot), _now(self.clock)
+                )
+                return 1, {
+                    "task_id": task.task_id,
+                    "step": "p7.final_confirmation.reconciled",
+                    **result,
+                }
             replay = self._replay_accepted_decision(
                 task, action_type="confirm_identity", target_id=str(p4_view.run_id)
             )
@@ -1204,6 +1913,18 @@ class P7TaskService:
             return self._submit_p5_handoff(task, p5_handoff)
         p5_view = self.p5.inspect(RunId(task.p5_run_id))
         if p5_view.state.phase is P5Phase.AWAITING_EXECUTION_APPROVAL:
+            if task.prepared_calculation_id is not None and task.final_authorization_id is not None:
+                snapshot = self._prepared_snapshot_for_task(task)
+                if snapshot is None:
+                    raise StateIntegrityError("authorized prepared task has no snapshot")
+                result = self._authorize_prepared_execution(
+                    task, self._final_confirmation_payload(task, snapshot), _now(self.clock)
+                )
+                return 1, {
+                    "task_id": task.task_id,
+                    "step": "p7.final_confirmation.reconciled",
+                    **result,
+                }
             self._refresh_task_state_if_needed(task, TaskPhase.EXECUTION_PENDING)
             latest = self.get_task(task.conversation_id, task.task_id) or task
             replay = self._replay_accepted_decision(
@@ -1325,8 +2046,13 @@ class P7TaskService:
             "code": str(getattr(result, "code", "unknown")),
         }
 
-    def _ensure_identity_action(self, task: TaskRecord, view) -> str | None:
-        now = _now(self.clock)
+    def _identity_confirmation_payload(
+        self,
+        task: TaskRecord,
+        view,
+        *,
+        snapshot: PreparedCalculation | None = None,
+    ) -> dict[str, object]:
         if view.candidate_bundle is None or view.interrupt is None:
             raise StateIntegrityError("P4 identity phase has no candidate bundle or interrupt")
         candidate = (
@@ -1341,8 +2067,12 @@ class P7TaskService:
             # Recommendation cards are bound to an expected structure.  A
             # mismatching provider candidate invalidates the draft and cannot
             # be allowed to reach identity confirmation or P5.
-            self._finish_without_science(task, reason=StopReason.UNSUPPORTED)
-            return None
+            raise InvalidTransitionError("P4 candidate does not match the requested structure")
+        if snapshot is None:
+            snapshot = self._prepared_snapshot_for_task(task)
+        if snapshot is not None:
+            self._assert_prepared_identity(snapshot, candidate.model_dump(mode="json"))
+        now = _now(self.clock)
         payload = {
             "p4_conversation_id": str(view.conversation_id),
             "interrupt_id": str(view.interrupt["interrupt_id"]),
@@ -1357,6 +2087,15 @@ class P7TaskService:
             "command_id": str(new_id(CommandId)),
             "requested_at_utc": format_utc(now),
         }
+        return payload
+
+    def _ensure_identity_action(self, task: TaskRecord, view) -> str | None:
+        try:
+            payload = self._identity_confirmation_payload(task, view)
+        except InvalidTransitionError:
+            self._finish_without_science(task, reason=StopReason.UNSUPPORTED)
+            return None
+        now = _now(self.clock)
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
             records = P7RecordRepository(uow.connection)
@@ -1429,6 +2168,32 @@ class P7TaskService:
                     None if planning_record is None else planning_record.proposal_id
                 ),
             }
+            if task.prepared_calculation_id is not None:
+                snapshot = self._prepared_snapshot_for_task(task)
+                if snapshot is None or snapshot.status is not PreparationStatus.READY:
+                    raise StateIntegrityError("prepared task has no ready P5 preparation snapshot")
+                payload.update(
+                    {
+                        "prepared_id": snapshot.prepared_id,
+                        "prepared_snapshot_hash": snapshot.snapshot_hash,
+                    }
+                )
+                authorization = self._execution_authorization_for_task(task, snapshot)
+                if authorization is None:
+                    raise StateIntegrityError(
+                        "prepared P5 handoff has no parent execution authorization"
+                    )
+                if not task.plan.nodes:
+                    raise StateIntegrityError("prepared P5 task has no execution nodes")
+                payload.update(
+                    {
+                        "parent_authorization_id": authorization.authorization_id,
+                        "parent_authorization_hash": authorization.authorization_hash,
+                        "parent_authorization_credential": authorization.credential_for(
+                            task.plan.nodes[0].node_id
+                        ),
+                    }
+                )
             existing = HandoffRecord.create(
                 handoff_id=f"handoff_{uuid.uuid4().hex}",
                 task_id=task.task_id,
@@ -1487,6 +2252,57 @@ class P7TaskService:
         if task.plan.protocol_id != protocol_id or task.plan.protocol_hash != protocol_hash:
             raise StateIntegrityError("P5 handoff does not match the task plan")
         external_result_id = payload.get("external_opt_result_id")
+        preparation_snapshot_id = payload.get("prepared_id")
+        preparation_snapshot_hash = payload.get("prepared_snapshot_hash")
+        parent_authorization_id = payload.get("parent_authorization_id")
+        parent_authorization_hash = payload.get("parent_authorization_hash")
+        parent_authorization_credential = payload.get("parent_authorization_credential")
+        frozen_geometry = None
+        geometry_draft_hash = None
+        prepared_geometry_hash = None
+        prepared_xyz_bytes_sha256 = None
+        if preparation_snapshot_id is not None:
+            snapshot = self._prepared_snapshot_for_task(task)
+            if snapshot is None or snapshot.prepared_id != preparation_snapshot_id:
+                raise StateIntegrityError("P5 handoff preparation snapshot is missing")
+            if preparation_snapshot_hash != snapshot.snapshot_hash:
+                raise StateIntegrityError("P5 handoff preparation snapshot hash is stale")
+            authorization = self._execution_authorization_for_task(task, snapshot)
+            if authorization is None:
+                raise StateIntegrityError("P5 handoff has no parent execution authorization")
+            if (
+                parent_authorization_id != authorization.authorization_id
+                or parent_authorization_hash != authorization.authorization_hash
+            ):
+                raise StateIntegrityError("P5 handoff parent authorization is stale")
+            if not isinstance(parent_authorization_credential, str):
+                raise StateIntegrityError("P5 handoff has no parent node credential")
+            if not task.plan.nodes:
+                raise StateIntegrityError("prepared P5 task has no execution nodes")
+            if parent_authorization_credential != authorization.credential_for(
+                task.plan.nodes[0].node_id
+            ):
+                raise StateIntegrityError("P5 handoff parent node credential is stale")
+            prepared_geometry_hash = snapshot.geometry_hash
+            prepared_xyz_bytes_sha256 = snapshot.xyz_bytes_sha256
+            if snapshot.geometry_source == "rdkit_initial":
+                if external_result_id is not None:
+                    raise StateIntegrityError(
+                        "initial-draft preparation cannot carry an external Opt source"
+                    )
+                frozen_geometry = self._frozen_geometry_for_handoff(task, payload)
+                draft = thaw_json(snapshot.geometry_draft or {})
+                if isinstance(draft, dict):
+                    geometry_draft_hash = draft.get("draft_hash")
+                if not isinstance(geometry_draft_hash, str):
+                    raise StateIntegrityError("P5 handoff has no geometry draft hash")
+            elif snapshot.geometry_source == "history_opt":
+                if external_result_id is None:
+                    raise StateIntegrityError(
+                        "historical Opt preparation requires an external Opt source"
+                    )
+            else:
+                raise StateIntegrityError("P5 handoff geometry source is invalid")
         self._mark_handoff_submitted(handoff)
         result = self.p5.prepare_execution(
             source_run_id=RunId(str(payload["source_run_id"])),
@@ -1500,6 +2316,27 @@ class P7TaskService:
                 None
                 if payload.get("wall_time_seconds") is None
                 else int(payload["wall_time_seconds"])
+            ),
+            frozen_geometry=frozen_geometry,
+            geometry_draft_hash=geometry_draft_hash,
+            preparation_snapshot_id=(
+                None if preparation_snapshot_id is None else str(preparation_snapshot_id)
+            ),
+            preparation_snapshot_hash=(
+                None if preparation_snapshot_hash is None else str(preparation_snapshot_hash)
+            ),
+            prepared_geometry_hash=prepared_geometry_hash,
+            prepared_xyz_bytes_sha256=prepared_xyz_bytes_sha256,
+            parent_authorization_id=(
+                None if parent_authorization_id is None else str(parent_authorization_id)
+            ),
+            parent_authorization_hash=(
+                None if parent_authorization_hash is None else str(parent_authorization_hash)
+            ),
+            parent_authorization_credential=(
+                None
+                if parent_authorization_credential is None
+                else str(parent_authorization_credential)
             ),
         )
         now = _now(self.clock)
@@ -1531,10 +2368,45 @@ class P7TaskService:
             "run_id": str(payload["run_id"]),
         }
 
-    def _ensure_approval_action(self, task: TaskRecord, view) -> str:
+    def _frozen_geometry_for_handoff(
+        self, task: TaskRecord, payload: dict[str, object]
+    ) -> GeometryRecord | None:
+        prepared_id = payload.get("prepared_id")
+        if prepared_id is None:
+            return None
+        if not isinstance(prepared_id, str) or prepared_id != task.prepared_calculation_id:
+            raise StateIntegrityError("P5 handoff preparation binding is invalid")
+        snapshot = self._prepared_snapshot_for_task(task)
+        if snapshot is None or snapshot.status is not PreparationStatus.READY:
+            raise StateIntegrityError("P5 handoff has no ready preparation snapshot")
+        if payload.get("prepared_snapshot_hash") != snapshot.snapshot_hash:
+            raise StateIntegrityError("P5 handoff preparation snapshot hash is stale")
+        if snapshot.geometry_source != "rdkit_initial":
+            if snapshot.geometry_source == "history_opt":
+                return None
+            raise StateIntegrityError("P5 handoff geometry source is invalid")
+        p4_view = self.p4.inspect(RunId(str(payload["source_run_id"])))
+        if p4_view.confirmed_molecule is None:
+            raise StateIntegrityError("P5 handoff source has no confirmed molecule")
+        draft_snapshot = snapshot.geometry_draft
+        if draft_snapshot is None:
+            raise StateIntegrityError("ready preparation has no geometry draft")
+        draft = self.preparation.draft_from_snapshot(draft_snapshot)
+        bound = bind_initial_geometry(
+            draft,
+            p4_view.confirmed_molecule,
+            run_id=RunId(str(payload["run_id"])),
+        )
+        if (
+            bound.geometry_hash != snapshot.geometry_hash
+            or bound.xyz_bytes_sha256 != snapshot.xyz_bytes_sha256
+        ):
+            raise StateIntegrityError("P5 geometry does not match the frozen preparation snapshot")
+        return bound
+
+    def _approval_payload(self, task: TaskRecord, view) -> dict[str, object]:
         if view.action is None or view.binding is None:
             raise StateIntegrityError("P5 approval phase has no action/binding")
-        now = _now(self.clock)
         execution_profile = self._execution_profile(view)
         confirmation = self._confirmation_card(task, view)
         if confirmation.get("preparation_errors"):
@@ -1542,7 +2414,7 @@ class P7TaskService:
                 "execution confirmation is incomplete: "
                 + "; ".join(str(item) for item in confirmation["preparation_errors"])
             )
-        payload = {
+        return {
             "run_id": str(view.run_id),
             "conversation_id": str(view.conversation_id),
             "action_id": str(view.action.action_id),
@@ -1564,6 +2436,10 @@ class P7TaskService:
                 p5=_as_json(view),
             ),
         }
+
+    def _ensure_approval_action(self, task: TaskRecord, view) -> str:
+        now = _now(self.clock)
+        payload = self._approval_payload(task, view)
         with SQLiteUnitOfWork(state_root=self.state_root, clock=self.clock) as uow:
             uow.begin()
             records = P7RecordRepository(uow.connection)

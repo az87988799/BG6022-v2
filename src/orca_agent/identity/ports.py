@@ -24,6 +24,23 @@ class IdentityErrorCode(StrEnum):
 
 
 @dataclass(frozen=True)
+class IdentityLookupRequest:
+    """Provider lookup contract independent from calculation q/M."""
+
+    input_kind: MoleculeInputKind
+    normalized_value: str
+    query_constraints: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.input_kind, MoleculeInputKind):
+            raise TypeError("identity lookup input_kind is invalid")
+        if not isinstance(self.normalized_value, str) or not self.normalized_value.strip():
+            raise ValueError("identity lookup value is blank")
+        if "\x00" in self.normalized_value:
+            raise ValueError("identity lookup value contains NUL")
+
+
+@dataclass(frozen=True)
 class RawIdentityCandidate:
     """Provider output before the shared RDKit normalizer runs."""
 
@@ -71,6 +88,9 @@ class PubChemPort(Protocol):
     def resolve(self, query: MoleculeQuery) -> LookupResult:
         """Return raw candidates and lossless response bytes."""
 
+    def lookup_candidates(self, request: IdentityLookupRequest) -> LookupResult:
+        """Return identity attributes without requiring calculation q/M."""
+
 
 def normalize_input(kind: MoleculeInputKind, value: str) -> str:
     """Apply only the input-kind rules that are safe before provider lookup."""
@@ -106,6 +126,7 @@ def normalize_input(kind: MoleculeInputKind, value: str) -> str:
 
 __all__ = [
     "IdentityErrorCode",
+    "IdentityLookupRequest",
     "LookupResult",
     "PubChemPort",
     "RawIdentityCandidate",

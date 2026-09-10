@@ -21,8 +21,9 @@ from orca_agent.domain.p7_conversation import (
     TurnRecord,
     TurnStatus,
 )
-from orca_agent.domain.p7_intake import TurnInterpretationV4
+from orca_agent.domain.p7_intake import TurnInterpretationV4, TurnInterpretationV5
 from orca_agent.domain.p7_planning import PlanningRecord
+from orca_agent.domain.p7_preparation import PreparationHandoff, PreparedCalculation
 from orca_agent.domain.p7_task import (
     CalculationPlan,
     CalculationRequest,
@@ -35,8 +36,9 @@ from orca_agent.domain.p7_task import (
     TaskPhase,
     TaskRecord,
 )
+from orca_agent.domain.workflow_authorization import WorkflowExecutionAuthorization
 from orca_agent.infrastructure.clock import format_utc, parse_utc
-from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4
+from orca_agent.orchestration.p7_versions import TURN_SCHEMA_V4, TURN_SCHEMA_V5
 
 
 def _json(value: object) -> str:
@@ -240,11 +242,12 @@ class P7RecordRepository:
             raw_interpretation = _load_json(row[7], what="turn interpretation")
             if not isinstance(raw_interpretation, dict):
                 raise StateIntegrityError("stored turn interpretation is not an object")
-            interpretation = (
-                TurnInterpretationV4.model_validate_json(str(row[7]), strict=True)
-                if raw_interpretation.get("schema_version") == TURN_SCHEMA_V4
-                else TurnInterpretation.model_validate_json(str(row[7]), strict=True)
-            )
+            if raw_interpretation.get("schema_version") == TURN_SCHEMA_V5:
+                interpretation = TurnInterpretationV5.model_validate_json(str(row[7]), strict=True)
+            elif raw_interpretation.get("schema_version") == TURN_SCHEMA_V4:
+                interpretation = TurnInterpretationV4.model_validate_json(str(row[7]), strict=True)
+            else:
+                interpretation = TurnInterpretation.model_validate_json(str(row[7]), strict=True)
         response = _load_json(row[8], what="turn response")
         if not isinstance(response, dict):
             raise StateIntegrityError("turn response is not an object")
@@ -294,8 +297,12 @@ class P7RecordRepository:
             "request_json, request_hash, plan_json, plan_hash, validation_json, validation_hash, "
             "accepted_plan_hash, accepted_output_spec_hash, delivery_output_spec_json, "
             "delivery_output_spec_hash, p4_run_id, p5_run_id, p6_run_id, clarification_count, "
-            "no_progress_count, current_delivery_id, created_at_utc, updated_at_utc) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "no_progress_count, current_delivery_id, created_at_utc, updated_at_utc, "
+            "preparation_generation, prepared_calculation_id, final_authorization_id) "
+            "VALUES ("
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task.task_id,
                 task.conversation_id,
@@ -323,6 +330,9 @@ class P7RecordRepository:
                 task.current_delivery_id,
                 format_utc(task.created_at_utc),
                 format_utc(task.updated_at_utc),
+                task.preparation_generation,
+                task.prepared_calculation_id,
+                task.final_authorization_id,
             ),
         )
 
@@ -363,7 +373,8 @@ class P7RecordRepository:
             "accepted_output_spec_hash=?, delivery_output_spec_json=?, "
             "delivery_output_spec_hash=?, "
             "p4_run_id=?, p5_run_id=?, p6_run_id=?, clarification_count=?, no_progress_count=?, "
-            "current_delivery_id=?, updated_at_utc=? "
+            "current_delivery_id=?, updated_at_utc=?, preparation_generation=?, "
+            "prepared_calculation_id=?, final_authorization_id=? "
             "WHERE task_id=? AND conversation_id=? AND revision=?",
             (
                 task.revision,
@@ -388,6 +399,9 @@ class P7RecordRepository:
                 task.no_progress_count,
                 task.current_delivery_id,
                 format_utc(task.updated_at_utc),
+                task.preparation_generation,
+                task.prepared_calculation_id,
+                task.final_authorization_id,
                 task.task_id,
                 task.conversation_id,
                 expected_revision,
@@ -425,6 +439,9 @@ class P7RecordRepository:
             current_delivery_id=row[21],
             created_at_utc=parse_utc(str(row[22])),
             updated_at_utc=parse_utc(str(row[23])),
+            preparation_generation=0 if len(row) < 25 or row[24] is None else int(row[24]),
+            prepared_calculation_id=(None if len(row) < 26 or row[25] is None else str(row[25])),
+            final_authorization_id=(None if len(row) < 27 or row[26] is None else str(row[26])),
         )
 
     # Planning evidence ---------------------------------------------
@@ -515,6 +532,198 @@ class P7RecordRepository:
             return PlanningRecord.model_validate_json(_json(data), strict=True)
         except (ValidationError, TypeError, ValueError) as error:
             raise StateIntegrityError("stored planning record is invalid") from error
+
+    # Preparation snapshots -----------------------------------------
+    def insert_prepared_calculation(self, record: PreparedCalculation) -> None:
+        payload = record.model_dump(mode="json")
+        self.connection.execute(
+            "INSERT INTO p7_prepared_calculations("
+            "prepared_id, task_id, conversation_id, preparation_generation, task_revision, "
+            "status, snapshot_json, snapshot_hash, created_at_utc, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                record.prepared_id,
+                record.task_id,
+                record.conversation_id,
+                record.preparation_generation,
+                record.task_revision,
+                record.status.value,
+                _json(payload),
+                record.snapshot_hash,
+                format_utc(record.created_at_utc),
+                format_utc(record.updated_at_utc),
+            ),
+        )
+
+    def get_prepared_calculation(self, prepared_id: str) -> PreparedCalculation | None:
+        row = self.connection.execute(
+            "SELECT snapshot_json, snapshot_hash FROM p7_prepared_calculations WHERE prepared_id=?",
+            (prepared_id,),
+        ).fetchone()
+        return None if row is None else self._prepared_from_row(row)
+
+    def get_prepared_for_task(
+        self, task_id: str, preparation_generation: int | None = None
+    ) -> PreparedCalculation | None:
+        if preparation_generation is None:
+            row = self.connection.execute(
+                "SELECT snapshot_json, snapshot_hash FROM p7_prepared_calculations "
+                "WHERE task_id=? ORDER BY preparation_generation DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+        else:
+            row = self.connection.execute(
+                "SELECT snapshot_json, snapshot_hash FROM p7_prepared_calculations "
+                "WHERE task_id=? AND preparation_generation=?",
+                (task_id, preparation_generation),
+            ).fetchone()
+        return None if row is None else self._prepared_from_row(row)
+
+    def list_prepared_calculations(
+        self, *, task_id: str | None = None, conversation_id: str | None = None
+    ) -> tuple[PreparedCalculation, ...]:
+        query = "SELECT snapshot_json, snapshot_hash FROM p7_prepared_calculations WHERE 1=1"
+        values: list[object] = []
+        if task_id is not None:
+            query += " AND task_id=?"
+            values.append(task_id)
+        if conversation_id is not None:
+            query += " AND conversation_id=?"
+            values.append(conversation_id)
+        query += " ORDER BY task_id, preparation_generation"
+        rows = self.connection.execute(query, tuple(values)).fetchall()
+        return tuple(self._prepared_from_row(row) for row in rows)
+
+    @staticmethod
+    def _prepared_from_row(row: sqlite3.Row) -> PreparedCalculation:
+        data = _load_json(row[0], what="prepared calculation")
+        if not isinstance(data, dict):
+            raise StateIntegrityError("stored prepared calculation is not an object")
+        if data.get("snapshot_hash") != row[1]:
+            raise StateIntegrityError("prepared calculation snapshot hash is inconsistent")
+        try:
+            return PreparedCalculation.model_validate_json(_json(data), strict=True)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise StateIntegrityError("stored prepared calculation is invalid") from error
+
+    # Parent execution authorizations ---------------------------------
+    def insert_execution_authorization(self, authorization: WorkflowExecutionAuthorization) -> None:
+        payload = authorization.model_dump(mode="json")
+        self.connection.execute(
+            "INSERT INTO p7_execution_authorizations("
+            "authorization_id, task_id, prepared_calculation_id, task_revision, "
+            "preparation_generation, snapshot_hash, authorization_json, authorization_hash, "
+            "status, issued_at_utc, expires_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                authorization.authorization_id,
+                authorization.task_id,
+                authorization.prepared_calculation_id,
+                authorization.task_revision,
+                authorization.preparation_generation,
+                authorization.prepared_snapshot_hash,
+                _json(payload),
+                authorization.authorization_hash,
+                authorization.status,
+                format_utc(authorization.issued_at_utc),
+                format_utc(authorization.expires_at_utc),
+            ),
+        )
+
+    def get_execution_authorization(
+        self, authorization_id: str
+    ) -> WorkflowExecutionAuthorization | None:
+        row = self.connection.execute(
+            "SELECT authorization_json, authorization_hash, snapshot_hash FROM "
+            "p7_execution_authorizations "
+            "WHERE authorization_id=?",
+            (authorization_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        data = _load_json(row[0], what="execution authorization")
+        if (
+            not isinstance(data, dict)
+            or data.get("authorization_hash") != row[1]
+            or data.get("prepared_snapshot_hash") != row[2]
+        ):
+            raise StateIntegrityError("execution authorization hash is inconsistent")
+        try:
+            return WorkflowExecutionAuthorization.model_validate_json(_json(data), strict=True)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise StateIntegrityError("stored execution authorization is invalid") from error
+
+    # Versioned preparation handoffs support multiple generations on one
+    # task; the historical p7_handoffs table remains the v4 compatibility
+    # surface for P4/P5/P6.
+    def insert_preparation_handoff(self, handoff: PreparationHandoff) -> None:
+        self.connection.execute(
+            "INSERT INTO p7_preparation_handoffs("
+            "handoff_id, task_id, preparation_generation, target, command_id, child_id, "
+            "expected_revision, payload_json, payload_hash, status, "
+            "created_at_utc, updated_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                handoff.handoff_id,
+                handoff.task_id,
+                handoff.preparation_generation,
+                handoff.target,
+                handoff.command_id,
+                handoff.child_id,
+                handoff.expected_revision,
+                _json(thaw_json(handoff.payload)),
+                handoff.payload_hash,
+                handoff.status,
+                format_utc(handoff.created_at_utc),
+                format_utc(handoff.updated_at_utc),
+            ),
+        )
+
+    def get_preparation_handoff(
+        self, task_id: str, preparation_generation: int, target: str
+    ) -> PreparationHandoff | None:
+        row = self.connection.execute(
+            "SELECT handoff_id, task_id, preparation_generation, target, command_id, child_id, "
+            "expected_revision, payload_json, payload_hash, status, "
+            "created_at_utc, updated_at_utc "
+            "FROM p7_preparation_handoffs WHERE task_id=? "
+            "AND preparation_generation=? AND target=?",
+            (task_id, preparation_generation, target),
+        ).fetchone()
+        if row is None:
+            return None
+        values = {
+            "handoff_id": str(row[0]),
+            "task_id": str(row[1]),
+            "preparation_generation": int(row[2]),
+            "target": str(row[3]),
+            "command_id": str(row[4]),
+            "child_id": str(row[5]),
+            "expected_revision": int(row[6]),
+            "payload": _load_json(row[7], what="preparation handoff payload"),
+            "payload_hash": str(row[8]),
+            "status": str(row[9]),
+            "created_at_utc": str(row[10]),
+            "updated_at_utc": str(row[11]),
+        }
+        try:
+            return PreparationHandoff.model_validate_json(_json(values), strict=True)
+        except (ValidationError, TypeError, ValueError) as error:
+            raise StateIntegrityError("stored preparation handoff is invalid") from error
+
+    def update_preparation_handoff(self, handoff: PreparationHandoff) -> None:
+        cursor = self.connection.execute(
+            "UPDATE p7_preparation_handoffs SET status=?, updated_at_utc=? "
+            "WHERE handoff_id=? AND task_id=? AND preparation_generation=?",
+            (
+                handoff.status,
+                format_utc(handoff.updated_at_utc),
+                handoff.handoff_id,
+                handoff.task_id,
+                handoff.preparation_generation,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise StateIntegrityError("preparation handoff disappeared during update")
 
     # Links, pending actions, handoffs, responses --------------------
     def ensure_task_link(

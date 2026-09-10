@@ -300,7 +300,11 @@ def _evidence_supports_change(
             return any(item in folded for item in ("solvent", "solution", "aqueous", "溶液"))
         return expected in folded
     if change.field in {"charge", "multiplicity"}:
-        return bool(re.search(rf"(?<!\d)[+-]?{abs(int(value))}(?!\d)", quote))
+        # The sign is part of the semantic value.  An optional-sign match
+        # would accept evidence for the opposite electronic state.
+        integer = int(value)
+        signed_value = rf"-{abs(integer)}" if integer < 0 else rf"\+?{abs(integer)}"
+        return bool(re.search(rf"(?<![\d+-]){signed_value}(?!\d)", quote))
     if change.field == "molecule" and isinstance(value, Mapping):
         kind = value.get("kind")
         raw_value = value.get("value")
@@ -356,16 +360,11 @@ def _same_as_current(
             "value": current_request.molecule_value,
         }
         if isinstance(value, Mapping):
-            return (
-                value.get("kind") == current["kind"]
-                and value.get("value") == current["value"]
-            )
+            return value.get("kind") == current["kind"] and value.get("value") == current["value"]
         return False
     if change.field == "molecule_kind":
         current = (
-            None
-            if current_request.molecule_kind is None
-            else current_request.molecule_kind.value
+            None if current_request.molecule_kind is None else current_request.molecule_kind.value
         )
     elif change.field == "molecule_value":
         current = current_request.molecule_value
@@ -443,10 +442,7 @@ def _apply_policy_defaults(
                 turn_reference=turn_reference,
                 structure_hash=precheck.structure_hash,
             )
-        if (
-            multiplicity is None
-            and precheck.canonical_isomeric_smiles == OXYGEN_CANONICAL_SMILES
-        ):
+        if multiplicity is None and precheck.canonical_isomeric_smiles == OXYGEN_CANONICAL_SMILES:
             issues.extend(("multiplicity_required", "oxygen_triplet_requires_separate_policy"))
             return charge, multiplicity, tuple(notes)
         if multiplicity is None:
@@ -516,9 +512,7 @@ def resolve_draft(
         user_patch
         if isinstance(user_patch, CalculationIntentV4)
         else CalculationIntentV4.model_validate_json(
-            json.dumps(
-                thaw_json(user_patch), ensure_ascii=False, separators=(",", ":")
-            ),
+            json.dumps(thaw_json(user_patch), ensure_ascii=False, separators=(",", ":")),
             strict=True,
         )
     )
@@ -568,9 +562,7 @@ def resolve_draft(
         if change.field == "operations" and isinstance(value, list):
             removed = _removed_operations(current_message)
             if removed and current_request is not None:
-                base_operations = (
-                    tuple(current_request.operations)
-                )
+                base_operations = tuple(current_request.operations)
                 value = [item for item in base_operations if item not in removed]
         if change.op == "set" and (
             _evidence_is_negative(quote, current_message)
@@ -589,9 +581,7 @@ def resolve_draft(
             # draft.  Repetition is not a user change and must not create a
             # new revision or replace its provenance.
             continue
-        accepted_changes.append(
-            DraftChange(change.field, change.op, value, quote)
-        )
+        accepted_changes.append(DraftChange(change.field, change.op, value, quote))
         if change.op == "reset_default":
             if change.field == "method":
                 method = None
@@ -753,8 +743,10 @@ def resolve_draft(
             issues.append(f"candidate capability is invalid: {str(error)[:512]}")
 
     output_spec = _output_from_patch(output_patch, base=base_output, operations=operations)
-    if current_request is not None and output_patch is None and any(
-        change.field == "operations" for change in accepted_changes
+    if (
+        current_request is not None
+        and output_patch is None
+        and any(change.field == "operations" for change in accepted_changes)
     ):
         output_spec = _default_output_spec(operations)
 
@@ -785,7 +777,33 @@ def resolve_draft(
         new_projection = request.model_dump(
             mode="json", exclude={"request_id", "source_turn_id", "request_hash"}
         )
-        changed = current_projection != new_projection or unreliable_change
+        # A revision is not only a request-field merge.  The candidate graph,
+        # geometry source selector, goal, and output declarations are durable
+        # planning semantics too.  Compare the immutable planning record so a
+        # corrected input_ref still creates a revision even when the request
+        # fields remain identical.
+        current_candidate = getattr(current_planning_record, "candidate", None)
+        current_candidate_payload = (
+            current_candidate.model_dump(mode="json")
+            if hasattr(current_candidate, "model_dump")
+            else thaw_json(current_candidate)
+        )
+        proposed_candidate_payload = (
+            proposal.model_dump(mode="json") if proposal is not None else None
+        )
+        candidate_changed = (
+            proposed_candidate_payload is not None
+            and current_candidate_payload is not None
+            and proposed_candidate_payload != current_candidate_payload
+        )
+        # A parameter-only sparse patch with no explicit proposal keeps the
+        # existing graph; the current-turn wording is not itself a graph edit.
+        if intent.plan_proposal is None and not any(
+            change.field in {"operations", "hard_constraint", "prohibited_request"}
+            for change in accepted_changes
+        ):
+            candidate_changed = False
+        changed = current_projection != new_projection or candidate_changed or unreliable_change
     return DraftResolution(
         request=request,
         precheck=precheck,

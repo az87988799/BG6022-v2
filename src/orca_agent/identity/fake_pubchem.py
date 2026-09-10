@@ -9,6 +9,7 @@ from orca_agent.domain.p4 import IdentityProvider, MoleculeInputKind, MoleculeQu
 
 from .ports import (
     IdentityErrorCode,
+    IdentityLookupRequest,
     LookupResult,
     PubChemPort,
     RawIdentityCandidate,
@@ -151,6 +152,58 @@ class FakePubChemAdapter(PubChemPort):
                 "fixture": "pubchem-shaped-v1",
                 "input_kind": query.input_kind.value,
                 "query": query.normalized_input,
+            },
+            candidates=candidates,
+        )
+
+    def lookup_candidates(self, request: IdentityLookupRequest) -> LookupResult:
+        """Lookup fixture properties without inventing a q/M constraint."""
+
+        key = f"{request.input_kind.value}:{request.normalized_value.casefold()}"
+        candidates = self.records.get(key, ())
+        if not candidates:
+            return LookupResult(
+                provider=IdentityProvider.FAKE,
+                adapter_version=self.adapter_version,
+                body=canonical_json_bytes(
+                    {
+                        "error_code": IdentityErrorCode.NOT_FOUND.value,
+                        "message": "fixture has no matching identity",
+                        "query": request.normalized_value,
+                    }
+                ),
+                request_metadata={
+                    "fixture": "pubchem-shaped-v1",
+                    "input_kind": request.input_kind.value,
+                    "query": request.normalized_value,
+                },
+                error_code=IdentityErrorCode.NOT_FOUND,
+            )
+        document = {
+            "PropertyTable": {
+                "Properties": [
+                    {
+                        "CID": candidate.cid,
+                        "SMILES": candidate.smiles,
+                        "ConnectivitySMILES": candidate.connectivity_smiles,
+                        "InChI": candidate.inchi,
+                        "InChIKey": candidate.inchikey,
+                        "MolecularFormula": candidate.molecular_formula,
+                        "Charge": candidate.formal_charge,
+                    }
+                    for candidate in candidates
+                ]
+            }
+        }
+        return LookupResult(
+            provider=IdentityProvider.FAKE,
+            adapter_version=self.adapter_version,
+            body=canonical_json_bytes(document),
+            request_metadata={
+                "fixture": "pubchem-shaped-v1",
+                "input_kind": request.input_kind.value,
+                "query": request.normalized_value,
+                "q_m_not_used": True,
             },
             candidates=candidates,
         )

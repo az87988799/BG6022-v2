@@ -56,6 +56,7 @@ from orca_agent.domain.models import (
 )
 from orca_agent.domain.p4 import P4Phase
 from orca_agent.domain.p5 import (
+    GeometryOriginRecord,
     GeometryRecord,
     P5ActionRecord,
     P5ActionStatus,
@@ -103,6 +104,7 @@ from orca_agent.infrastructure.execution_resources import (
 )
 from orca_agent.infrastructure.p3_records import ArtifactRecordRepository
 from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRepository
+from orca_agent.infrastructure.p7_records import P7RecordRepository
 from orca_agent.infrastructure.repositories import RunSnapshot
 from orca_agent.infrastructure.sqlite import resolve_database_path
 from orca_agent.infrastructure.unit_of_work import SQLiteUnitOfWork
@@ -195,9 +197,53 @@ class P5ApplicationService:
         command_id: CommandId | None = None,
         external_opt_result_id: WorkflowRecordId | None = None,
         wall_time_seconds: int | None = None,
+        frozen_geometry: GeometryRecord | None = None,
+        geometry_draft_hash: str | None = None,
+        preparation_snapshot_id: str | None = None,
+        preparation_snapshot_hash: str | None = None,
+        prepared_geometry_hash: str | None = None,
+        prepared_xyz_bytes_sha256: str | None = None,
+        parent_authorization_id: str | None = None,
+        parent_authorization_hash: str | None = None,
+        parent_authorization_credential: str | None = None,
     ) -> ApplicationResult:
         actual_run_id = run_id or new_id(RunId)
         actual_command_id = command_id or new_id(CommandId)
+        if (preparation_snapshot_id is None) != (preparation_snapshot_hash is None):
+            return self._rejected(
+                actual_run_id,
+                ValueError("preparation snapshot ID and hash must be supplied together"),
+            )
+        if (prepared_geometry_hash is None) != (prepared_xyz_bytes_sha256 is None):
+            return self._rejected(
+                actual_run_id,
+                ValueError("prepared geometry hash and XYZ hash must be supplied together"),
+            )
+        if preparation_snapshot_id is not None and prepared_geometry_hash is None:
+            return self._rejected(
+                actual_run_id,
+                ValueError("prepared execution requires its frozen geometry hashes"),
+            )
+        if prepared_geometry_hash is not None and preparation_snapshot_id is None:
+            return self._rejected(
+                actual_run_id,
+                ValueError("prepared geometry hashes require a preparation snapshot"),
+            )
+        if (parent_authorization_id is None) != (parent_authorization_hash is None):
+            return self._rejected(
+                actual_run_id,
+                ValueError("parent authorization ID and hash must be supplied together"),
+            )
+        if parent_authorization_id is None and parent_authorization_credential is not None:
+            return self._rejected(
+                actual_run_id,
+                ValueError("authorization credential requires a parent authorization"),
+            )
+        if parent_authorization_id is not None and parent_authorization_credential is None:
+            return self._rejected(
+                actual_run_id,
+                ValueError("parent authorization requires a node credential"),
+            )
         command_hash = sha256_hex(
             {
                 "command_type": P5CommandType.CREATE_EXECUTION.value,
@@ -207,6 +253,20 @@ class P5ApplicationService:
                 "external_opt_result_id": None
                 if external_opt_result_id is None
                 else str(external_opt_result_id),
+                "frozen_geometry_hash": None
+                if frozen_geometry is None
+                else frozen_geometry.geometry_hash,
+                "frozen_xyz_bytes_sha256": None
+                if frozen_geometry is None
+                else frozen_geometry.xyz_bytes_sha256,
+                "geometry_draft_hash": geometry_draft_hash,
+                "preparation_snapshot_id": preparation_snapshot_id,
+                "preparation_snapshot_hash": preparation_snapshot_hash,
+                "prepared_geometry_hash": prepared_geometry_hash,
+                "prepared_xyz_bytes_sha256": prepared_xyz_bytes_sha256,
+                "parent_authorization_id": parent_authorization_id,
+                "parent_authorization_hash": parent_authorization_hash,
+                "parent_authorization_credential": parent_authorization_credential,
                 **(
                     {"wall_time_seconds": wall_time_seconds}
                     if wall_time_seconds is not None
@@ -230,7 +290,7 @@ class P5ApplicationService:
                 or source.prepared_plan is None
             ):
                 raise SourceIntegrityError("P5 source must be a verified P4 plan_ready run")
-            get_p5_protocol(protocol_id)
+            registered_protocol = get_p5_protocol(protocol_id)
             execution_plan = expand_p5_execution_plan(
                 wall_time_seconds=wall_time_seconds,
                 run_id=actual_run_id,
@@ -246,12 +306,42 @@ class P5ApplicationService:
             )
             external_result = None
             external_geometry_bytes = None
-            geometry = generate_initial_geometry(source.confirmed_molecule, run_id=actual_run_id)
-            if get_p5_protocol(protocol_id).source_from_opt:
+            if preparation_snapshot_id is not None and registered_protocol.source_from_opt:
+                if frozen_geometry is not None:
+                    raise GeometryBindingMismatch(
+                        "external Opt preparation cannot also carry an initial geometry draft"
+                    )
+            elif preparation_snapshot_id is not None and frozen_geometry is None:
+                raise GeometryBindingMismatch(
+                    "initial-draft preparation requires the frozen geometry binding"
+                )
+            geometry = frozen_geometry
+            if not registered_protocol.source_from_opt and geometry is None:
+                geometry = generate_initial_geometry(
+                    source.confirmed_molecule, run_id=actual_run_id
+                )
+            if geometry is not None:
+                if geometry.run_id != actual_run_id:
+                    raise GeometryBindingMismatch("frozen geometry is bound to a different P5 run")
+                if (
+                    geometry.confirmed_molecule_id != source.confirmed_molecule.record_id
+                    or geometry.identity_hash != source.confirmed_molecule.identity_record_hash
+                ):
+                    raise GeometryBindingMismatch("frozen geometry identity differs from P4 source")
+            if registered_protocol.source_from_opt:
                 geometry, external_geometry_bytes, external_result = self._load_external_opt_source(
                     external_opt_result_id,
                     source=source,
                     run_id=actual_run_id,
+                )
+            if geometry is None:
+                raise SourceIntegrityError("P5 execution has no trusted input geometry")
+            if prepared_geometry_hash is not None and (
+                geometry.geometry_hash != prepared_geometry_hash
+                or geometry.xyz_bytes_sha256 != prepared_xyz_bytes_sha256
+            ):
+                raise GeometryBindingMismatch(
+                    "prepared geometry does not match the frozen preparation snapshot"
                 )
             return self._persist_prepared_execution(
                 command_id=actual_command_id,
@@ -261,6 +351,12 @@ class P5ApplicationService:
                 geometry=geometry,
                 geometry_bytes=external_geometry_bytes,
                 upstream_result=external_result,
+                geometry_draft_hash=geometry_draft_hash,
+                preparation_snapshot_id=preparation_snapshot_id,
+                preparation_snapshot_hash=preparation_snapshot_hash,
+                parent_authorization_id=parent_authorization_id,
+                parent_authorization_hash=parent_authorization_hash,
+                parent_authorization_credential=parent_authorization_credential,
             )
         except Exception as error:
             return self._rejected(actual_run_id, error)
@@ -351,6 +447,9 @@ class P5ApplicationService:
                     "binding_hash": binding_hash,
                     "envelope_hash": envelope_hash,
                     "budget_hash": budget_hash,
+                    "parent_authorization_id": binding.parent_authorization_id,
+                    "parent_authorization_hash": binding.parent_authorization_hash,
+                    "parent_authorization_credential": binding.parent_authorization_credential,
                     "issued_at_utc": now,
                     "expires_at_utc": now + timedelta(hours=24),
                     "approval_command_id": str(actual_command_id),
@@ -885,6 +984,21 @@ class P5ApplicationService:
             return _ExecutionRuntimeSelection("fake", None, None, self.backend)
         return _ExecutionRuntimeSelection("fake", None, None, FakeExecutionBackend(self.state_root))
 
+    def load_optimized_geometry_source(
+        self,
+        external_result_id: WorkflowRecordId,
+        *,
+        source,
+        run_id: RunId,
+    ) -> tuple[GeometryRecord, bytes, P5ResultRecord]:
+        """Read one completed Opt result and its exact archived XYZ bytes."""
+
+        return self._load_external_opt_source(
+            external_result_id,
+            source=source,
+            run_id=run_id,
+        )
+
     def _load_external_opt_source(
         self,
         external_result_id: WorkflowRecordId | None,
@@ -958,6 +1072,12 @@ class P5ApplicationService:
         geometry: GeometryRecord,
         geometry_bytes: bytes | None = None,
         upstream_result: P5ResultRecord | None = None,
+        geometry_draft_hash: str | None = None,
+        preparation_snapshot_id: str | None = None,
+        preparation_snapshot_hash: str | None = None,
+        parent_authorization_id: str | None = None,
+        parent_authorization_hash: str | None = None,
+        parent_authorization_credential: str | None = None,
     ) -> ApplicationResult:
         now = self.clock.now_utc()
         run_id = geometry.run_id
@@ -985,6 +1105,12 @@ class P5ApplicationService:
             "prepared_plan_hash": source.prepared_plan.plan_hash,
             "execution_plan_id": str(execution_plan.record_id),
             "execution_plan_hash": execution_plan.plan_hash,
+            "preparation_snapshot_id": preparation_snapshot_id,
+            "preparation_snapshot_hash": preparation_snapshot_hash,
+            "geometry_draft_hash": geometry_draft_hash,
+            "parent_authorization_id": parent_authorization_id,
+            "parent_authorization_hash": parent_authorization_hash,
+            "parent_authorization_credential": parent_authorization_credential,
         }
         context = P5ExecutionContext(**context_values, context_hash=sha256_hex(context_values))
         with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
@@ -1056,6 +1182,12 @@ class P5ApplicationService:
                 geometry=geometry,
                 geometry_bytes=geometry_bytes,
                 upstream_result=upstream_result,
+                geometry_draft_hash=geometry_draft_hash,
+                preparation_snapshot_id=preparation_snapshot_id,
+                preparation_snapshot_hash=preparation_snapshot_hash,
+                parent_authorization_id=parent_authorization_id,
+                parent_authorization_hash=parent_authorization_hash,
+                parent_authorization_credential=parent_authorization_credential,
                 now=now,
             )
             prepared_event, prepared_result = self._append_event(
@@ -1097,8 +1229,60 @@ class P5ApplicationService:
         geometry: GeometryRecord,
         geometry_bytes: bytes | None = None,
         upstream_result: P5ResultRecord | None,
+        geometry_draft_hash: str | None = None,
+        preparation_snapshot_id: str | None = None,
+        preparation_snapshot_hash: str | None = None,
+        parent_authorization_id: str | None = None,
+        parent_authorization_hash: str | None = None,
+        parent_authorization_credential: str | None = None,
         now: datetime,
     ) -> tuple[P5WorkflowState, tuple[tuple[str, object], ...]]:
+        source_context = getattr(source, "context", None)
+        supplied_parent_credential = parent_authorization_credential
+        if source_context is not None:
+            geometry_draft_hash = geometry_draft_hash or getattr(
+                source_context, "geometry_draft_hash", None
+            )
+            preparation_snapshot_id = preparation_snapshot_id or getattr(
+                source_context, "preparation_snapshot_id", None
+            )
+            preparation_snapshot_hash = preparation_snapshot_hash or getattr(
+                source_context, "preparation_snapshot_hash", None
+            )
+            parent_authorization_id = parent_authorization_id or getattr(
+                source_context, "parent_authorization_id", None
+            )
+            parent_authorization_hash = parent_authorization_hash or getattr(
+                source_context, "parent_authorization_hash", None
+            )
+        if parent_authorization_id is not None:
+            authorization = P7RecordRepository(uow.connection).get_execution_authorization(
+                parent_authorization_id
+            )
+            if (
+                authorization is None
+                or authorization.authorization_hash != parent_authorization_hash
+                or authorization.status == "revoked"
+                or authorization.expires_at_utc <= now
+                or authorization.prepared_calculation_id != preparation_snapshot_id
+                or authorization.prepared_snapshot_hash != preparation_snapshot_hash
+            ):
+                raise StateIntegrityError("parent execution authorization is missing or stale")
+            expected_credential = authorization.credential_for(node.node_id)
+            if (
+                supplied_parent_credential is not None
+                and supplied_parent_credential != expected_credential
+            ):
+                raise StateIntegrityError("parent execution node credential is invalid")
+            # Derive the credential for the actual node.  Downstream nodes
+            # inherit the parent authorization, not the first node's token.
+            parent_authorization_credential = expected_credential
+        elif supplied_parent_credential is not None:
+            raise StateIntegrityError("node credential has no parent authorization")
+        if upstream_result is not None:
+            # The parent draft identifies only the first initial geometry.  A
+            # later node is sourced from its upstream ORCA result instead.
+            geometry_draft_hash = None
         if self.backend_kind == "local_orca":
             if (
                 self.orca_executable is None
@@ -1181,8 +1365,16 @@ class P5ApplicationService:
             "method_profile_id": node.method_profile_id,
             "method_profile_hash": node.method_profile_hash,
             "geometry_artifact_id": str(geometry_artifact.artifact_id),
+            "geometry_record_id": str(geometry.record_id),
+            "geometry_record_hash": geometry.record_hash,
             "geometry_hash": geometry.geometry_hash,
             "xyz_bytes_sha256": bytes_sha256(action_geometry_bytes),
+            "geometry_draft_hash": geometry_draft_hash,
+            "preparation_snapshot_id": preparation_snapshot_id,
+            "preparation_snapshot_hash": preparation_snapshot_hash,
+            "parent_authorization_id": parent_authorization_id,
+            "parent_authorization_hash": parent_authorization_hash,
+            "parent_authorization_credential": parent_authorization_credential,
             "feature_profile_hash": compiled.feature_profile_hash,
             "input_manifest_hash": compiled.manifest_hash,
             "input_sha256": compiled.input_sha256,
@@ -1249,6 +1441,32 @@ class P5ApplicationService:
             **action_values,
             action_record_hash=sha256_hex(action_record_hash_values),
         )
+        origin_record = None
+        if geometry_draft_hash is not None and upstream_result is None:
+            origin_record = GeometryOriginRecord.create(
+                origin_type="rdkit_initial",
+                geometry_record_id=geometry.record_id,
+                geometry_record_hash=geometry.record_hash,
+                geometry_hash=geometry.geometry_hash,
+                xyz_bytes_sha256=bytes_sha256(action_geometry_bytes),
+                source_draft_hash=geometry_draft_hash,
+                source_run_id=getattr(source, "run_id", None),
+                source_artifact_id=geometry_artifact.artifact_id,
+            )
+        elif upstream_result is not None:
+            origin_record = GeometryOriginRecord.create(
+                origin_type="orca_opt",
+                geometry_record_id=geometry.record_id,
+                geometry_record_hash=geometry.record_hash,
+                geometry_hash=geometry.geometry_hash,
+                xyz_bytes_sha256=bytes_sha256(action_geometry_bytes),
+                source_run_id=upstream_result.run_id,
+                source_action_id=upstream_result.action_id,
+                source_result_id=upstream_result.record_id,
+                source_artifact_id=(
+                    upstream_result.optimized_geometry_artifact_id or geometry_artifact.artifact_id
+                ),
+            )
         try:
             uow.connection.execute(
                 "INSERT INTO actions("
@@ -1287,7 +1505,13 @@ class P5ApplicationService:
             current_binding_hash=binding.binding_hash,
             last_outcome_code="node_prepared",
         )
-        return next_state, (("p5.execution_binding", binding), ("p5.action", action_record))
+        records: list[tuple[str, object]] = [
+            ("p5.execution_binding", binding),
+            ("p5.action", action_record),
+        ]
+        if origin_record is not None:
+            records.append(("p5.geometry_origin", origin_record))
+        return next_state, tuple(records)
 
     def _method_profile(self):
         from orca_agent.planning.registry import METHOD_R2SCAN3C
@@ -1493,6 +1717,7 @@ class P5ApplicationService:
         command_hash: str | None = None,
     ) -> ApplicationResult:
         try:
+            execution_id = str(observation.execution_id)
             runtime = self._restore_execution_runtime(run_id)
             source_view = self._read_p4_source(self.inspect(run_id).state.source_run_id)
             with SQLiteUnitOfWork(self.database_path, clock=self.clock) as uow:
@@ -1501,7 +1726,7 @@ class P5ApplicationService:
                 state = self._p5_state(snapshot)
                 if (
                     state.current_execution_id is None
-                    or str(state.current_execution_id) != observation.execution_id
+                    or str(state.current_execution_id) != execution_id
                 ):
                     raise StateIntegrityError("observed execution is not the current P5 execution")
                 records = P5RecordRepository(uow.connection)
@@ -1540,6 +1765,15 @@ class P5ApplicationService:
                         for _id, kind, item in records.list_p5_for_run(run_id)
                         if kind == "p5.geometry"
                         and isinstance(item, GeometryRecord)
+                        and (
+                            item.record_id == binding.geometry_record_id
+                            if binding.geometry_record_id is not None
+                            else item.geometry_hash == binding.geometry_hash
+                        )
+                        and (
+                            binding.geometry_record_hash is None
+                            or item.record_hash == binding.geometry_record_hash
+                        )
                         and item.geometry_hash == binding.geometry_hash
                         and item.xyz_bytes_sha256 == binding.xyz_bytes_sha256
                     ),
@@ -1547,7 +1781,7 @@ class P5ApplicationService:
                 )
                 if geometry is None:
                     raise GeometryBindingMismatch("P5 input geometry record is missing")
-                output = runtime.backend.collect(observation.execution_id)
+                output = runtime.backend.collect(execution_id)
                 output_bytes = output.stdout_path.read_bytes()
                 stderr_bytes = output.stderr_path.read_bytes()
                 hessian_bytes = (
@@ -1559,7 +1793,7 @@ class P5ApplicationService:
                     else output.optimized_xyz_path.read_bytes()
                 )
                 artifact_store = ArtifactStore(self.state_root, clock=self.clock)
-                execution_ref = ExecutionId(observation.execution_id)
+                execution_ref = ExecutionId(execution_id)
                 current_geometry_artifact = ArtifactRecordRepository(uow.connection).get(
                     action.geometry_artifact_id
                 )
@@ -1576,7 +1810,7 @@ class P5ApplicationService:
                     )
                 try:
                     work_directory = execution_directory(
-                        self.state_root, observation.execution_id, create=False
+                        self.state_root, execution_id, create=False
                     )
                 except (OSError, ValueError) as error:
                     raise ResourceLimitExceeded(
@@ -1592,7 +1826,7 @@ class P5ApplicationService:
                     stdout_ref = artifact_store.put_owned(
                         connection=uow.connection,
                         run_id=run_id,
-                        scope_id=observation.execution_id,
+                        scope_id=execution_id,
                         role="stdout",
                         content=output_bytes,
                         media_type="text/plain",
@@ -1602,7 +1836,7 @@ class P5ApplicationService:
                     stderr_ref = artifact_store.put_owned(
                         connection=uow.connection,
                         run_id=run_id,
-                        scope_id=observation.execution_id,
+                        scope_id=execution_id,
                         role="stderr",
                         content=stderr_bytes,
                         media_type="text/plain",
@@ -1615,7 +1849,7 @@ class P5ApplicationService:
                         else artifact_store.put_owned(
                             connection=uow.connection,
                             run_id=run_id,
-                            scope_id=observation.execution_id,
+                            scope_id=execution_id,
                             role="hessian",
                             content=hessian_bytes,
                             media_type="application/octet-stream",
@@ -1629,7 +1863,7 @@ class P5ApplicationService:
                         else artifact_store.put_owned(
                             connection=uow.connection,
                             run_id=run_id,
-                            scope_id=observation.execution_id,
+                            scope_id=execution_id,
                             role="optimized_xyz",
                             content=optimized_xyz,
                             media_type="chemical/x-xyz",
@@ -1684,7 +1918,7 @@ class P5ApplicationService:
                         optimized_artifact = artifact_store.put_owned(
                             connection=uow.connection,
                             run_id=run_id,
-                            scope_id=observation.execution_id,
+                            scope_id=execution_id,
                             role="optimized_xyz",
                             content=parsed.optimized_xyz_bytes,
                             media_type="chemical/x-xyz",
@@ -1705,7 +1939,7 @@ class P5ApplicationService:
                         "record_id": str(new_id(WorkflowRecordId)),
                         "run_id": str(run_id),
                         "action_id": str(action.action_id),
-                        "execution_id": observation.execution_id,
+                        "execution_id": execution_id,
                         "job_id": str(job.job_id),
                         "data_origin": output.data_origin,
                         "primitive": node.kind,
@@ -1808,13 +2042,13 @@ class P5ApplicationService:
                         next_state=next_state,
                         command_id=command_id or new_id(CommandId),
                         command_hash=command_hash
-                        or sha256_hex({"collect": observation.execution_id, "failure": True}),
+                        or sha256_hex({"collect": execution_id, "failure": True}),
                         command_type=P5CommandType.COLLECT_RESULT,
                         event_type=P5EventType.RUN_FAILED,
                         outcome_code=failure_outcome,
                         now=now,
                         details={
-                            "execution_id": observation.execution_id,
+                            "execution_id": execution_id,
                             "result_id": str(failure_record.record_id),
                             "error_code": failure_code,
                         },
@@ -1838,7 +2072,7 @@ class P5ApplicationService:
                     )
                     if binding.backend_kind == "local_orca":
                         ExecutionResourceRepository(uow.connection).release(
-                            execution_id=observation.execution_id,
+                            execution_id=execution_id,
                             generation=job.launch_generation,
                             now_utc=format_utc(now),
                             evidence_ref=f"p5:{run_id}:collect_failed",
@@ -1850,7 +2084,7 @@ class P5ApplicationService:
                             "cancelled"
                             if terminal_job_status is P5JobStatus.CANCELLED
                             else "failed",
-                            observation.execution_id,
+                            execution_id,
                             format_utc(now),
                             str(action.action_id),
                         ),
@@ -1865,7 +2099,7 @@ class P5ApplicationService:
                     "record_id": str(new_id(WorkflowRecordId)),
                     "run_id": str(run_id),
                     "action_id": str(action.action_id),
-                    "execution_id": observation.execution_id,
+                    "execution_id": execution_id,
                     "job_id": str(job.job_id),
                     "data_origin": parsed.data_origin,
                     "primitive": parsed.primitive,
@@ -1946,6 +2180,21 @@ class P5ApplicationService:
                         upstream_result=result_record,
                         now=now,
                     )
+                optimized_origin = None
+                if optimized_geometry is not None and optimized_artifact is not None:
+                    optimized_origin = GeometryOriginRecord.create(
+                        origin_type="orca_opt",
+                        geometry_record_id=optimized_geometry.record_id,
+                        geometry_record_hash=optimized_geometry.record_hash,
+                        geometry_hash=optimized_geometry.geometry_hash,
+                        xyz_bytes_sha256=optimized_geometry.xyz_bytes_sha256,
+                        source_run_id=run_id,
+                        source_action_id=action.action_id,
+                        source_result_id=result_record.record_id,
+                        source_artifact_id=optimized_artifact.artifact_id,
+                        parent_geometry_record_id=geometry.record_id,
+                        parent_geometry_record_hash=geometry.record_hash,
+                    )
                 event, app_result = self._append_event(
                     uow,
                     snapshot=snapshot,
@@ -1954,7 +2203,7 @@ class P5ApplicationService:
                     command_hash=command_hash
                     or sha256_hex(
                         {
-                            "collect": observation.execution_id,
+                            "collect": execution_id,
                             "result_id": str(result_record.record_id),
                         }
                     ),
@@ -1964,7 +2213,7 @@ class P5ApplicationService:
                     now=now,
                     details={
                         "result_id": str(result_record.record_id),
-                        "execution_id": observation.execution_id,
+                        "execution_id": execution_id,
                         "data_origin": parsed.data_origin.value,
                     },
                 )
@@ -1976,6 +2225,15 @@ class P5ApplicationService:
                         created_at_utc=now,
                         source_event_id=event.event_id,
                         record_id=optimized_geometry.record_id,
+                    )
+                if optimized_origin is not None:
+                    records.append_p5(
+                        run_id=run_id,
+                        record_type="p5.geometry_origin",
+                        record=optimized_origin,
+                        created_at_utc=now,
+                        source_event_id=event.event_id,
+                        record_id=optimized_origin.record_id,
                     )
                 records.append_p5(
                     run_id=run_id,
@@ -1996,7 +2254,7 @@ class P5ApplicationService:
                             record_id=record.record_id,
                         )
                 LocalJobRepository(uow.connection).mark_terminal(
-                    execution_id=ExecutionId(observation.execution_id),
+                    execution_id=ExecutionId(execution_id),
                     status=P5JobStatus.SUCCEEDED
                     if parsed.parse_status is P5ParseStatus.COMPLETE
                     else P5JobStatus.FAILED,
@@ -2008,7 +2266,7 @@ class P5ApplicationService:
                 )
                 if binding.backend_kind == "local_orca":
                     ExecutionResourceRepository(uow.connection).release(
-                        execution_id=observation.execution_id,
+                        execution_id=execution_id,
                         generation=job.launch_generation,
                         now_utc=format_utc(now),
                         evidence_ref=f"p5:{run_id}:collect_terminal",
@@ -2020,7 +2278,7 @@ class P5ApplicationService:
                         P5ActionStatus.SUCCEEDED.value
                         if parsed.parse_status is P5ParseStatus.COMPLETE
                         else P5ActionStatus.FAILED.value,
-                        observation.execution_id,
+                        execution_id,
                         format_utc(now),
                         str(action.action_id),
                     ),

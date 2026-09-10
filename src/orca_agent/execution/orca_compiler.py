@@ -11,6 +11,7 @@ from orca_agent.domain.hashing import sha256_hex
 from orca_agent.domain.p5 import (
     P5_DEFAULT_NPROCS,
     P5_DEFAULT_TOTAL_MEMORY_MB,
+    GeometryDraft,
     GeometryRecord,
     P5Budget,
     P5ExecutionNode,
@@ -55,7 +56,7 @@ _FORBIDDEN = re.compile(r"(?:\r|\$new_job|\.nodes|include|basis|d4|mpirun|shell|
 def compile_orca_input(
     registered_primitive: P5ExecutionNode | dict[str, object],
     method_profile: object,
-    geometry_record: GeometryRecord,
+    geometry_record: GeometryRecord | GeometryDraft,
     resource_settings: P5Budget | dict[str, object] | None,
     feature_profile: dict[str, object] | None,
     *,
@@ -78,17 +79,20 @@ def compile_orca_input(
     lines = [f"! r2SCAN-3c TightSCF {keyword}", f"%maxcore {budget.maxcore_mb}"]
     if bool(profile["parallel"]):
         lines.append(f"%pal nprocs {budget.nprocs} end")
+    formal_charge = int(geometry_record.formal_charge)
+    multiplicity = int(geometry_record.multiplicity)
     lines.extend(
         [
-            f"* xyzfile {geometry_record.formal_charge} "
-            f"{geometry_record.multiplicity} geometry.xyz",
+            f"* xyzfile {formal_charge} {multiplicity} geometry.xyz",
             "",
         ]
     )
     input_bytes = "\n".join(lines).encode("utf-8")
-    frozen_geometry_bytes = (
-        geometry_record.xyz_bytes() if geometry_bytes is None else geometry_bytes
-    )
+    if geometry_bytes is None:
+        raw_geometry = geometry_record.xyz_bytes
+        frozen_geometry_bytes = raw_geometry() if callable(raw_geometry) else raw_geometry
+    else:
+        frozen_geometry_bytes = geometry_bytes
     if not isinstance(frozen_geometry_bytes, bytes) or not frozen_geometry_bytes:
         raise ValueError("geometry_bytes must be non-empty bytes")
     if bytes_sha256(frozen_geometry_bytes) != geometry_record.xyz_bytes_sha256:

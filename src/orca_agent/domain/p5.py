@@ -35,6 +35,7 @@ from .ids import (
     JobId,
     RunId,
     WorkflowRecordId,
+    new_id,
 )
 from .json_types import FrozenJsonObject, freeze_json_object
 
@@ -229,6 +230,196 @@ class GeometryRecord(P5Model):
         return ("\n".join(lines) + "\n").encode("utf-8")
 
 
+class GeometryDraft(P5Model):
+    """Pure, not-yet-confirmed geometry produced during P7 preparation.
+
+    It deliberately has no confirmed-molecule or execution-run identity.  A
+    later binding operation may attach the exact same coordinates to a real
+    P4/P5 record; it must not call the embedding algorithm again.
+    """
+
+    schema_version: Literal["p5.geometry-draft.v1"] = "p5.geometry-draft.v1"
+    canonical_isomeric_smiles: str
+    molecular_formula: str
+    formal_charge: int
+    multiplicity: int = Field(ge=1)
+    structure_hash: str
+    atom_symbols: tuple[str, ...] = Field(min_length=1)
+    atom_map: tuple[int, ...] = Field(min_length=1)
+    coordinates: tuple[tuple[float, float, float], ...] = Field(min_length=1)
+    xyz_precision: int = Field(default=8, ge=3, le=12)
+    xyz_bytes: bytes
+    xyz_bytes_sha256: str
+    rdkit_version: str
+    algorithm_version: Literal[P5_GEOMETRY_VERSION] = P5_GEOMETRY_VERSION
+    seed: int = Field(ge=0)
+    max_attempts: int = Field(default=20, ge=1, le=100)
+    num_threads: int = Field(default=1, ge=1, le=1)
+    enforce_chirality: bool = True
+    geometry_hash: str
+    draft_hash: str
+
+    _hashes = field_validator("structure_hash", "xyz_bytes_sha256", "geometry_hash", "draft_hash")(
+        _hash
+    )
+
+    @field_validator("canonical_isomeric_smiles", "molecular_formula", "rdkit_version")
+    @classmethod
+    def _draft_text(cls, value: str, info: object) -> str:
+        return _text(value, getattr(info, "field_name", "geometry draft"))
+
+    @field_validator("xyz_bytes")
+    @classmethod
+    def _draft_bytes(cls, value: bytes) -> bytes:
+        if not isinstance(value, bytes) or not value:
+            raise ValueError("geometry draft XYZ bytes must be non-empty")
+        return value
+
+    @field_validator("coordinates")
+    @classmethod
+    def _draft_coordinates(
+        cls, value: tuple[tuple[float, float, float], ...]
+    ) -> tuple[tuple[float, float, float], ...]:
+        for point in value:
+            if len(point) != 3:
+                raise ValueError("each geometry draft coordinate must have three values")
+            for coordinate in point:
+                _finite(coordinate, "geometry draft coordinate")
+        return tuple(tuple(float(item) for item in point) for point in value)
+
+    @model_validator(mode="after")
+    def _draft_invariants(self) -> GeometryDraft:
+        if len(self.atom_symbols) != len(self.atom_map) or len(self.atom_map) != len(
+            self.coordinates
+        ):
+            raise ValueError("geometry draft atom fields must have equal length")
+        if (
+            len(set(self.atom_map)) != len(self.atom_map)
+            or tuple(sorted(self.atom_map)) != self.atom_map
+        ):
+            raise ValueError("geometry draft atom map must be unique and sorted")
+        if self.geometry_hash != stable_geometry_hash(
+            atom_symbols=self.atom_symbols,
+            atom_map=self.atom_map,
+            coordinates=self.coordinates,
+        ):
+            raise ValueError("geometry draft geometry hash does not match coordinates")
+        if bytes_sha256(self.xyz_bytes) != self.xyz_bytes_sha256:
+            raise ValueError("geometry draft XYZ hash does not match bytes")
+        expected_xyz = [str(len(self.atom_symbols)), "BG6022 P5 initial geometry"]
+        expected_xyz.extend(
+            f"{symbol} {x:.{self.xyz_precision}f} "
+            f"{y:.{self.xyz_precision}f} {z:.{self.xyz_precision}f}"
+            for symbol, (x, y, z) in zip(self.atom_symbols, self.coordinates, strict=True)
+        )
+        if self.xyz_bytes != ("\n".join(expected_xyz) + "\n").encode("utf-8"):
+            raise ValueError("geometry draft XYZ bytes do not match coordinates")
+        payload = self.model_dump(mode="json", exclude={"draft_hash", "xyz_bytes"})
+        payload.update(
+            {
+                "atom_symbols": list(self.atom_symbols),
+                "atom_map": list(self.atom_map),
+                "coordinates": [list(point) for point in self.coordinates],
+            }
+        )
+        if self.draft_hash != sha256_hex(payload):
+            raise ValueError("geometry draft hash does not match content")
+        return self
+
+    @classmethod
+    def create(cls, **values: object) -> GeometryDraft:
+        values.setdefault("schema_version", "p5.geometry-draft.v1")
+        values.setdefault("algorithm_version", P5_GEOMETRY_VERSION)
+        values.setdefault("xyz_precision", 8)
+        values.setdefault("max_attempts", 20)
+        values.setdefault("num_threads", 1)
+        values.setdefault("enforce_chirality", True)
+        if "xyz_bytes_sha256" not in values:
+            value = values.get("xyz_bytes")
+            if not isinstance(value, bytes):
+                raise ValueError("geometry draft requires XYZ bytes")
+            values["xyz_bytes_sha256"] = bytes_sha256(value)
+        # The hash above intentionally omits the raw bytes; the byte hash is
+        # the canonical frozen content reference and keeps the record JSON
+        # portable across SQLite/Pydantic versions.
+        probe = cls.model_construct(**{**values, "draft_hash": "0" * 64})
+        payload = probe.model_dump(mode="json", exclude={"draft_hash", "xyz_bytes"})
+        payload.update(
+            {
+                "atom_symbols": list(probe.atom_symbols),
+                "atom_map": list(probe.atom_map),
+                "coordinates": [list(point) for point in probe.coordinates],
+            }
+        )
+        values["draft_hash"] = sha256_hex(payload)
+        return cls(**values)
+
+
+class GeometryOriginRecord(P5Model):
+    """Immutable explanation of how one geometry artifact was produced."""
+
+    record_id: WorkflowRecordId
+    schema_version: Literal[P5_SCHEMA_VERSION] = P5_SCHEMA_VERSION
+    origin_type: Literal["rdkit_initial", "orca_opt"]
+    geometry_record_id: WorkflowRecordId
+    geometry_record_hash: str
+    geometry_hash: str
+    xyz_bytes_sha256: str
+    source_draft_hash: str | None = None
+    source_run_id: RunId | None = None
+    source_action_id: ActionId | None = None
+    source_result_id: WorkflowRecordId | None = None
+    source_artifact_id: ArtifactId | None = None
+    parent_geometry_record_id: WorkflowRecordId | None = None
+    parent_geometry_record_hash: str | None = None
+    origin_hash: str
+
+    _hashes = field_validator(
+        "geometry_record_hash",
+        "geometry_hash",
+        "xyz_bytes_sha256",
+        "source_draft_hash",
+        "parent_geometry_record_hash",
+        "origin_hash",
+    )(_optional_hash)
+
+    @model_validator(mode="after")
+    def _origin_invariants(self) -> GeometryOriginRecord:
+        if self.origin_type == "rdkit_initial" and self.source_draft_hash is None:
+            raise ValueError("rdkit_initial origin requires its draft hash")
+        if self.origin_type == "rdkit_initial" and (
+            self.source_result_id is not None
+            or self.source_action_id is not None
+            or self.parent_geometry_record_id is not None
+            or self.parent_geometry_record_hash is not None
+        ):
+            raise ValueError("rdkit_initial origin cannot carry an Opt parent reference")
+        if self.origin_type == "orca_opt" and any(
+            value is None
+            for value in (
+                self.source_run_id,
+                self.source_action_id,
+                self.source_result_id,
+                self.source_artifact_id,
+            )
+        ):
+            raise ValueError("orca_opt origin requires its complete result/artifact reference")
+        if (self.parent_geometry_record_id is None) != (self.parent_geometry_record_hash is None):
+            raise ValueError("geometry origin parent ID and hash must be supplied together")
+        payload = self.model_dump(mode="json", exclude={"origin_hash"})
+        if self.origin_hash != sha256_hex(payload):
+            raise ValueError("geometry origin hash does not match content")
+        return self
+
+    @classmethod
+    def create(cls, **values: object) -> GeometryOriginRecord:
+        values.setdefault("record_id", str(new_id(WorkflowRecordId)))
+        values.setdefault("schema_version", P5_SCHEMA_VERSION)
+        probe = cls.model_construct(**{**values, "origin_hash": "0" * 64})
+        values["origin_hash"] = sha256_hex(probe.model_dump(mode="json", exclude={"origin_hash"}))
+        return cls(**values)
+
+
 class P5ExecutionNode(P5Model):
     node_id: str
     kind: P5NodeKind
@@ -309,8 +500,16 @@ class P5ExecutionBinding(P5Model):
     method_profile_id: str
     method_profile_hash: str
     geometry_artifact_id: ArtifactId
+    geometry_record_id: WorkflowRecordId | None = None
+    geometry_record_hash: str | None = None
     geometry_hash: str
     xyz_bytes_sha256: str
+    geometry_draft_hash: str | None = None
+    preparation_snapshot_id: str | None = None
+    preparation_snapshot_hash: str | None = None
+    parent_authorization_id: str | None = None
+    parent_authorization_hash: str | None = None
+    parent_authorization_credential: str | None = None
     compiler_version: Literal[P5_COMPILER_VERSION] = P5_COMPILER_VERSION
     feature_profile_hash: str
     input_manifest_hash: str
@@ -337,12 +536,49 @@ class P5ExecutionBinding(P5Model):
         "runtime_config_hash",
         "binding_hash",
     )(_hash)
-    _optional_hashes = field_validator("upstream_result_hash", "executable_sha256")(_optional_hash)
+    _optional_hashes = field_validator(
+        "upstream_result_hash",
+        "executable_sha256",
+        "geometry_record_hash",
+        "geometry_draft_hash",
+        "preparation_snapshot_hash",
+        "parent_authorization_hash",
+        "parent_authorization_credential",
+    )(_optional_hash)
+
+    @field_validator("preparation_snapshot_id", "parent_authorization_id", mode="after")
+    @classmethod
+    def _optional_binding_text(cls, value: str | None, info: object) -> str | None:
+        return None if value is None else _text(value, getattr(info, "field_name", "binding"))
 
     @field_validator("node_id", "primitive_id", "method_profile_id", "backend_kind")
     @classmethod
     def _binding_text(cls, value: str, info: object) -> str:
         return _text(value, getattr(info, "field_name", "binding"))
+
+    @model_validator(mode="after")
+    def _binding_invariants(self) -> P5ExecutionBinding:
+        if (self.geometry_record_id is None) != (self.geometry_record_hash is None):
+            raise ValueError("geometry record ID and hash must be supplied together")
+        if (self.preparation_snapshot_id is None) != (self.preparation_snapshot_hash is None):
+            raise ValueError("preparation snapshot ID and hash must be supplied together")
+        if (self.parent_authorization_id is None) != (self.parent_authorization_hash is None):
+            raise ValueError("parent authorization ID and hash must be supplied together")
+        if (
+            self.parent_authorization_id is None
+            and self.parent_authorization_credential is not None
+        ):
+            raise ValueError("authorization credential requires a parent authorization")
+        if (
+            self.parent_authorization_id is not None
+            and self.parent_authorization_credential is None
+        ):
+            raise ValueError("parent authorization requires a node credential")
+        if self.parent_authorization_id is not None and self.preparation_snapshot_id is None:
+            raise ValueError("parent authorization requires a preparation snapshot")
+        if self.geometry_draft_hash is not None and self.upstream_result_id is not None:
+            raise ValueError("P5 geometry source cannot be both a draft and an upstream Opt")
+        return self
 
 
 class P5ApprovalGrant(P5Model):
@@ -358,14 +594,30 @@ class P5ApprovalGrant(P5Model):
     binding_hash: str
     envelope_hash: str
     budget_hash: str
+    parent_authorization_id: str | None = None
+    parent_authorization_hash: str | None = None
+    parent_authorization_credential: str | None = None
     issued_at_utc: datetime
     expires_at_utc: datetime
     approval_command_id: CommandId
     grant_hash: str
 
     _hashes = field_validator(
-        "action_hash", "binding_hash", "envelope_hash", "budget_hash", "grant_hash"
+        "action_hash",
+        "binding_hash",
+        "envelope_hash",
+        "budget_hash",
+        "grant_hash",
     )(_hash)
+
+    _optional_hashes = field_validator(
+        "parent_authorization_hash", "parent_authorization_credential"
+    )(_optional_hash)
+
+    @field_validator("parent_authorization_id")
+    @classmethod
+    def _grant_parent_id(cls, value: str | None) -> str | None:
+        return None if value is None else _text(value, "parent_authorization_id")
 
     @field_validator("issued_at_utc", "expires_at_utc")
     @classmethod
@@ -376,6 +628,18 @@ class P5ApprovalGrant(P5Model):
     def _grant_invariants(self) -> P5ApprovalGrant:
         if self.expires_at_utc <= self.issued_at_utc:
             raise ValueError("approval grant expiry must be after issue time")
+        if (self.parent_authorization_id is None) != (self.parent_authorization_hash is None):
+            raise ValueError("approval parent authorization ID and hash must be paired")
+        if (
+            self.parent_authorization_id is None
+            and self.parent_authorization_credential is not None
+        ):
+            raise ValueError("approval credential requires a parent authorization")
+        if (
+            self.parent_authorization_id is not None
+            and self.parent_authorization_credential is None
+        ):
+            raise ValueError("approval parent authorization requires a node credential")
         return self
 
 
@@ -478,6 +742,12 @@ class P5ExecutionContext(P5Model):
     prepared_plan_hash: str
     execution_plan_id: WorkflowRecordId
     execution_plan_hash: str
+    preparation_snapshot_id: str | None = None
+    preparation_snapshot_hash: str | None = None
+    geometry_draft_hash: str | None = None
+    parent_authorization_id: str | None = None
+    parent_authorization_hash: str | None = None
+    parent_authorization_credential: str | None = None
     context_hash: str
 
     _hashes = field_validator(
@@ -487,6 +757,36 @@ class P5ExecutionContext(P5Model):
         "execution_plan_hash",
         "context_hash",
     )(_hash)
+
+    _optional_hashes = field_validator(
+        "preparation_snapshot_hash",
+        "geometry_draft_hash",
+        "parent_authorization_hash",
+        "parent_authorization_credential",
+    )(_optional_hash)
+
+    @field_validator("preparation_snapshot_id", "parent_authorization_id")
+    @classmethod
+    def _context_parent_ids(cls, value: str | None, info: object) -> str | None:
+        return None if value is None else _text(value, getattr(info, "field_name", "context"))
+
+    @model_validator(mode="after")
+    def _context_invariants(self) -> P5ExecutionContext:
+        if (self.preparation_snapshot_id is None) != (self.preparation_snapshot_hash is None):
+            raise ValueError("context preparation snapshot ID and hash must be paired")
+        if (self.parent_authorization_id is None) != (self.parent_authorization_hash is None):
+            raise ValueError("context parent authorization ID and hash must be paired")
+        if (
+            self.parent_authorization_id is None
+            and self.parent_authorization_credential is not None
+        ):
+            raise ValueError("context credential requires a parent authorization")
+        if (
+            self.parent_authorization_id is not None
+            and self.parent_authorization_credential is None
+        ):
+            raise ValueError("context parent authorization requires a node credential")
+        return self
 
 
 class P5WorkflowState(P5Model):
@@ -614,6 +914,8 @@ def bytes_sha256(value: bytes) -> str:
 
 
 __all__ = [
+    "GeometryDraft",
+    "GeometryOriginRecord",
     "GeometryRecord",
     "P5ActionRecord",
     "P5ActionStatus",

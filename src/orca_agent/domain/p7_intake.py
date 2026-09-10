@@ -12,9 +12,15 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from ..orchestration.p7_versions import PROMPT_VERSION_V4, TURN_SCHEMA_V4
+from ..orchestration.p7_versions import (
+    PROMPT_VERSION_V4,
+    PROMPT_VERSION_V5,
+    TURN_SCHEMA_V4,
+    TURN_SCHEMA_V5,
+)
 from .json_types import FrozenJsonObject, FrozenJsonValue, freeze_json_object, freeze_json_value
 from .p7_conversation import IntentKind, P7Model, ResponseSource
+from .p7_planning import GeometryRef, PlanProposal
 
 INTAKE_SCHEMA_VERSION_V4 = TURN_SCHEMA_V4
 INTAKE_PROMPT_VERSION_V4 = PROMPT_VERSION_V4
@@ -157,9 +163,7 @@ class CalculationIntentV4(P7Model):
     """Calculation intent that reports only current-turn changes."""
 
     intent: Literal[IntentKind.CHEMICAL_CALCULATION] = IntentKind.CHEMICAL_CALCULATION
-    action: Literal[
-        "plan_new", "revise_draft", "request_execution", "cancel_task"
-    ] = "plan_new"
+    action: Literal["plan_new", "revise_draft", "request_execution", "cancel_task"] = "plan_new"
     task_alias: str | None = None
     changes: tuple[FieldChangeV4, ...] = Field(default=(), max_length=12)
     plan_proposal: FrozenJsonObject | None = None
@@ -247,10 +251,7 @@ class ContextQueryIntentV4(P7Model):
 
 
 SubrequestV4 = Annotated[
-    CalculationIntentV4
-    | ChemistryQAIntentV4
-    | GeneralQAIntentV4
-    | ContextQueryIntentV4,
+    CalculationIntentV4 | ChemistryQAIntentV4 | GeneralQAIntentV4 | ContextQueryIntentV4,
     Field(discriminator="intent"),
 ]
 
@@ -282,17 +283,162 @@ class TurnInterpretationV4(P7Model):
         return self
 
 
+# v5 is additive.  v4 remains the published compatibility decoder above;
+# the current main route gets typed geometry inputs and an explicit goal while
+# retaining the same sparse-change evidence primitive.
+class PlanStepV5(P7Model):
+    key: str
+    operation: Literal["opt", "freq", "sp"]
+    input: GeometryRef
+    depends_on: tuple[str, ...] = ()
+    purpose: str | None = None
+    why: str | None = None
+
+    @field_validator("key", "purpose", "why")
+    @classmethod
+    def _step_text(cls, value: str | None, info: object) -> str | None:
+        return (
+            None
+            if value is None
+            else _text(value, getattr(info, "field_name", "step"), maximum=512)
+        )
+
+    @field_validator("depends_on")
+    @classmethod
+    def _step_dependencies(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        cleaned = tuple(_text(item, "depends_on", maximum=128) for item in value)
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("v5 step dependencies must not repeat")
+        return cleaned
+
+
+class CalculationIntentV5(P7Model):
+    intent: Literal[IntentKind.CHEMICAL_CALCULATION] = IntentKind.CHEMICAL_CALCULATION
+    action: Literal["plan_new", "revise_draft", "request_execution", "cancel_task"] = "plan_new"
+    task_alias: str | None = None
+    goal: str | None = None
+    molecule: FrozenJsonObject | None = None
+    changes: tuple[FieldChangeV4, ...] = Field(default=(), max_length=12)
+    operations: tuple[str, ...] = ()
+    steps: tuple[PlanStepV5, ...] = Field(default=(), max_length=3)
+    requested_outputs: tuple[str, ...] = ()
+    plan_proposal: PlanProposal | FrozenJsonObject | None = None
+    output_patch: OutputPatchV4 | None = None
+    requested_execution: bool = False
+
+    @field_validator("task_alias", "goal")
+    @classmethod
+    def _optional_text(cls, value: str | None, info: object) -> str | None:
+        return (
+            None
+            if value is None
+            else _text(value, getattr(info, "field_name", "text"), maximum=8192)
+        )
+
+    @field_validator("molecule", mode="before")
+    @classmethod
+    def _molecule(cls, value: object) -> FrozenJsonObject | None:
+        if value is None:
+            return None
+        frozen = freeze_json_object(value)
+        if set(frozen) - {"kind", "value", "raw"}:
+            raise ValueError("v5 molecule contains unknown fields")
+        if not isinstance(frozen.get("kind"), str) or not isinstance(frozen.get("value"), str):
+            raise ValueError("v5 molecule requires kind and value")
+        if frozen["kind"] not in {"name", "cas", "cid", "smiles"}:
+            raise ValueError("v5 molecule kind is unsupported")
+        return frozen
+
+    @field_validator("operations", "requested_outputs")
+    @classmethod
+    def _lists(cls, value: tuple[str, ...], info: object) -> tuple[str, ...]:
+        cleaned = tuple(
+            _text(item, getattr(info, "field_name", "item"), maximum=256) for item in value
+        )
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("v5 lists must not repeat")
+        return cleaned
+
+    @field_validator("plan_proposal", mode="before")
+    @classmethod
+    def _plan(cls, value: object) -> PlanProposal | FrozenJsonObject | None:
+        if value is None or isinstance(value, PlanProposal):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError("v5 plan_proposal must be an object")
+        return freeze_json_object(value)
+
+    @model_validator(mode="after")
+    def _change_fields(self) -> CalculationIntentV5:
+        fields = tuple(item.field for item in self.changes)
+        if len(fields) != len(set(fields)):
+            raise ValueError("a v5 turn may contain at most one final change per field")
+        if self.steps and self.plan_proposal is not None:
+            raise ValueError("v5 must use either steps or plan_proposal, not both")
+        return self
+
+
+class ChemistryQAIntentV5(ChemistryQAIntentV4):
+    pass
+
+
+class GeneralQAIntentV5(GeneralQAIntentV4):
+    pass
+
+
+class ContextQueryIntentV5(ContextQueryIntentV4):
+    pass
+
+
+SubrequestV5 = Annotated[
+    CalculationIntentV5 | ChemistryQAIntentV5 | GeneralQAIntentV5 | ContextQueryIntentV5,
+    Field(discriminator="intent"),
+]
+
+
+class TurnInterpretationV5(P7Model):
+    """Current intake contract for the PubChem→RDKit preparation route."""
+
+    schema_version: Literal[TURN_SCHEMA_V5] = TURN_SCHEMA_V5
+    prompt_version: Literal[PROMPT_VERSION_V5] = PROMPT_VERSION_V5
+    subrequests: tuple[SubrequestV5, ...] = Field(min_length=1, max_length=4)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: ResponseSource = ResponseSource.BASELINE
+
+    @model_validator(mode="after")
+    def _request_limits(self) -> TurnInterpretationV5:
+        new_calculations = sum(
+            isinstance(item, CalculationIntentV5) and item.action in {"plan_new", "revise_draft"}
+            for item in self.subrequests
+        )
+        if new_calculations > 1:
+            raise ValueError("a v5 turn may contain at most one new calculation request")
+        for item in self.subrequests:
+            if isinstance(item, (ChemistryQAIntentV5, GeneralQAIntentV5)) and not (
+                item.answer_draft and item.answer_draft.strip()
+            ):
+                raise ValueError("v5 QA responses require a non-empty answer_draft")
+        return self
+
+
 __all__ = [
+    "CalculationIntentV5",
     "CalculationIntentV4",
+    "ChemistryQAIntentV5",
     "ChemistryQAIntentV4",
+    "ContextQueryIntentV5",
     "ContextQueryIntentV4",
     "FieldChangeV4",
     "INTAKE_PROMPT_VERSION_V4",
     "INTAKE_SCHEMA_VERSION_V4",
     "GeneralQAIntentV4",
+    "GeneralQAIntentV5",
     "OutputPatchV4",
     "OutputQuantityPatchV4",
     "ParameterEvidenceV4",
     "SubrequestV4",
+    "SubrequestV5",
+    "PlanStepV5",
     "TurnInterpretationV4",
+    "TurnInterpretationV5",
 ]

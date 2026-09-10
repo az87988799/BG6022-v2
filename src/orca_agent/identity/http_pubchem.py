@@ -16,6 +16,7 @@ from orca_agent.domain.p4 import IdentityProvider, MoleculeInputKind, MoleculeQu
 
 from .ports import (
     IdentityErrorCode,
+    IdentityLookupRequest,
     LookupResult,
     PubChemPort,
     RawIdentityCandidate,
@@ -56,30 +57,52 @@ class HttpPubChemAdapter(PubChemPort):
         self._last_request_at: float | None = None
 
     def resolve(self, query: MoleculeQuery) -> LookupResult:
+        return self._lookup(
+            input_kind=query.input_kind,
+            normalized_input=query.normalized_input,
+            requested_charge=query.charge,
+        )
+
+    def lookup_candidates(self, request: IdentityLookupRequest) -> LookupResult:
+        return self._lookup(
+            input_kind=request.input_kind,
+            normalized_input=request.normalized_value,
+            requested_charge=None,
+        )
+
+    def _lookup(
+        self,
+        *,
+        input_kind: MoleculeInputKind,
+        normalized_input: str,
+        requested_charge: int | None,
+    ) -> LookupResult:
         if not self.allow_network:
             return self._failure(
-                query,
-                IdentityErrorCode.NETWORK_DISABLED,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                code=IdentityErrorCode.NETWORK_DISABLED,
                 retryable=False,
                 body={"error_code": IdentityErrorCode.NETWORK_DISABLED.value},
             )
-        if query.input_kind is MoleculeInputKind.SMILES:
+        if input_kind is MoleculeInputKind.SMILES:
             return self._failure(
-                query,
-                IdentityErrorCode.QUERY_REJECTED,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                code=IdentityErrorCode.QUERY_REJECTED,
                 retryable=False,
                 body={"error_code": IdentityErrorCode.QUERY_REJECTED.value},
             )
         import httpx
 
         deadline = self._monotonic() + 20.0
-        path_kind = "cid" if query.input_kind is MoleculeInputKind.CID else "name"
-        encoded = quote(query.normalized_input, safe="")
+        path_kind = "cid" if input_kind is MoleculeInputKind.CID else "name"
+        encoded = quote(normalized_input, safe="")
         url = (
             f"{self.base_url}/compound/{path_kind}/{encoded}/property/"
             "SMILES,ConnectivitySMILES,InChI,InChIKey,MolecularFormula,Charge/JSON"
         )
-        if query.input_kind in (MoleculeInputKind.NAME, MoleculeInputKind.CAS):
+        if input_kind in (MoleculeInputKind.NAME, MoleculeInputKind.CAS):
             url += "?name_type=complete"
         try:
             self._respect_rate_limit()
@@ -96,22 +119,25 @@ class HttpPubChemAdapter(PubChemPort):
                     body = self._read_bounded(response, deadline=deadline)
         except (httpx.TimeoutException, TimeoutError):
             return self._failure(
-                query,
-                IdentityErrorCode.LOOKUP_TIMEOUT,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                code=IdentityErrorCode.LOOKUP_TIMEOUT,
                 retryable=True,
                 body={"error_code": IdentityErrorCode.LOOKUP_TIMEOUT.value},
             )
         except (httpx.NetworkError, httpx.TransportError):
             return self._failure(
-                query,
-                IdentityErrorCode.PROVIDER_UNAVAILABLE,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                code=IdentityErrorCode.PROVIDER_UNAVAILABLE,
                 retryable=True,
                 body={"error_code": IdentityErrorCode.PROVIDER_UNAVAILABLE.value},
             )
         except ValueError:
             return self._failure(
-                query,
-                IdentityErrorCode.RESULT_LIMIT_EXCEEDED,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                code=IdentityErrorCode.RESULT_LIMIT_EXCEEDED,
                 retryable=False,
                 body={"error_code": IdentityErrorCode.RESULT_LIMIT_EXCEEDED.value},
             )
@@ -120,7 +146,8 @@ class HttpPubChemAdapter(PubChemPort):
         retry_after = _parse_retry_after(response.headers.get("Retry-After"), datetime.now(UTC))
         if status == 429 or status == 503:
             return self._result_error(
-                query,
+                input_kind,
+                normalized_input,
                 body,
                 status,
                 IdentityErrorCode.PROVIDER_THROTTLED,
@@ -129,7 +156,8 @@ class HttpPubChemAdapter(PubChemPort):
             )
         if status in (502, 504):
             return self._result_error(
-                query,
+                input_kind,
+                normalized_input,
                 body,
                 status,
                 IdentityErrorCode.PROVIDER_UNAVAILABLE,
@@ -137,22 +165,42 @@ class HttpPubChemAdapter(PubChemPort):
                 retry_after=retry_after,
             )
         if status == 400:
-            return self._result_error(query, body, status, IdentityErrorCode.QUERY_REJECTED)
+            return self._result_error(
+                input_kind, normalized_input, body, status, IdentityErrorCode.QUERY_REJECTED
+            )
         if status == 404:
-            return self._result_error(query, body, status, IdentityErrorCode.NOT_FOUND)
+            return self._result_error(
+                input_kind, normalized_input, body, status, IdentityErrorCode.NOT_FOUND
+            )
         if status < 200 or status >= 300:
             return self._result_error(
-                query, body, status, IdentityErrorCode.PROVIDER_UNAVAILABLE, retryable=True
+                input_kind,
+                normalized_input,
+                body,
+                status,
+                IdentityErrorCode.PROVIDER_UNAVAILABLE,
+                retryable=True,
             )
         try:
             document = json.loads(body.decode("utf-8"))
-            candidates = _parse_candidates(document, query)
+            candidates = _parse_candidates(
+                document,
+                input_kind=input_kind,
+                normalized_input=normalized_input,
+                requested_charge=requested_charge,
+            )
         except (UnicodeDecodeError, ValueError, TypeError, KeyError):
-            return self._result_error(query, body, status, IdentityErrorCode.PROVIDER_SCHEMA_ERROR)
+            return self._result_error(
+                input_kind, normalized_input, body, status, IdentityErrorCode.PROVIDER_SCHEMA_ERROR
+            )
         if not candidates:
-            return self._result_error(query, body, status, IdentityErrorCode.NOT_FOUND)
+            return self._result_error(
+                input_kind, normalized_input, body, status, IdentityErrorCode.NOT_FOUND
+            )
         if len(candidates) > 10:
-            return self._result_error(query, body, status, IdentityErrorCode.RESULT_LIMIT_EXCEEDED)
+            return self._result_error(
+                input_kind, normalized_input, body, status, IdentityErrorCode.RESULT_LIMIT_EXCEEDED
+            )
         return LookupResult(
             provider=IdentityProvider.PUBCHEM,
             adapter_version=self.adapter_version,
@@ -160,8 +208,9 @@ class HttpPubChemAdapter(PubChemPort):
             request_metadata={
                 "host": "pubchem.ncbi.nlm.nih.gov",
                 "path_kind": path_kind,
-                "input_kind": query.input_kind.value,
-                "query": query.normalized_input,
+                "input_kind": input_kind.value,
+                "query": normalized_input,
+                "q_m_filter": requested_charge is not None,
             },
             candidates=tuple(candidates),
             status_code=status,
@@ -189,7 +238,8 @@ class HttpPubChemAdapter(PubChemPort):
 
     def _result_error(
         self,
-        query: MoleculeQuery,
+        input_kind: MoleculeInputKind,
+        normalized_input: str,
         body: bytes,
         status: int,
         code: IdentityErrorCode,
@@ -204,8 +254,8 @@ class HttpPubChemAdapter(PubChemPort):
             request_metadata={
                 "host": "pubchem.ncbi.nlm.nih.gov",
                 "status_code": status,
-                "input_kind": query.input_kind.value,
-                "query": query.normalized_input,
+                "input_kind": input_kind.value,
+                "query": normalized_input,
             },
             error_code=code,
             retryable=retryable,
@@ -215,9 +265,10 @@ class HttpPubChemAdapter(PubChemPort):
 
     def _failure(
         self,
-        query: MoleculeQuery,
-        code: IdentityErrorCode,
         *,
+        input_kind: MoleculeInputKind,
+        normalized_input: str,
+        code: IdentityErrorCode,
         retryable: bool,
         body: dict[str, object],
     ) -> LookupResult:
@@ -227,7 +278,8 @@ class HttpPubChemAdapter(PubChemPort):
             body=json.dumps(body, separators=(",", ":")).encode("utf-8"),
             request_metadata={
                 "host": "pubchem.ncbi.nlm.nih.gov",
-                "input_kind": query.input_kind.value,
+                "input_kind": input_kind.value,
+                "query": normalized_input,
             },
             error_code=code,
             retryable=retryable,
@@ -235,16 +287,20 @@ class HttpPubChemAdapter(PubChemPort):
         )
 
 
-def _parse_candidates(document: object, query: MoleculeQuery) -> list[RawIdentityCandidate]:
+def _parse_candidates(
+    document: object,
+    *,
+    input_kind: MoleculeInputKind,
+    normalized_input: str,
+    requested_charge: int | None,
+) -> list[RawIdentityCandidate]:
     if not isinstance(document, dict):
         raise ValueError("provider response is not an object")
     table = document.get("PropertyTable")
     if not isinstance(table, dict) or not isinstance(table.get("Properties"), list):
         raise ValueError("provider response has no PropertyTable.Properties")
     values: list[RawIdentityCandidate] = []
-    requested_cid = (
-        int(query.normalized_input) if query.input_kind is MoleculeInputKind.CID else None
-    )
+    requested_cid = int(normalized_input) if input_kind is MoleculeInputKind.CID else None
     for item in table["Properties"]:
         if not isinstance(item, dict):
             raise ValueError("provider candidate is not an object")
@@ -255,7 +311,9 @@ def _parse_candidates(document: object, query: MoleculeQuery) -> list[RawIdentit
         if requested_cid is not None and cid != requested_cid:
             raise ValueError("CID response does not match query")
         formal_charge = item.get("Charge")
-        if type(formal_charge) is not int or formal_charge != query.charge:
+        if type(formal_charge) is not int:
+            raise ValueError("provider candidate charge is missing or invalid")
+        if requested_charge is not None and formal_charge != requested_charge:
             raise ValueError("provider candidate charge does not match query")
         values.append(
             RawIdentityCandidate(

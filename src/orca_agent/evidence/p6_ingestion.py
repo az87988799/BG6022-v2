@@ -23,6 +23,7 @@ from orca_agent.domain.ids import (
     new_id,
 )
 from orca_agent.domain.p5 import (
+    GeometryOriginRecord,
     GeometryRecord,
     P5ActionRecord,
     P5ExecutionBinding,
@@ -33,6 +34,7 @@ from orca_agent.domain.p5 import (
     P5ParseStatus,
     P5ResultRecord,
     P5WorkflowState,
+    bytes_sha256,
 )
 from orca_agent.domain.p6 import (
     MethodContext,
@@ -46,6 +48,7 @@ from orca_agent.domain.p6 import (
     ThermochemistryContext,
 )
 from orca_agent.execution.orca_parser import ParsedOrcaResult, parse_orca_output
+from orca_agent.identity.geometry import parse_xyz_bytes, validate_xyz_bytes
 from orca_agent.infrastructure.artifacts import ArtifactStore
 from orca_agent.infrastructure.p3_records import ArtifactRecordRepository, StoredArtifact
 from orca_agent.infrastructure.p5_records import LocalJobRepository, P5RecordRepository
@@ -72,6 +75,8 @@ class P6ResultBundle:
     observations: ParsedP6Observations | None
     artifacts: tuple[StoredArtifact, ...]
     artifact_bytes: tuple[tuple[ArtifactId, bytes], ...]
+    geometry_origin: GeometryOriginRecord | None = None
+    optimized_geometry_origin: GeometryOriginRecord | None = None
 
     def bytes_for(self, artifact_id: ArtifactId) -> bytes:
         for current_id, value in self.artifact_bytes:
@@ -152,6 +157,19 @@ def load_source_bundle(
         for _record_id, record_type, item in entries
         if record_type == "p5.geometry" and isinstance(item, GeometryRecord)
     )
+    origin_records = tuple(
+        item
+        for _record_id, record_type, item in entries
+        if record_type == "p5.geometry_origin" and isinstance(item, GeometryOriginRecord)
+    )
+    if len({item.record_id for item in origin_records}) != len(origin_records):
+        raise StateIntegrityError("P5 source contains duplicate geometry origin records")
+    geometry_origins: dict[WorkflowRecordId, tuple[GeometryOriginRecord, ...]] = {}
+    for origin in origin_records:
+        geometry_origins[origin.geometry_record_id] = (
+            *geometry_origins.get(origin.geometry_record_id, ()),
+            origin,
+        )
     results = tuple(
         item
         for _record_id, record_type, item in entries
@@ -184,7 +202,7 @@ def load_source_bundle(
         node = node_by_id.get(action.node_id)
         if node is None or node.kind is not result.primitive:
             raise StateIntegrityError("P5 result primitive is not bound to its plan node")
-        geometry = _geometry_for_binding(geometries, binding)
+        geometry, geometry_origin = _geometry_for_binding(geometries, geometry_origins, binding)
         if binding.upstream_result_id is not None and not any(
             item.record_id == binding.upstream_result_id for item in results
         ):
@@ -211,8 +229,6 @@ def load_source_bundle(
                 or upstream.binding.method_profile_hash != binding.method_profile_hash
             ):
                 raise StateIntegrityError("explicit upstream Opt binding is invalid")
-            from orca_agent.identity.geometry import parse_xyz_bytes
-
             symbols, coordinates = parse_xyz_bytes(
                 upstream.bytes_for(upstream.source_ref.optimized_geometry_artifact_id)
             )
@@ -300,6 +316,18 @@ def load_source_bundle(
             raise StateIntegrityError("P5 geometry artifact hash does not match its binding")
         if input_artifact.content_hash != binding.input_sha256:
             raise StateIntegrityError("P5 input artifact hash does not match its binding")
+        _optimized_geometry, optimized_geometry_origin = (None, None)
+        if optimized_artifact is not None:
+            _optimized_geometry, optimized_geometry_origin = _optimized_geometry_for_result(
+                source_run_id=source_run_id,
+                result=result,
+                action=action,
+                binding=binding,
+                geometries=geometries,
+                origins=geometry_origins,
+                optimized_artifact=optimized_artifact,
+                artifact_bytes=artifact_bytes,
+            )
         parsed: ParsedOrcaResult | None = None
         observations: ParsedP6Observations | None = None
         if result.parse_status is P5ParseStatus.COMPLETE:
@@ -381,6 +409,8 @@ def load_source_bundle(
                 observations=observations,
                 artifacts=tuple(artifact_values),
                 artifact_bytes=tuple(artifact_bytes),
+                geometry_origin=geometry_origin,
+                optimized_geometry_origin=optimized_geometry_origin,
             )
         )
 
@@ -489,9 +519,22 @@ def _verify_action_binding(
 
 
 def _geometry_for_binding(
-    geometries: tuple[GeometryRecord, ...], binding: P5ExecutionBinding
-) -> GeometryRecord:
-    matches = tuple(item for item in geometries if item.geometry_hash == binding.geometry_hash)
+    geometries: tuple[GeometryRecord, ...],
+    origins: dict[WorkflowRecordId, tuple[GeometryOriginRecord, ...]],
+    binding: P5ExecutionBinding,
+) -> tuple[GeometryRecord, GeometryOriginRecord | None]:
+    if binding.preparation_snapshot_id is not None and binding.geometry_record_id is None:
+        raise StateIntegrityError("prepared P5 binding has no exact geometry record")
+    if binding.geometry_record_id is not None:
+        matches = tuple(
+            item
+            for item in geometries
+            if item.record_id == binding.geometry_record_id
+            and item.record_hash == binding.geometry_record_hash
+            and item.geometry_hash == binding.geometry_hash
+        )
+    else:
+        matches = tuple(item for item in geometries if item.geometry_hash == binding.geometry_hash)
     if len(matches) != 1:
         raise StateIntegrityError("P5 binding does not select exactly one geometry record")
     geometry = matches[0]
@@ -500,7 +543,158 @@ def _geometry_for_binding(
         or geometry.identity_hash != binding.confirmed_molecule_hash
     ):
         raise StateIntegrityError("P5 binding geometry identity is inconsistent")
-    return geometry
+    if geometry.xyz_bytes_sha256 != binding.xyz_bytes_sha256:
+        raise StateIntegrityError("P5 binding geometry bytes are inconsistent")
+    origin = None
+    if binding.geometry_record_id is not None:
+        origin_candidates = origins.get(binding.geometry_record_id, ())
+        if binding.geometry_draft_hash is not None:
+            origin_candidates = tuple(
+                item
+                for item in origin_candidates
+                if item.origin_type == "rdkit_initial"
+                and item.source_draft_hash == binding.geometry_draft_hash
+            )
+        elif binding.upstream_result_id is not None:
+            # The same optimized geometry can be recorded twice: once as the
+            # Opt output (with a parent geometry) and once as the input to a
+            # downstream node (without a parent).  The binding selects the
+            # latter source record exactly.
+            origin_candidates = tuple(
+                item
+                for item in origin_candidates
+                if item.origin_type == "orca_opt"
+                and item.source_result_id == binding.upstream_result_id
+                and item.parent_geometry_record_id is None
+            )
+        elif len(origin_candidates) > 1:
+            origin_candidates = tuple(
+                item for item in origin_candidates if item.parent_geometry_record_id is None
+            )
+        if len(origin_candidates) > 1:
+            raise StateIntegrityError("P5 binding selects multiple geometry origins")
+        origin = origin_candidates[0] if origin_candidates else None
+        if origin is None and (
+            binding.preparation_snapshot_id is not None or binding.geometry_draft_hash is not None
+        ):
+            raise StateIntegrityError("P5 prepared geometry origin record is missing")
+        if origin is not None and (
+            origin.geometry_record_hash != geometry.record_hash
+            or origin.geometry_hash != geometry.geometry_hash
+            or origin.xyz_bytes_sha256 != geometry.xyz_bytes_sha256
+        ):
+            raise StateIntegrityError("P5 geometry origin does not match its geometry record")
+        if binding.geometry_draft_hash is not None and (
+            origin is None
+            or origin.origin_type != "rdkit_initial"
+            or origin.source_draft_hash != binding.geometry_draft_hash
+        ):
+            raise StateIntegrityError("P5 geometry origin does not match its frozen draft")
+        if binding.upstream_result_id is not None and (
+            origin is None
+            or origin.origin_type != "orca_opt"
+            or origin.source_result_id != binding.upstream_result_id
+        ):
+            raise StateIntegrityError("P5 geometry origin does not match its upstream Opt")
+        if (
+            binding.preparation_snapshot_id is not None
+            and binding.geometry_draft_hash is None
+            and binding.upstream_result_id is None
+        ):
+            raise StateIntegrityError("prepared P5 geometry source is not bound")
+    return geometry, origin
+
+
+def _optimized_geometry_for_result(
+    *,
+    source_run_id: RunId,
+    result: P5ResultRecord,
+    action: P5ActionRecord,
+    binding: P5ExecutionBinding,
+    geometries: tuple[GeometryRecord, ...],
+    origins: dict[WorkflowRecordId, tuple[GeometryOriginRecord, ...]],
+    optimized_artifact: StoredArtifact,
+    artifact_bytes: list[tuple[ArtifactId, bytes]],
+) -> tuple[GeometryRecord, GeometryOriginRecord | None]:
+    """Verify an Opt output geometry and its immutable production record.
+
+    Current prepared chains must carry the exact ``orca_opt`` origin.  The
+    legacy P5 archive predates that record, so it remains readable when one
+    unambiguous geometry record can still be matched by the frozen artifact
+    bytes.  No legacy hash is recomputed or replaced here.
+    """
+
+    if result.primitive is not P5NodeKind.OPT:
+        raise StateIntegrityError("optimized geometry artifact is bound to a non-Opt result")
+    optimized_bytes = _bytes(artifact_bytes, optimized_artifact.artifact_id)
+    if bytes_sha256(optimized_bytes) != optimized_artifact.content_hash:
+        raise StateIntegrityError("optimized geometry artifact bytes hash is invalid")
+
+    related_origins = tuple(
+        origin
+        for candidates in origins.values()
+        for origin in candidates
+        if origin.source_result_id == result.record_id
+    )
+    requires_origin = (
+        binding.preparation_snapshot_id is not None or binding.geometry_draft_hash is not None
+    )
+    output_origins = tuple(
+        origin for origin in related_origins if origin.parent_geometry_record_id is not None
+    )
+    if len(output_origins) > 1:
+        raise StateIntegrityError("Opt result has multiple geometry origin records")
+    origin = output_origins[0] if output_origins else None
+    if requires_origin and origin is None:
+        raise StateIntegrityError("prepared Opt result geometry origin record is missing")
+    if origin is not None:
+        if (
+            origin.origin_type != "orca_opt"
+            or origin.source_run_id != source_run_id
+            or origin.source_action_id != action.action_id
+            or origin.source_result_id != result.record_id
+            or origin.source_artifact_id != optimized_artifact.artifact_id
+        ):
+            raise StateIntegrityError("Opt geometry origin source binding is invalid")
+        if requires_origin and (
+            origin.parent_geometry_record_id != binding.geometry_record_id
+            or origin.parent_geometry_record_hash != binding.geometry_record_hash
+        ):
+            raise StateIntegrityError("Opt geometry origin parent geometry is invalid")
+        geometry_matches = tuple(
+            item
+            for item in geometries
+            if item.record_id == origin.geometry_record_id
+            and item.record_hash == origin.geometry_record_hash
+            and item.geometry_hash == origin.geometry_hash
+            and item.xyz_bytes_sha256 == origin.xyz_bytes_sha256
+            and item.xyz_bytes_sha256 == optimized_artifact.content_hash
+        )
+    else:
+        geometry_matches = tuple(
+            item for item in geometries if item.xyz_bytes_sha256 == optimized_artifact.content_hash
+        )
+    if len(geometry_matches) != 1:
+        raise StateIntegrityError("Opt result does not select exactly one output geometry record")
+    geometry = geometry_matches[0]
+    if (
+        geometry.run_id != source_run_id
+        or geometry.confirmed_molecule_id != binding.confirmed_molecule_id
+        or geometry.identity_hash != binding.confirmed_molecule_hash
+    ):
+        raise StateIntegrityError("Opt output geometry identity or run binding is invalid")
+    if origin is not None and (
+        origin.geometry_record_id != geometry.record_id
+        or origin.geometry_record_hash != geometry.record_hash
+        or origin.geometry_hash != geometry.geometry_hash
+        or origin.xyz_bytes_sha256 != geometry.xyz_bytes_sha256
+    ):
+        raise StateIntegrityError("Opt geometry origin does not match its geometry record")
+    try:
+        validate_xyz_bytes(optimized_bytes, geometry)
+    except Exception as error:
+        raise StateIntegrityError("optimized geometry bytes do not match its record") from error
+    return geometry, origin
 
 
 def _verify_upstream(

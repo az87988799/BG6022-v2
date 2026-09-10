@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from orca_agent.domain.p7_planning import PlanProposal, PlanProposalStep
+from orca_agent.domain.p7_planning import (
+    GeometryRef,
+    HistoryGeometryRef,
+    InitialGeometryRef,
+    PlanProposal,
+    PlanProposalStep,
+    StepOutputGeometryRef,
+    parse_geometry_ref,
+)
 from orca_agent.domain.p7_task import (
     CalculationPlan,
     CalculationRequest,
@@ -121,7 +128,7 @@ def proposal_from_operations(
     goal: str,
     requested_outputs: tuple[str, ...] | list[str] = (),
     action: str = "plan_new",
-    source_input_ref: str = "current_task.optimized_geometry",
+    source_input_ref: str | GeometryRef | None = "current_task.optimized_geometry",
 ) -> PlanProposal:
     """Create a program-owned candidate for deterministic/offline routing."""
 
@@ -134,7 +141,11 @@ def proposal_from_operations(
             input_ref = "current_molecule.initial_geometry"
             opt_key = key
         elif kind == "freq":
-            input_ref = f"{opt_key}.optimized_geometry" if opt_key else source_input_ref
+            input_ref = (
+                f"{opt_key}.optimized_geometry"
+                if opt_key
+                else source_input_ref or "current_task.optimized_geometry"
+            )
         elif kind == "sp":
             # A standalone SP is bound to the selected molecule's initial
             # geometry.  A downstream SP in Opt→SP/Opt→Freq→SP is bound to
@@ -292,7 +303,7 @@ class P7PlanCompiler:
                     operations=operations,
                 )
             if not self._valid_input_ref(
-                step.input_ref,
+                self._step_input(step),
                 expected_kind,
                 proposal.steps,
                 index,
@@ -367,7 +378,7 @@ class P7PlanCompiler:
             proposal, trusted
         )
         if operations == ("freq",) and not any(
-            self._is_reuse_ref(step.input_ref) for step in proposal.steps
+            self._is_reuse_ref(self._step_input(step)) for step in proposal.steps
         ):
             return self._clarify(
                 proposal,
@@ -484,7 +495,11 @@ class P7PlanCompiler:
         return any(visit(key) for key in graph)
 
     @staticmethod
-    def _is_reuse_ref(value: str) -> bool:
+    def _is_reuse_ref(value: str | GeometryRef) -> bool:
+        if isinstance(value, HistoryGeometryRef):
+            return True
+        if not isinstance(value, str):
+            return False
         lowered = value.casefold().strip()
         return (
             lowered.startswith("task:")
@@ -495,42 +510,53 @@ class P7PlanCompiler:
 
     @staticmethod
     def _valid_input_ref(
-        value: str,
+        value: str | GeometryRef | None,
         kind: str,
         steps: tuple[PlanProposalStep, ...],
         index: int,
         trusted: Mapping[str, Mapping[str, object]],
     ) -> bool:
-        lowered = value.casefold().strip()
+        if value is None:
+            return False
+        typed = parse_geometry_ref(value)
         if kind == "opt":
-            return lowered == "current_molecule.initial_geometry"
+            return isinstance(typed, InitialGeometryRef)
         if kind == "sp":
-            if lowered == "current_molecule.initial_geometry":
+            if isinstance(typed, InitialGeometryRef):
                 return True
-            match = re.fullmatch(r"(s\d+)\.optimized_geometry", lowered)
-            if match:
+            if isinstance(typed, StepOutputGeometryRef):
                 return any(
-                    step.key.casefold() == match.group(1)
+                    step.key.casefold() == typed.step_key.casefold()
                     and _CAPABILITY_TO_KIND.get(step.capability_id) == "opt"
                     for step in steps[:index]
                 )
             return False
         if kind == "freq":
-            if re.fullmatch(r"s\d+\.optimized_geometry", lowered):
-                key = lowered.split(".", 1)[0]
+            if isinstance(typed, StepOutputGeometryRef):
                 return any(
-                    step.key.casefold() == key
+                    step.key.casefold() == typed.step_key.casefold()
                     and _CAPABILITY_TO_KIND.get(step.capability_id) == "opt"
                     for step in steps[:index]
                 )
-            if P7PlanCompiler._is_reuse_ref(lowered):
-                alias = P7PlanCompiler._alias_from_ref(lowered)
+            if isinstance(typed, HistoryGeometryRef):
+                alias = typed.task_selector.casefold()
+                return alias in trusted
+            if P7PlanCompiler._is_reuse_ref(value):
+                alias = P7PlanCompiler._alias_from_ref(value)
                 return alias in trusted or "current_task" in trusted
             return False
         return False
 
     @staticmethod
-    def _alias_from_ref(value: str) -> str:
+    def _step_input(step: PlanProposalStep) -> str | GeometryRef | None:
+        return step.input if step.input is not None else step.input_ref
+
+    @staticmethod
+    def _alias_from_ref(value: str | GeometryRef) -> str:
+        if isinstance(value, HistoryGeometryRef):
+            return value.task_selector.casefold()
+        if not isinstance(value, str):
+            return ""
         lowered = value.casefold()
         if lowered.startswith("task:"):
             return lowered.split(":", 1)[1].split(".", 1)[0]
@@ -541,10 +567,14 @@ class P7PlanCompiler:
         proposal: PlanProposal, trusted: Mapping[str, Mapping[str, object]]
     ) -> tuple[str | None, str | None, str | None]:
         for step in proposal.steps:
-            if not P7PlanCompiler._is_reuse_ref(step.input_ref):
+            input_ref = P7PlanCompiler._step_input(step)
+            if input_ref is None or not P7PlanCompiler._is_reuse_ref(input_ref):
                 continue
-            alias = P7PlanCompiler._alias_from_ref(step.input_ref)
-            value = trusted.get(alias) or trusted.get("current_task")
+            alias = P7PlanCompiler._alias_from_ref(input_ref)
+            # A named history reference is an integrity boundary.  Falling
+            # back to the active task can bind a missing ``task:...`` ref to
+            # an unrelated completed Opt source.
+            value = trusted.get(alias)
             if value is None:
                 continue
             return (

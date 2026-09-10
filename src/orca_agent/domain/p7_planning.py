@@ -8,8 +8,9 @@ approval boundaries.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -26,6 +27,44 @@ class PlanningModel(BaseModel):
     """Strict immutable planning value object."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, validate_default=True)
+
+
+class InitialGeometryRef(PlanningModel):
+    """The geometry slot produced by the current molecule preparation."""
+
+    source: Literal["initial"]
+
+
+class StepOutputGeometryRef(PlanningModel):
+    """A geometry output produced by a named candidate step."""
+
+    source: Literal["step_output"]
+    step_key: str
+    output: Literal["optimized_geometry"]
+
+    @field_validator("step_key")
+    @classmethod
+    def _step_key(cls, value: str) -> str:
+        return _text(value, "step_key", maximum=128)
+
+
+class HistoryGeometryRef(PlanningModel):
+    """A geometry output selected from a completed task in this conversation."""
+
+    source: Literal["history"]
+    task_selector: str
+    output: Literal["optimized_geometry"]
+
+    @field_validator("task_selector")
+    @classmethod
+    def _task_selector(cls, value: str) -> str:
+        return _text(value, "task_selector", maximum=256)
+
+
+GeometryRef = Annotated[
+    InitialGeometryRef | StepOutputGeometryRef | HistoryGeometryRef,
+    Field(discriminator="source"),
+]
 
 
 def _text(value: str, name: str, *, maximum: int = 2048) -> str:
@@ -63,20 +102,81 @@ def _record_hash(model_type: type[BaseModel], values: dict[str, object], field_n
     return sha256_hex(probe.model_dump(mode="json", exclude={field_name}))
 
 
+def parse_geometry_ref(value: str | GeometryRef) -> GeometryRef | None:
+    """Parse one historical logical reference into the typed ref union.
+
+    Unknown legacy strings intentionally return ``None`` instead of being
+    guessed as an initial geometry.  The compiler can then report the exact
+    invalid reference while old records remain readable.
+    """
+
+    if isinstance(value, (InitialGeometryRef, StepOutputGeometryRef, HistoryGeometryRef)):
+        return value
+    if not isinstance(value, str):
+        return None
+    lowered = value.casefold().strip()
+    if lowered in {"initial", "current_molecule.initial_geometry"}:
+        return InitialGeometryRef(source="initial")
+    match = re.fullmatch(r"([a-zA-Z][a-zA-Z0-9_-]*)\.optimized_geometry", lowered)
+    if match and not match.group(1).startswith(("task:", "current_task")):
+        return StepOutputGeometryRef(
+            source="step_output", step_key=match.group(1), output="optimized_geometry"
+        )
+    if lowered.startswith("task:"):
+        selector = lowered.split(":", 1)[1].split(".", 1)[0].strip()
+        if selector:
+            return HistoryGeometryRef(
+                source="history", task_selector=selector, output="optimized_geometry"
+            )
+    if lowered.startswith("current_task."):
+        return HistoryGeometryRef(
+            source="history", task_selector="current_task", output="optimized_geometry"
+        )
+    if lowered.startswith("completed_opt.") or lowered.startswith("existing_opt."):
+        return HistoryGeometryRef(
+            source="history", task_selector="current_task", output="optimized_geometry"
+        )
+    return None
+
+
+def geometry_ref_to_legacy(value: str | GeometryRef) -> str:
+    """Return the one compatibility spelling used by old P7 readers."""
+
+    if isinstance(value, InitialGeometryRef):
+        return "current_molecule.initial_geometry"
+    if isinstance(value, StepOutputGeometryRef):
+        return f"{value.step_key}.optimized_geometry"
+    if isinstance(value, HistoryGeometryRef):
+        return f"task:{value.task_selector}.optimized_geometry"
+    if isinstance(value, str):
+        return value.strip()
+    raise TypeError("unsupported geometry reference")
+
+
 class PlanProposalStep(PlanningModel):
     """One model-proposed node before the compiler creates trusted IDs."""
 
     key: str
     capability_id: str
-    input_ref: str
+    # ``input_ref`` is retained for v1/v4 readers.  New intake uses the
+    # typed ``input`` branch; the compiler resolves both through one helper.
+    input_ref: str | GeometryRef | None = None
+    input: GeometryRef | None = None
     depends_on: tuple[str, ...] = ()
     purpose: str
     why: str
 
-    @field_validator("key", "capability_id", "input_ref", "purpose", "why")
+    @field_validator("key", "capability_id", "purpose", "why")
     @classmethod
     def _step_text(cls, value: str, info: object) -> str:
         return _text(value, getattr(info, "field_name", "step field"), maximum=512)
+
+    @field_validator("input_ref")
+    @classmethod
+    def _input_ref(cls, value: str | GeometryRef | None) -> str | GeometryRef | None:
+        if value is None or not isinstance(value, str):
+            return value
+        return _text(value, "input_ref", maximum=512)
 
     @field_validator("depends_on")
     @classmethod
@@ -85,6 +185,25 @@ class PlanProposalStep(PlanningModel):
         if len(cleaned) != len(set(cleaned)):
             raise ValueError("step dependencies must not repeat")
         return cleaned
+
+    @model_validator(mode="after")
+    def _typed_input_compatibility(self) -> PlanProposalStep:
+        if self.input is None and self.input_ref is None:
+            raise ValueError("a plan step requires a typed input or legacy input_ref")
+        if self.input is not None:
+            legacy = geometry_ref_to_legacy(self.input)
+            if self.input_ref is None:
+                object.__setattr__(self, "input_ref", legacy)
+            else:
+                legacy_typed = parse_geometry_ref(self.input_ref)
+                if legacy_typed is None or legacy_typed != self.input:
+                    raise ValueError("typed input and input_ref refer to different geometries")
+        elif self.input_ref is not None:
+            typed = parse_geometry_ref(self.input_ref)
+            if typed is None:
+                raise ValueError("input_ref is not a recognized geometry reference")
+            object.__setattr__(self, "input", typed)
+        return self
 
 
 class PlanProposal(PlanningModel):
@@ -254,10 +373,16 @@ CandidatePlan = PlanProposal
 __all__ = [
     "CandidatePlan",
     "CandidatePlanStep",
+    "GeometryRef",
+    "HistoryGeometryRef",
+    "InitialGeometryRef",
     "PLANNING_RECORD_SCHEMA_VERSION",
     "PLANNING_SCHEMA_VERSION",
     "PlanFeedback",
     "PlanProposal",
     "PlanProposalStep",
     "PlanningRecord",
+    "StepOutputGeometryRef",
+    "geometry_ref_to_legacy",
+    "parse_geometry_ref",
 ]

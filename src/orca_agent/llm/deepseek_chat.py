@@ -13,6 +13,7 @@ from orca_agent.llm.ports import ModelCallRequest, ModelCallResponse, ModelMessa
 from orca_agent.orchestration.p7_versions import (
     TURN_SCHEMA_V3,
     TURN_SCHEMA_V4,
+    TURN_SCHEMA_V5,
 )
 
 DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -43,8 +44,8 @@ class DeepSeekChatAdapter:
         self.endpoint = endpoint
         self.timeout_seconds = timeout_seconds
         self.transport = transport
-        if intake_schema_version not in {TURN_SCHEMA_V3, TURN_SCHEMA_V4}:
-            raise ValueError("intake_schema_version must be p7.turn.v3 or p7.turn.v4")
+        if intake_schema_version not in {TURN_SCHEMA_V3, TURN_SCHEMA_V4, TURN_SCHEMA_V5}:
+            raise ValueError("intake_schema_version must be p7.turn.v3, v4, or v5")
         self.intake_schema_version = intake_schema_version
         self.last_request: ModelCallRequest | None = None
         self.last_request_body: dict[str, object] | None = None
@@ -271,7 +272,9 @@ class DeepSeekChatAdapter:
 
 
 def _system_prompt(schema_version: str = TURN_SCHEMA_V3) -> str:
-    if schema_version == TURN_SCHEMA_V4:
+    if schema_version == TURN_SCHEMA_V5:
+        prompt_name, schema_name = "intake.v5.prompt.txt", "intake.v5.schema.json"
+    elif schema_version == TURN_SCHEMA_V4:
         prompt_name, schema_name = "intake.v4.prompt.txt", "intake.v4.schema.json"
     else:
         prompt_name, schema_name = "intake.v3.prompt.txt", "intake.v3.schema.json"
